@@ -138,9 +138,9 @@ thousands of files belong to Tier 2 perf runs, not Tier 1.
 
 Via `proptest` (`core/daemon/tests/properties.rs`). High-value
 invariants where random inputs catch the edge cases humans miss. Each
-property runs **256 cases** by default (`PROPTEST_CASES` raises it for
-a longer run), enough to catch bugs and fast enough for the Tier 1
-budget.
+property runs **256 cases** by default, enough to catch bugs and fast
+enough for the Tier 1 budget. `PROPTEST_CASES` raises it, and the
+release gate runs each property 4 000 times (`scripts/perf.sh`).
 
 Properties that exist:
 
@@ -155,17 +155,18 @@ Properties that exist:
   between attempts (allowing for the symmetric jitter band), the delay
   is never zero, and it never exceeds `RETRY_MAX_DELAY_MILLIS` plus
   its jitter.
+- **Durable-queue order**: intents of one priority are leased in the
+  order they were stored, whatever their paths and the size of a
+  lease batch, and each one time.
+- **Conflict copy names**: the name of a copy gives back the file it
+  is a copy of, the device, the time, and the sequence number of a
+  name that was taken, and the copy stays next to its original.
 
 Properties still to add:
 
 - **Throttle monotonicity**: monotonic input pressure produces
   monotonic state transitions; the controller never moves from
   `Throttled` to `Idle` while CPU pressure rises.
-- **Conflict suffix determinism**: identical `(path, device_id,
-  timestamp_ms)` inputs produce an identical conflict suffix across
-  runs.
-- **Durable queue FIFO**: enqueue-then-lease within the same priority
-  returns FIFO order.
 - **Ignore-rule precedence**: given overlapping rules, the decision
   is deterministic per the documented precedence.
 - **IPC handshake**: any `(app_version, daemon_version)` pair in
@@ -179,7 +180,14 @@ the in-memory fake and the real native implementation on each shipping
 OS. This catches fake-vs-native drift, the single most likely source
 of "works in tests, breaks in prod".
 
-Two traits have one today. `SecretStore` runs its body against the
+Every trait but `ServiceInstaller` has one today: its native
+implementation registers a real job with the service manager of the
+host, so its round trip runs in Tier E2E with `--full` and in Tier VM
+(`docs/tasks/core.md`). `TrashBin`, `ProxySettings`,
+`FilesystemCapabilities` (the tags of a file), `IdleNotifier`,
+`PlatformMetricsSampler`, and `ProcessSupervisor` each have one body
+next to the trait that the fake and the native implementation run.
+`SecretStore` runs its body against the
 in-memory fake, the login keychain on macOS, and the command shim on
 Linux (a file-backed shell script standing in for `pass`). `FsWatcher`
 runs `core/platform/src/fs_watch/contract.rs` against the fake on
@@ -193,7 +201,7 @@ no OS events, so the harness mirrors each action through a clone of
 the watcher's channel; the native watcher gets nothing mirrored and
 the OS is the source. Before its first action the body waits for an
 event about a probe file, which proves the backend is live; it does not
-sleep. The remaining traits are open work (`docs/tasks/core.md`).
+sleep.
 
 Trait-specific invariants:
 
@@ -410,9 +418,9 @@ value", the test is not worth writing.
   itself. The script builds the tests first and times only the run, so
   a cold cache cannot fail the budget and a warm one cannot hide a slow
   test.
-- **Tier 2**: `perf.yml`. Runs one soak cell with the SLO checks
-  (`scripts/perf.sh`). Long property cases, fuzz targets, and `loom`
-  tests join it when they exist. A release gate (`release.yml` calls
+- **Tier 2**: `perf.yml`. Runs the property tests at 4 000 cases each
+  and one soak cell with the SLO checks (`scripts/perf.sh`). Fuzz
+  targets and `loom` tests join it when they exist. A release gate (`release.yml` calls
   it) and on demand, never a PR gate.
 - **Tier S**: `soak.yml`, a release gate (`release.yml` calls it)
   and on demand, never a PR gate. Long soak cells across modes, loads,
@@ -473,10 +481,18 @@ second copy of the Rust policy.
 **Logic + shape + binary tests.** Every command with `--json` output
 has an explicit shape test in its module. `core/cli/tests/binary.rs`
 spawns the built `vapor` on every CI OS with a throwaway `VAPOR_DIR`
-and locks the shell contract: exit codes, stdout for results and
+and locks the shell contract: the exit codes (the table in
+`core/cli/README.md`) on the commands that need no service of the
+host, stdout for results and
 stderr for errors (never half a document on stdout), the typed
 `config set`, the empty-state shapes of `decisions` and `trash`, the
-`doctor --json` shape, and death on a closed pipe. The daemon paths
+`doctor --json` shape, and death on a closed pipe.
+`core/cli/tests/fake_daemon.rs` runs the commands that talk to the
+daemon against a stand-in that answers on the socket with the server
+half of `vapor-ipc`: what each command sends and prints, a request
+that is refused, a daemon of another protocol version, and a daemon
+that accepts the connection and gives no answer, where the command
+must end with an error and never hang. The daemon paths
 (`vapor service install` / `run` / `status`) are Tier E2E.
 
 **No interactive TTY tests.** No color-code assertions, no

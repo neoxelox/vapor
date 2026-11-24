@@ -48,7 +48,7 @@ vapor init [--provider --local --cloud --mode --token - --auto-launch on|off] [-
 vapor status [--json]                   # what the daemon does and why
 vapor pause|resume [--json]
 vapor reconcile [--json]                # scan now: any throttle state but suspended, plus the boost
-vapor profiles list|add|remove          # the folders Vapor syncs; `init` runs the first add
+vapor profiles list|add|enable|disable|rename|remove   # the folders Vapor syncs; `init` runs the first add
 vapor decisions list|show|resolve       # conflicts and parked questions (resolve --choose <option>)
 vapor ignored [--profile <id>] [--json] # what the ignore rules keep out of sync, with the rule
 vapor trash list|restore|empty          # what Vapor removed from this device (empty asks, or --yes)

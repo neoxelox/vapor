@@ -60,6 +60,21 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn SecTrustedApplicationCreateFromPath(path: *const c_char, app: *mut CFTypeRef) -> OSStatus;
     fn SecKeychainSetUserInteractionAllowed(state: u8) -> OSStatus;
+    fn SecKeychainGetStatus(keychain: CFTypeRef, status: *mut u32) -> OSStatus;
+}
+
+/// The bit of `SecKeychainGetStatus` that is set while a keychain is
+/// unlocked (`kSecUnlockStateStatus`).
+const UNLOCK_STATE: u32 = 1;
+
+/// Whether the default keychain, the login keychain of the user, is
+/// locked. `false` when its state cannot be read.
+fn default_keychain_is_locked() -> bool {
+    let mut state: u32 = 0;
+    // SAFETY: a null keychain reference names the default keychain,
+    // and `state` is a valid out-pointer for the length of the call.
+    let status = unsafe { SecKeychainGetStatus(ptr::null(), &mut state) };
+    status == errSecSuccess && state & UNLOCK_STATE == 0
 }
 
 /// Keychain-backed store. Cheap to construct; every call goes straight
@@ -247,7 +262,16 @@ impl SecretStore for NativeSecretStore {
         // out-pointer. On success Keychain Services hands us a +1
         // reference that `wrap_under_create_rule` releases on drop.
         let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
-        check(status, name)?;
+        match check(status, name) {
+            // A locked keychain refuses every read. It does not say
+            // that the item is gone or that this binary may not have it.
+            Err(SecretStoreError::Backend(error)) if default_keychain_is_locked() => {
+                return Err(SecretStoreError::Unavailable(format!(
+                    "the login keychain is locked ({error})"
+                )));
+            }
+            other => other?,
+        }
         if result.is_null() {
             return Err(SecretStoreError::NotFound(name.to_string()));
         }
@@ -495,4 +519,18 @@ fn companion_binaries() -> Vec<PathBuf> {
         found.push(candidate);
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_keychain_that_takes_a_write_is_not_read_as_locked() {
+        let service = format!("sh.arn.vapor.test-lock-{}", std::process::id());
+        let store = NativeSecretStore::with_namespace(&service);
+        store.set("probe", "v").expect("the keychain takes a write");
+        assert!(!default_keychain_is_locked());
+        store.delete("probe").expect("cleanup");
+    }
 }

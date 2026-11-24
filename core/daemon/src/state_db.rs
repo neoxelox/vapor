@@ -178,7 +178,59 @@ pub struct DurableFailedIntentRecord {
 pub struct DurableStateDb {
     path: PathBuf,
     connection: Connection,
+    /// Folders that the index holds under one spelling only, as the
+    /// last look found them ([`Self::sync_index_row_spelled_otherwise`]).
+    /// The look for another spelling reads every index entry under a
+    /// folder when there is none, and the removal of a folder is
+    /// planned again each time it has to wait. Only a write that adds a
+    /// path to the index can add a spelling, so each such write empties
+    /// the set.
+    one_spelling: std::cell::RefCell<std::collections::HashSet<PathBuf>>,
+    /// A batch is open ([`Self::begin_batch`]): every write since then
+    /// is part of one transaction, which [`Self::commit_batch`] ends.
+    batch_open: bool,
 }
+
+/// One write of several statements that lands whole or not at all: a
+/// transaction of its own, or a savepoint inside the batch that is
+/// open. Dropped without a commit, it is taken back.
+enum Atomic<'connection> {
+    Transaction(rusqlite::Transaction<'connection>),
+    Savepoint(rusqlite::Savepoint<'connection>),
+}
+
+impl<'connection> Atomic<'connection> {
+    fn begin(connection: &'connection mut Connection, in_batch: bool) -> rusqlite::Result<Self> {
+        if in_batch {
+            connection.savepoint().map(Self::Savepoint)
+        } else {
+            connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map(Self::Transaction)
+        }
+    }
+
+    fn commit(self) -> rusqlite::Result<()> {
+        match self {
+            Self::Transaction(transaction) => transaction.commit(),
+            Self::Savepoint(savepoint) => savepoint.commit(),
+        }
+    }
+}
+
+impl std::ops::Deref for Atomic<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match self {
+            Self::Transaction(transaction) => transaction,
+            Self::Savepoint(savepoint) => savepoint,
+        }
+    }
+}
+
+/// The most folders [`DurableStateDb::one_spelling`] remembers.
+const ONE_SPELLING_MEMO_LIMIT: usize = 4_096;
 
 impl DurableStateDb {
     pub fn open_default() -> Result<Self, StateDbError> {
@@ -281,22 +333,83 @@ impl DurableStateDb {
 
         let mut connection = Connection::open(&path)?;
         runtime_paths::ensure_private_file(&path)?;
-        configure_connection(&connection)?;
+        configure_connection(&mut connection)?;
         ensure_schema(&mut connection)?;
 
-        Ok(Self { path, connection })
+        Ok(Self {
+            path,
+            connection,
+            one_spelling: Default::default(),
+            batch_open: false,
+        })
     }
 
     /// A private, process-local database: the inert runtime a parked
     /// profile is composed with when its own state DB cannot be read.
     pub fn open_in_memory() -> Result<Self, StateDbError> {
         let mut connection = Connection::open_in_memory()?;
-        configure_connection(&connection)?;
+        configure_connection(&mut connection)?;
         ensure_schema(&mut connection)?;
         Ok(Self {
             path: PathBuf::from(":memory:"),
             connection,
+            one_spelling: Default::default(),
+            batch_open: false,
         })
+    }
+
+    /// Starts a batch: every write until [`Self::commit_batch`] is one
+    /// transaction, and so one write to the log of the database. The
+    /// runtime opens one for each tick. A burst of small files costs
+    /// about three writes for each file; each on its own was a write to
+    /// the log, which on macOS waits behind the flush of the drive that
+    /// the transfers of the same moment ask for.
+    ///
+    /// A daemon that is killed inside a batch loses the writes of that
+    /// batch and nothing else: the intents of that tick are leased or
+    /// pending again at the next start, and each one is planned against
+    /// what the two sides hold then.
+    pub fn begin_batch(&mut self) -> Result<(), StateDbError> {
+        if !self.batch_open {
+            self.connection.execute_batch("BEGIN IMMEDIATE")?;
+            self.batch_open = true;
+        }
+        Ok(())
+    }
+
+    /// Ends the batch that is open, when there is one. A commit that
+    /// fails leaves no transaction behind: what it held is rolled back,
+    /// and the error says that the writes of the batch are gone.
+    pub fn commit_batch(&mut self) -> Result<(), StateDbError> {
+        if self.batch_open {
+            self.batch_open = false;
+            if let Err(error) = self.connection.execute_batch("COMMIT") {
+                if !self.connection.is_autocommit() {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                }
+                // The memo holds answers that the lost writes gave.
+                self.one_spelling.get_mut().clear();
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes the commit of the batch that is open fail, as a full drive
+    /// does: a row that breaks a rule which is checked at the commit.
+    #[cfg(test)]
+    pub(crate) fn fail_the_commit_of_the_open_batch(&mut self) {
+        assert!(self.batch_open, "a batch is open");
+        self.connection
+            .execute_batch(
+                "CREATE TEMP TABLE commit_fault_parent (id INTEGER PRIMARY KEY);
+                 CREATE TEMP TABLE commit_fault_child (
+                     parent INTEGER REFERENCES commit_fault_parent(id)
+                         DEFERRABLE INITIALLY DEFERRED
+                 );
+                 INSERT INTO commit_fault_child (parent) VALUES (1);",
+            )
+            .expect("a row that fails the commit");
     }
 
     pub fn path(&self) -> &Path {
@@ -453,9 +566,7 @@ impl DurableStateDb {
         path: &Path,
         now: SystemTime,
     ) -> Result<DurableIntentRecord, StateDbError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = Atomic::begin(&mut self.connection, self.batch_open)?;
         let path_text = path_to_text(path)?;
         let existing = transaction
             .query_row(
@@ -843,9 +954,7 @@ impl DurableStateDb {
             None
         };
 
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = Atomic::begin(&mut self.connection, self.batch_open)?;
         let changed = transaction.execute(
             "UPDATE queue_intents
              SET state = ?,
@@ -903,9 +1012,7 @@ impl DurableStateDb {
             )));
         };
         let failed_at_ms = system_time_to_millis(failed_at)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = Atomic::begin(&mut self.connection, self.batch_open)?;
         let inserted = transaction.execute(
             "INSERT INTO failed_intents (
                  id,
@@ -1190,9 +1297,7 @@ impl DurableStateDb {
             return Ok(0);
         }
 
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = Atomic::begin(&mut self.connection, self.batch_open)?;
         let mut inserted = 0usize;
         for (path, kind, observed_at) in intents {
             let path_text = path_to_text(path)?;
@@ -1345,6 +1450,7 @@ impl DurableStateDb {
         let local_modified_at_ms = local_modified_at.map(system_time_to_millis).transpose()?;
         let remote_modified_at_ms = remote_modified_at.map(system_time_to_millis).transpose()?;
         let path_text = path_to_text(path)?;
+        self.one_spelling.get_mut().clear();
         self.connection.execute(
             "INSERT INTO sync_index
                  (path_text, fold_key, content_hash, size_bytes, local_modified_at_ms,
@@ -1501,9 +1607,8 @@ impl DurableStateDb {
     /// spelling of its name. A row already at `to` is replaced.
     pub fn rekey_sync_index(&mut self, from: &Path, to: &Path) -> Result<(), StateDbError> {
         let (from, to) = (path_to_text(from)?, path_to_text(to)?);
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.one_spelling.get_mut().clear();
+        let transaction = Atomic::begin(&mut self.connection, self.batch_open)?;
         let moved = transaction
             .query_row(
                 "SELECT 1 FROM sync_index WHERE path_text = ?",
@@ -1527,10 +1632,9 @@ impl DurableStateDb {
     /// `to`: the same folder under a new spelling of its name.
     pub fn rekey_sync_index_under(&mut self, from: &Path, to: &Path) -> Result<(), StateDbError> {
         let (lower, upper) = rows_under_bounds(from)?;
+        self.one_spelling.get_mut().clear();
         let to = format!("{}{}", path_to_text(to)?, std::path::MAIN_SEPARATOR);
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = Atomic::begin(&mut self.connection, self.batch_open)?;
         transaction.execute(
             "DELETE FROM sync_index WHERE path_text IN (
                  SELECT ?1 || substr(path_text, ?2) FROM sync_index
@@ -1578,8 +1682,14 @@ impl DurableStateDb {
         if let Some(twin) = twin {
             return Ok(Some(path_from_text(twin)));
         }
+        if self.one_spelling.borrow().contains(path) {
+            return Ok(None);
+        }
         let (lower, upper) = rows_under_bounds(path)?;
         let (folded_lower, folded_upper) = rows_under_bounds(Path::new(&folded))?;
+        // With no other spelling below, this reads every index entry
+        // under the folder: no index answers "in this range of folded
+        // keys and outside that range of paths" with a seek.
         let below: Option<String> = self
             .connection
             .prepare_cached(
@@ -1592,6 +1702,13 @@ impl DurableStateDb {
                 row.get(0)
             })
             .optional()?;
+        if below.is_none() {
+            let mut known = self.one_spelling.borrow_mut();
+            if known.len() >= ONE_SPELLING_MEMO_LIMIT {
+                known.clear();
+            }
+            known.insert(path.to_path_buf());
+        }
         Ok(below.map(path_from_text))
     }
 
@@ -2708,7 +2825,7 @@ fn is_corruption_error(error: &rusqlite::Error) -> bool {
     )
 }
 
-fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
+fn configure_connection(connection: &mut Connection) -> Result<(), StateDbError> {
     // `synchronous = NORMAL` is the documented durability point for WAL
     // mode: the database can never corrupt, and at most the final
     // transaction(s) before an OS crash / power loss are rolled back.
@@ -2718,10 +2835,29 @@ fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;",
+         PRAGMA foreign_keys = ON;",
     )?;
+    connection.busy_handler(Some(wait_for_the_lock))?;
     Ok(())
+}
+
+/// How many times a connection asks again for a lock that another
+/// connection holds, one millisecond apart: about five seconds.
+const LOCK_TRIES: i32 = 5_000;
+
+/// The wait for a lock that another connection holds. SQLite's own
+/// wait grows to a tenth of a second between two tries. A daemon in a
+/// burst holds the write lock for the length of each tick and frees it
+/// for an instant between two ticks, so a command that asked ten times
+/// a second waited up to three seconds for its turn (measured, with a
+/// burst of 12 000 files). At one try each millisecond the longest
+/// wait was a third of a second.
+fn wait_for_the_lock(tries: i32) -> bool {
+    if tries >= LOCK_TRIES {
+        return false;
+    }
+    std::thread::sleep(Duration::from_millis(1));
+    true
 }
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), StateDbError> {
@@ -3505,6 +3641,40 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_that_fails_loses_the_batch_and_leaves_the_database_usable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let kept = PathBuf::from("/tmp/vapor-root/kept.txt");
+        let lost = PathBuf::from("/tmp/vapor-root/lost.txt");
+        database
+            .enqueue_intent(&kept, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue before the batch");
+
+        database.begin_batch().expect("begin");
+        database
+            .enqueue_intent(&lost, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue in the batch");
+        database.fail_the_commit_of_the_open_batch();
+        database
+            .commit_batch()
+            .expect_err("the commit of the batch fails");
+        assert_eq!(
+            database.queue_depth().expect("depth"),
+            1,
+            "the write of the batch is gone, and what came before it stays"
+        );
+
+        // No transaction is left open: the next batch begins and ends.
+        database.begin_batch().expect("begin again");
+        database
+            .enqueue_intent(&lost, PendingIntentKind::Upload, timestamp_ms(200))
+            .expect("enqueue again");
+        database.commit_batch().expect("commit");
+        assert_eq!(database.queue_depth().expect("depth"), 2);
+    }
+
+    #[test]
     fn requeue_leased_intent_preserves_retry_metadata() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
@@ -4111,6 +4281,177 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_is_one_transaction_that_ends_with_its_commit() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.sqlite");
+        let mut daemon = DurableStateDb::open(&path).expect("open");
+        let reader = DurableStateDb::open(&path).expect("second connection");
+        let file = |name: &str| PathBuf::from("/tmp/vapor-root").join(name);
+
+        daemon.begin_batch().expect("begin");
+        daemon
+            .enqueue_intent(&file("a.txt"), PendingIntentKind::Upload, timestamp_ms(1))
+            .expect("one statement");
+        // A write of several statements is a part of the batch, not a
+        // transaction of its own.
+        daemon
+            .enqueue_intents_coalesced(
+                &[(file("b.txt"), PendingIntentKind::Upload, timestamp_ms(2))],
+                crate::safeguards::IntentSource::Fresh,
+            )
+            .expect("several statements");
+        daemon
+            .set_sync_index(
+                &file("photos/a.jpg"),
+                "hash",
+                1,
+                None,
+                None,
+                "op",
+                timestamp_ms(1),
+            )
+            .expect("seed");
+        daemon
+            .rekey_sync_index_under(&file("photos"), &file("Photos"))
+            .expect("several statements");
+        assert_eq!(daemon.pending_depth().expect("own view"), 2);
+        assert_eq!(
+            reader.pending_depth().expect("other view"),
+            0,
+            "nothing of an open batch is written yet"
+        );
+
+        daemon.commit_batch().expect("commit");
+        assert_eq!(reader.pending_depth().expect("other view"), 2);
+        assert!(
+            reader
+                .sync_index(&file("Photos/a.jpg"))
+                .expect("read")
+                .is_some()
+        );
+
+        // With no batch open, each write lands on its own, as before,
+        // and a commit with nothing open does nothing.
+        daemon.commit_batch().expect("nothing to commit");
+        daemon
+            .enqueue_intent(&file("c.txt"), PendingIntentKind::Upload, timestamp_ms(3))
+            .expect("enqueue");
+        assert_eq!(reader.pending_depth().expect("other view"), 3);
+    }
+
+    #[test]
+    fn a_batch_that_is_never_committed_leaves_the_database_as_it_was() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.sqlite");
+        {
+            let mut daemon = DurableStateDb::open(&path).expect("open");
+            daemon
+                .enqueue_intent(
+                    Path::new("/tmp/vapor-root/before.txt"),
+                    PendingIntentKind::Upload,
+                    timestamp_ms(1),
+                )
+                .expect("enqueue");
+            daemon.begin_batch().expect("begin");
+            daemon
+                .enqueue_intent(
+                    Path::new("/tmp/vapor-root/in-the-batch.txt"),
+                    PendingIntentKind::Upload,
+                    timestamp_ms(2),
+                )
+                .expect("enqueue");
+            // The daemon is killed here: the connection goes with no
+            // commit.
+        }
+        let reopened = DurableStateDb::open(&path).expect("reopen");
+        assert_eq!(
+            reopened.pending_depth().expect("count"),
+            1,
+            "the writes of the batch are gone, and nothing else is"
+        );
+    }
+
+    #[test]
+    fn a_writer_waits_for_the_lock_of_another_connection() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.sqlite");
+        let mut daemon = DurableStateDb::open(&path).expect("open");
+        let mut command = DurableStateDb::open(&path).expect("second connection");
+        daemon.begin_batch().expect("begin");
+        let (asking, asked) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            asking.send(()).expect("signal");
+            command.enqueue_intent(
+                Path::new("/tmp/vapor-root/answer.txt"),
+                PendingIntentKind::Upload,
+                timestamp_ms(1),
+            )
+        });
+        // The lock goes while the other connection asks for it or just
+        // before: both orders end with its write in the database.
+        asked.recv().expect("the writer started");
+        daemon.commit_batch().expect("commit");
+        writer
+            .join()
+            .expect("writer thread")
+            .expect("the write waited for the lock and landed");
+        assert_eq!(daemon.pending_depth().expect("count"), 1);
+    }
+
+    #[test]
+    fn a_folder_found_under_one_spelling_is_looked_at_again_only_after_an_index_write() {
+        let mut database = DurableStateDb::open_in_memory().expect("open");
+        let root = PathBuf::from("/tmp/vapor-root");
+        let seed = |database: &mut DurableStateDb, path: &Path| {
+            database
+                .set_sync_index(path, "hash", 1, None, None, "op", timestamp_ms(1))
+                .expect("seed");
+        };
+        let photos = root.join("Photos");
+        seed(&mut database, &photos.join("a.jpg"));
+        seed(&mut database, &photos.join("2024/b.jpg"));
+        let look = |database: &DurableStateDb| {
+            database
+                .sync_index_row_spelled_otherwise(&photos)
+                .expect("look")
+        };
+        let remembered =
+            |database: &DurableStateDb| database.one_spelling.borrow().contains(&photos);
+
+        assert_eq!(look(&database), None);
+        assert!(remembered(&database), "the answer needs no second scan");
+        assert_eq!(look(&database), None);
+
+        // A row that leaves cannot add a spelling: the answer holds.
+        database
+            .remove_sync_index(&photos.join("a.jpg"))
+            .expect("remove");
+        assert!(remembered(&database));
+
+        // A row under another spelling of the folder: the next look
+        // finds it.
+        seed(&mut database, &root.join("photos/c.jpg"));
+        assert!(!remembered(&database));
+        assert_eq!(look(&database), Some(root.join("photos/c.jpg")));
+        assert!(
+            !remembered(&database),
+            "a folder with two spellings is never remembered as having one"
+        );
+
+        // The rows follow the folder to one spelling, and the look that
+        // comes after reads the index again.
+        database
+            .rekey_sync_index_under(&root.join("photos"), &photos)
+            .expect("rekey");
+        assert_eq!(look(&database), None);
+        assert!(remembered(&database));
+        database
+            .rekey_sync_index(&photos.join("c.jpg"), &photos.join("C.jpg"))
+            .expect("rekey");
+        assert!(!remembered(&database));
+    }
+
+    #[test]
     fn index_rows_follow_a_file_or_a_folder_to_a_new_spelling() {
         let mut database = DurableStateDb::open_in_memory().expect("open");
         let root = PathBuf::from("/tmp/vapor-root");
@@ -4188,8 +4529,8 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent directory");
         }
 
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
+        let mut connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&mut connection).expect("configure connection");
         connection
             .execute_batch(
                 "CREATE TABLE schema_meta (
@@ -4584,8 +4925,8 @@ mod tests {
         if let Some(parent) = database_path.parent() {
             fs::create_dir_all(parent).expect("create parent directory");
         }
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
+        let mut connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&mut connection).expect("configure connection");
         connection
             .execute_batch(
                 "CREATE TABLE schema_meta (
@@ -4681,8 +5022,8 @@ mod tests {
             .expect("enqueue upload intent");
         drop(database);
 
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
+        let mut connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&mut connection).expect("configure connection");
         connection
             .execute(
                 "UPDATE queue_intents SET attempt_count = ? WHERE id = ?",

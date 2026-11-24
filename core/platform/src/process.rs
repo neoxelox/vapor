@@ -141,21 +141,24 @@ pub use windows_impl::NativeProcessSupervisor;
 mod tests {
     use super::*;
 
-    #[test]
-    fn noop_supervisor_accepts_handler_without_error() {
-        let supervisor = NoopProcessSupervisor;
-        let result = supervisor.register_shutdown_handler(|| {});
-        assert!(result.is_ok());
+    /// What every implementation holds to: a handler is taken, or the
+    /// platform says that it has no way to call one yet. The contract
+    /// raises no signal: that would reach every other test of the
+    /// binary.
+    fn exercise_contract(supervisor: &impl ProcessSupervisor) {
+        match supervisor.register_shutdown_handler(|| {}) {
+            Ok(()) | Err(ProcessSupervisorError::Unsupported(_)) => {}
+            Err(error) => panic!("the handler was refused: {error}"),
+        }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn native_supervisor_can_register_handler_without_panicking() {
-        // We don't actually raise a signal in tests (that would race
-        // every other test in the binary). The contract we exercise is
-        // that the handler installs cleanly.
-        let supervisor = NativeProcessSupervisor::new();
-        let result = supervisor.register_shutdown_handler(|| {});
-        assert!(result.is_ok());
+    fn the_fake_supervisor_satisfies_the_contract() {
+        exercise_contract(&NoopProcessSupervisor);
+    }
+
+    #[test]
+    fn the_native_supervisor_satisfies_the_contract() {
+        exercise_contract(&NativeProcessSupervisor::new());
     }
 }

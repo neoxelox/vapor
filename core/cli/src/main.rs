@@ -325,6 +325,32 @@ enum ProfilesAction {
         #[arg(long)]
         json: bool,
     },
+    /// Start a profile that was disabled. A running daemon starts it
+    /// within a few seconds.
+    Enable {
+        id: String,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop syncing a profile and keep what Vapor knows about it: its
+    /// sync state, its sign-in, and the files on both sides. `enable`
+    /// starts it again. The other profiles go on.
+    Disable {
+        id: String,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Give a profile another name. The name is what the surfaces
+    /// show; the id stays.
+    Rename {
+        id: String,
+        name: String,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a profile: Vapor stops syncing its folders and forgets
     /// its sync state and its sign-in. The files on both sides stay.
     /// The daemon must be stopped.
@@ -381,6 +407,13 @@ enum AuthAction {
         /// Print JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Answers the browser on the address of a sign-in that timed out.
+    /// `vapor auth login` starts it; it is not for a person to run.
+    #[command(hide = true)]
+    Expired {
+        #[arg(long)]
+        port: u16,
     },
 }
 
@@ -519,7 +552,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 }
                 ConfigAction::Set { key, value } => {
                     config_cmd::set(&path, &key, &value).map_err(|e| e.to_string())?;
-                    println!("{}", config_cmd::apply_hint(&key, &value));
+                    println!("{}", config_cmd::set_hint(&path, &key, &value));
                     Ok(ExitCode::SUCCESS)
                 }
             }
@@ -635,9 +668,35 @@ impl init_cmd::InitHost for NativeInitHost {
         provider: &str,
         profile_id: &str,
         cloud_root: &str,
+        sign_in: Option<&str>,
     ) -> init_cmd::CloudFolder {
         use init_cmd::CloudFolder;
-        let provider = match vapor_providers::select_provider_for_profile(provider, profile_id) {
+        let gdrive = provider == vapor_shared::constants::provider::GDRIVE;
+        // A sign-in from an earlier run is in the secret store. On a
+        // build with no team signature the store gives it to the
+        // daemon binary only. The sign-in did not fail, and the line
+        // must not read as if it had.
+        if sign_in.is_none()
+            && gdrive
+            && let Ok(store) = vapor_platform::open_store(vapor_platform::SecretAccess::Background)
+            && let Err(vapor_platform::SecretStoreError::Backend(_)) =
+                store.get(&auth_cmd::token_name(profile_id, provider))
+        {
+            return CloudFolder::Unchecked(
+                "the sign-in is stored, and this command cannot read it back; \
+                 the daemon reads it and checks the folder when it starts"
+                    .to_string(),
+            );
+        }
+        let selected = match sign_in {
+            // The sign-in of this run, from memory.
+            Some(tokens) if gdrive => {
+                vapor_providers::gdrive::GoogleDriveProvider::with_sign_in(profile_id, tokens)
+                    .map(|provider| Box::new(provider) as Box<dyn vapor_providers::Provider>)
+            }
+            _ => vapor_providers::select_provider_for_profile(provider, profile_id),
+        };
+        let provider = match selected {
             Ok(provider) => provider,
             Err(error) => return CloudFolder::Unchecked(error.to_string()),
         };
@@ -911,6 +970,15 @@ fn dispatch_profiles(action: ProfilesAction) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        ProfilesAction::Enable { id, json } => {
+            change_profile(&path, &id, profiles_cmd::Change::Enable, json)
+        }
+        ProfilesAction::Disable { id, json } => {
+            change_profile(&path, &id, profiles_cmd::Change::Disable, json)
+        }
+        ProfilesAction::Rename { id, name, json } => {
+            change_profile(&path, &id, profiles_cmd::Change::Rename(name), json)
+        }
         ProfilesAction::Remove { id, yes, json } => {
             let interactive = !json && std::io::stdin().is_terminal();
             if !yes && !interactive {
@@ -960,6 +1028,24 @@ fn dispatch_profiles(action: ProfilesAction) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn change_profile(
+    config_path: &std::path::Path,
+    id: &str,
+    change: profiles_cmd::Change,
+    json: bool,
+) -> Result<ExitCode, String> {
+    let outcome = profiles_cmd::change(config_path, id, &change).map_err(|e| e.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", outcome.render_text());
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn dispatch_decisions(action: DecisionsAction) -> Result<ExitCode, String> {
@@ -1279,7 +1365,20 @@ fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn serve_expired_sign_in_page(port: u16) -> Result<ExitCode, String> {
+    let until = std::time::Instant::now()
+        + std::time::Duration::from_secs(
+            vapor_shared::constants::provider::EXPIRED_SIGN_IN_PAGE_SECONDS,
+        );
+    auth_cmd::serve_expired_page(port, until)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
+    // Needs no configuration and no secret store, and opens neither.
+    if let AuthAction::Expired { port } = action {
+        return serve_expired_sign_in_page(port);
+    }
     let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
     if let Some(issue) = loaded.load_issue {
         eprintln!("vapor: warning: {issue}");
@@ -1332,6 +1431,7 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        AuthAction::Expired { port } => serve_expired_sign_in_page(port),
         AuthAction::Logout { profile } => {
             let profile =
                 auth_cmd::logout_target(&config, profile.as_deref()).map_err(|e| e.to_string())?;
@@ -1511,25 +1611,6 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
                     report.answers = Some(ipc_cmd::daemon_answers());
                 }
             }
-            // A start is done when a daemon answers, not when the
-            // service manager took the request: a daemon that hangs
-            // keeps its job, and a start against it changes nothing.
-            service_cmd::ServiceCommandOutcome::Action(result)
-                if matches!(command, ServiceCommand::Start | ServiceCommand::Restart)
-                    && matches!(
-                        result,
-                        vapor_lifecycle::DaemonLifecycleActionResult::Started
-                            | vapor_lifecycle::DaemonLifecycleActionResult::Unchanged
-                    )
-                    && !daemon_answers_within(Duration::from_secs(10)) =>
-            {
-                return Err(
-                    "the daemon's job runs, but the daemon gives no answer on its socket, so \
-                     nothing syncs. `vapor service restart` ends it and starts a new one; \
-                     `vapor logs` shows what it did last"
-                        .to_string(),
-                );
-            }
             service_cmd::ServiceCommandOutcome::Action(_)
                 if matches!(command, ServiceCommand::Uninstall { .. })
                     && vapor_platform::ServiceInstaller::status(&supervisor).is_ok_and(
@@ -1538,6 +1619,9 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
             {
                 vapor_platform::ServiceInstaller::disable_and_uninstall(&supervisor)
                     .map_err(|e| format!("supervisor uninstall failed: {e}"))?;
+            }
+            service_cmd::ServiceCommandOutcome::Action(result) => {
+                service_cmd::confirm_started(command, result, &daemon_answers_within)?;
             }
             _ => {}
         }

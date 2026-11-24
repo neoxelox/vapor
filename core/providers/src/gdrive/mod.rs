@@ -59,6 +59,13 @@ enum ChangedPath {
     Unknown,
 }
 
+/// The verdict that a file is outside the sync root: the folder that
+/// held the file when it was judged, and when.
+struct OutOfScope {
+    parent: Option<String>,
+    recorded: SystemTime,
+}
+
 /// A changed file's freshly-resolved path, plus the stale cached path it
 /// moved from (a rename/move) when that differs.
 struct ResolvedChangePath {
@@ -87,11 +94,12 @@ const CHUNK_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK_START: u64 = 8 * 1024 * 1024;
 /// Refresh this long before the recorded expiry.
 const TOKEN_REFRESH_MARGIN_MS: u64 = 60_000;
-/// How long a file id stays remembered as outside the sync root before
-/// the changes feed re-checks it (in case it was moved into scope). The
+/// How long a file id stays remembered as outside the sync root. The
 /// changes feed is Drive-wide, so a busy out-of-scope file (a colleague's
 /// doc edited every minute) would otherwise re-walk its whole parent
-/// chain on every poll.
+/// chain on every poll. The memory holds for the folder the file was
+/// in: a file that is in another folder now is judged again, and so is
+/// every file when a folder comes into the sync root.
 const OUT_OF_SCOPE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// Cap on the out-of-scope negative cache so a churny wider Drive cannot
 /// grow it without bound; oldest entries are pruned first.
@@ -242,11 +250,26 @@ impl TokenManager {
         if let Some(tokens) = self.cached_and_still_stored()? {
             return Ok(tokens);
         }
+        self.read_store()
+    }
+
+    /// Reads the tokens from the secret store and keeps them in memory.
+    fn read_store(&self) -> Result<StoredTokens, ProviderError> {
         let raw = self
             .secrets
             .get(&self.config.token_secret_name())
             .map_err(|error| match error {
                 vapor_platform::SecretStoreError::NotFound(_) => self.signed_out(),
+                // The store could not be asked (a locked keychain, a
+                // keyring service that is away). The sign-in may be
+                // there, and a new one would not help: the call is
+                // tried again.
+                vapor_platform::SecretStoreError::Unavailable(reason) => {
+                    ProviderError::transient(format!(
+                        "the sign-in of profile '{}' cannot be read now: {reason}",
+                        self.config.profile_id
+                    ))
+                }
                 // The store holds something and did not give it: the
                 // keychain would have asked, or it failed. A new
                 // sign-in writes an item this build can read.
@@ -316,8 +339,27 @@ impl TokenManager {
             .refreshing
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.invalidate();
-        let current = self.load()?;
+        // The store is read again: another process may have stored a
+        // newer sign-in. The tokens in memory go only when the store
+        // answered. A store that cannot be asked says nothing, and the
+        // refresh token in memory is then the one to try.
+        let held = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let current = match (self.read_store(), held) {
+            (Ok(stored), _) => stored,
+            (Err(error), Some(held))
+                if error.kind == vapor_shared::ProviderErrorKind::Transient =>
+            {
+                held
+            }
+            (Err(error), _) => {
+                self.invalidate();
+                return Err(error);
+            }
+        };
         if current.access_token != rejected
             && current.expires_at_ms > Self::now_ms() + TOKEN_REFRESH_MARGIN_MS
         {
@@ -455,6 +497,8 @@ struct GdFile {
     trashed: bool,
     #[serde(default, rename = "modifiedTime")]
     modified_time: Option<String>,
+    #[serde(default, rename = "createdTime")]
+    created_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,7 +536,15 @@ struct GdChangeList {
 }
 
 const FILE_FIELDS: &str =
-    "id,name,mimeType,size,md5Checksum,appProperties,parents,trashed,modifiedTime";
+    "id,name,mimeType,size,md5Checksum,appProperties,parents,trashed,modifiedTime,createdTime";
+
+/// How old a folder that the feed reports, and that this provider never
+/// saw, may be to count as a new one. A new folder comes with an entry
+/// for each of its files. An older one was made somewhere else or at
+/// another time: it moved into the synced folder from outside, it came
+/// back from the trash, or it was last seen before this daemon
+/// started. The feed has one entry for it and none for its files.
+const NEW_FOLDER_AGE: Duration = Duration::from_secs(120);
 
 /// One stored version of a file's content.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -751,7 +803,7 @@ pub struct GoogleDriveProvider {
     path_by_id: Mutex<BTreeMap<String, String>>,
     /// File ids the changes feed has resolved to be outside the sync root,
     /// with the time they were last confirmed so the entry can expire.
-    out_of_scope: Mutex<BTreeMap<String, SystemTime>>,
+    out_of_scope: Mutex<BTreeMap<String, OutOfScope>>,
     /// Learned resumable chunk size, shared across sessions.
     chunk_hint: Arc<Mutex<u64>>,
     /// Ids of files this provider leaves in the cloud and has said so
@@ -811,6 +863,33 @@ impl GoogleDriveProvider {
         }
     }
 
+    /// A provider for one look into an account with a sign-in that
+    /// the caller holds in memory: the command that has just signed in
+    /// uses it before the daemon runs. The tokens never leave this
+    /// process, and a refresh is not written to the store of the user.
+    pub fn with_sign_in(profile_id: &str, tokens_json: &str) -> Result<Self, ProviderError> {
+        let client = oauth::client_credentials().ok_or_else(|| {
+            ProviderError::authentication(format!(
+                "this build has no Google Drive OAuth client and {} is not set",
+                vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
+            ))
+        })?;
+        let config = GdriveConfig {
+            client_id: client.client_id,
+            client_secret: client.client_secret,
+            profile_id: profile_id.to_string(),
+        };
+        let secrets = vapor_platform::InMemorySecretStore::new();
+        secrets
+            .set(&config.token_secret_name(), tokens_json)
+            .map_err(|error| ProviderError::permanent(error.to_string()))?;
+        Ok(Self::new(
+            config,
+            Arc::new(secrets),
+            Arc::new(crate::http::NativeHttpTransport::default()),
+        ))
+    }
+
     /// Production constructor: native transport + native secret store,
     /// and the OAuth client from [`oauth::client_credentials`] (built
     /// in, or overridden by the environment; see
@@ -837,7 +916,7 @@ impl GoogleDriveProvider {
                 profile_id: profile_id.to_string(),
             },
             secrets,
-            Arc::new(crate::http::NativeHttpTransport),
+            Arc::new(crate::http::NativeHttpTransport::default()),
         ))
     }
 
@@ -1678,7 +1757,7 @@ impl GoogleDriveProvider {
     fn path_for_changed_file(&self, file: &GdFile) -> ChangedPath {
         // Zero-request reject for a file already resolved to be outside the
         // sync root, until its TTL lapses (in case it moved into scope).
-        if self.is_known_out_of_scope(&file.id) {
+        if self.is_known_out_of_scope(file) && !self.parent_is_known_inside(file) {
             return ChangedPath::OutOfScope;
         }
         // Any previously-cached path for this id is the OLD path: it must
@@ -1704,7 +1783,7 @@ impl GoogleDriveProvider {
         let mut segments = vec![file.name.clone()];
         let Some(mut current_parent) = file.parents.first().cloned() else {
             // A parentless file cannot be under the root.
-            self.mark_out_of_scope(&file.id);
+            self.mark_out_of_scope(file);
             return ChangedPath::OutOfScope;
         };
         let mut new_path = None;
@@ -1736,20 +1815,29 @@ impl GoogleDriveProvider {
                 }
                 // The cloud did not answer. No verdict is remembered,
                 // and the caller must not take the file for one that
-                // is outside the root.
-                Err(_) => return ChangedPath::Unknown,
+                // is outside the root. A folder may be inside now, with
+                // every file under it, so no verdict stands either.
+                Err(_) => {
+                    if file.mime_type == FOLDER_MIME {
+                        self.out_of_scope
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clear();
+                    }
+                    return ChangedPath::Unknown;
+                }
             };
             segments.push(parent.name.clone());
             let Some(next) = parent.parents.first().cloned() else {
                 // Walked up to a top-level parent that is not our root.
-                self.mark_out_of_scope(&file.id);
+                self.mark_out_of_scope(file);
                 return ChangedPath::OutOfScope;
             };
             current_parent = next;
         }
         let Some(new_path) = new_path else {
             // Exhausted the depth bound without reaching the root.
-            self.mark_out_of_scope(&file.id);
+            self.mark_out_of_scope(file);
             return ChangedPath::OutOfScope;
         };
         // Reconcile caches to the fresh path; a stale mapping at a
@@ -1757,6 +1845,7 @@ impl GoogleDriveProvider {
         // Removed(old) + CreatedOrModified(new) pair so the local side
         // converges (the old file is removed, the new one downloaded).
         // Only the file a path names left that path when it moved.
+        let has_a_new_place = cached.as_deref() != Some(new_path.as_str());
         let old_path = cached
             .filter(|cached_path| cached_path != &new_path)
             .filter(|cached_path| self.path_is_bound_to(cached_path, &file.id));
@@ -1764,12 +1853,21 @@ impl GoogleDriveProvider {
             self.evict_path(old);
         }
         let names_the_path = self.bind_changed_file(&new_path, file);
-        // It resolved in-scope, so drop any stale out-of-scope verdict
-        // (the file may have just been moved into the sync root).
-        self.out_of_scope
+        // It resolved in scope, so no verdict on it stands. A folder
+        // that came into the sync root brought everything under it
+        // along: a file under it that was judged outside is inside now,
+        // and its own entry would name the folder it was judged in. So
+        // every verdict goes.
+        let mut out_of_scope = self
+            .out_of_scope
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&file.id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if file.mime_type == FOLDER_MIME && has_a_new_place {
+            out_of_scope.clear();
+        } else {
+            out_of_scope.remove(&file.id);
+        }
+        drop(out_of_scope);
         ChangedPath::InScope(ResolvedChangePath {
             new_path,
             old_path,
@@ -1777,32 +1875,73 @@ impl GoogleDriveProvider {
         })
     }
 
-    /// Whether `file_id` is remembered as outside the sync root and the
-    /// memory has not yet expired.
-    fn is_known_out_of_scope(&self, file_id: &str) -> bool {
+    /// Whether `file` is remembered as outside the sync root: the memory
+    /// has not expired, and the file is in the folder it was judged in.
+    /// A file that is in another folder now was moved, maybe into the
+    /// sync root, and the feed says so one time only.
+    fn is_known_out_of_scope(&self, file: &GdFile) -> bool {
         let cache = self
             .out_of_scope
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match cache.get(file_id) {
-            Some(recorded) => recorded
-                .elapsed()
-                .map(|age| age < OUT_OF_SCOPE_TTL)
-                .unwrap_or(false),
-            None => false,
-        }
+        cache.get(&file.id).is_some_and(|verdict| {
+            verdict.parent.as_ref() == file.parents.first()
+                && verdict
+                    .recorded
+                    .elapsed()
+                    .map(|age| age < OUT_OF_SCOPE_TTL)
+                    .unwrap_or(false)
+        })
     }
 
-    /// Records `file_id` as outside the sync root, pruning expired entries
+    /// Whether the folder that holds `file` is the sync root or a folder
+    /// this provider knows inside it. A listing learns a folder that no
+    /// feed entry reported, and a verdict on a file under it is then
+    /// out of date.
+    fn parent_is_known_inside(&self, file: &GdFile) -> bool {
+        let Some(parent) = file.parents.first() else {
+            return false;
+        };
+        let is_the_root = self
+            .root_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(parent.as_str());
+        is_the_root
+            || self
+                .path_by_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(parent)
+    }
+
+    /// Whether the feed showed the folder `id`, or a file in it, outside
+    /// the sync root a moment ago. Such a folder is not a new one, also
+    /// when it was made a minute ago: it was moved in, and the feed has
+    /// no entry for what it holds.
+    fn was_seen_outside(&self, id: &str) -> bool {
+        let cache = self
+            .out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.contains_key(id)
+            || cache
+                .values()
+                .any(|verdict| verdict.parent.as_deref() == Some(id))
+    }
+
+    /// Records `file` as outside the sync root, pruning expired entries
     /// (and, if still over the cap, the oldest) so the cache stays bounded.
-    fn mark_out_of_scope(&self, file_id: &str) {
+    fn mark_out_of_scope(&self, file: &GdFile) {
         let now = SystemTime::now();
         let mut cache = self
             .out_of_scope
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.retain(|_, recorded| {
-            recorded
+        cache.retain(|_, verdict| {
+            verdict
+                .recorded
                 .elapsed()
                 .map(|age| age < OUT_OF_SCOPE_TTL)
                 .unwrap_or(false)
@@ -1810,12 +1949,18 @@ impl GoogleDriveProvider {
         if cache.len() >= OUT_OF_SCOPE_MAX_ENTRIES
             && let Some(oldest) = cache
                 .iter()
-                .min_by_key(|(_, recorded)| **recorded)
+                .min_by_key(|(_, verdict)| verdict.recorded)
                 .map(|(id, _)| id.clone())
         {
             cache.remove(&oldest);
         }
-        cache.insert(file_id.to_string(), now);
+        cache.insert(
+            file.id.clone(),
+            OutOfScope {
+                parent: file.parents.first().cloned(),
+                recorded: now,
+            },
+        );
     }
 }
 
@@ -1846,14 +1991,19 @@ impl Provider for GoogleDriveProvider {
                 None => self.create_folder(&parent_id, segment)?,
             };
         }
-        logging::info(
-            "Google Drive sync root is ready",
-            &[("cloud_root", cloud_root.to_string())],
-        );
-        *self
+        let mut root_id = self
             .root_id
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(parent_id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The daemon checks its roots all day long. The line is for the
+        // first answer and for a root that is another folder now.
+        if root_id.as_deref() != Some(parent_id.as_str()) {
+            logging::info(
+                "Google Drive sync root is ready",
+                &[("cloud_root", cloud_root.to_string())],
+            );
+            *root_id = Some(parent_id);
+        }
         Ok(())
     }
 
@@ -1917,6 +2067,14 @@ impl Provider for GoogleDriveProvider {
     }
 
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
+        Ok(self.enumerate_with_unsyncable(directory)?.entries)
+    }
+
+    fn enumerate_with_unsyncable(
+        &self,
+        directory: &RemotePath,
+    ) -> Result<crate::RemoteListing, ProviderError> {
+        let mut unsyncable = Vec::new();
         let Some(folder) = self.resolve(directory)? else {
             return Err(ProviderError::not_found(format!(
                 "remote directory {directory} does not exist"
@@ -1962,6 +2120,12 @@ impl Provider for GoogleDriveProvider {
                             ],
                         );
                     }
+                    unsyncable.push(crate::UnsyncableRemoteName {
+                        name: file.name.clone(),
+                        reason: "its name cannot be a path on a device (a `/` or a `\\` in it, \
+                                 or a name that is `.` or `..`)"
+                            .to_string(),
+                    });
                     continue;
                 };
                 match by_name.remove(&file.name) {
@@ -1975,6 +2139,21 @@ impl Provider for GoogleDriveProvider {
                             (file, other)
                         };
                         self.report_duplicate(path.as_str(), &kept, &left);
+                        // The file that lost the name stays in the
+                        // cloud only. The user is asked about it, one
+                        // time for a name however many files share it.
+                        if !unsyncable
+                            .iter()
+                            .any(|name: &crate::UnsyncableRemoteName| name.name == kept.name)
+                        {
+                            unsyncable.push(crate::UnsyncableRemoteName {
+                                name: kept.name.clone(),
+                                reason: "a second file in that folder has this name, and a \
+                                         device holds one file for each name; Vapor syncs the \
+                                         other one"
+                                    .to_string(),
+                            });
+                        }
                         by_name.insert(kept.name.clone(), (path, kept));
                     }
                 }
@@ -1989,7 +2168,11 @@ impl Provider for GoogleDriveProvider {
             .map(|(path, file)| self.entry_from_file(path, file))
             .collect();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(entries)
+        unsyncable.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(crate::RemoteListing {
+            entries,
+            unsyncable,
+        })
     }
 
     fn stat(&self, path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
@@ -2236,8 +2419,39 @@ impl Provider for GoogleDriveProvider {
                     .get(&file.id)
                     .cloned();
                 let Some(path_before) = path_before else {
-                    // A folder this provider did not know: a new one,
-                    // whose files come with entries of their own.
+                    // A folder this provider did not know. A new one
+                    // comes with entries for its files, and costs no
+                    // request. One that is older holds files the feed
+                    // never names: the engine walks the folder that
+                    // holds it.
+                    let made_just_now = file
+                        .created_time
+                        .as_deref()
+                        .and_then(parse_rfc3339_millis)
+                        .is_some_and(|created| {
+                            now.duration_since(created)
+                                .map_or(true, |age| age <= NEW_FOLDER_AGE)
+                        });
+                    if made_just_now && !self.was_seen_outside(&file.id) {
+                        continue;
+                    }
+                    match self.path_for_changed_file(file) {
+                        ChangedPath::InScope(resolved) => {
+                            if let Ok(path) = RemotePath::new(resolved.new_path) {
+                                changes.push(RemoteChange {
+                                    path,
+                                    kind: RemoteChangeKind::FolderMoved,
+                                    observed_at: now,
+                                    op_id: None,
+                                    content_hash: None,
+                                    size_bytes: None,
+                                    modified_at: None,
+                                });
+                            }
+                        }
+                        ChangedPath::OutOfScope => {}
+                        ChangedPath::Unknown => place_unknown = true,
+                    }
                     continue;
                 };
                 // The entry of a folder that is where it was (the echo
@@ -2286,8 +2500,36 @@ impl Provider for GoogleDriveProvider {
             }
             let resolved = match self.path_for_changed_file(file) {
                 ChangedPath::InScope(resolved) => resolved,
-                // Not ours.
-                ChangedPath::OutOfScope => continue,
+                ChangedPath::OutOfScope => {
+                    // Not ours, or not ours any more: a file that was
+                    // moved out of the sync root left its path, as one
+                    // that went to the trash did.
+                    let had_path = self
+                        .path_by_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&file.id)
+                        .cloned();
+                    if let Some(path) = had_path {
+                        if self.path_is_bound_to(&path, &file.id) {
+                            self.evict_path(&path);
+                            if let Ok(path) = RemotePath::new(path) {
+                                changes.push(RemoteChange {
+                                    path,
+                                    kind: RemoteChangeKind::Removed,
+                                    observed_at: now,
+                                    op_id: None,
+                                    content_hash: None,
+                                    size_bytes: None,
+                                    modified_at: None,
+                                });
+                            }
+                        } else {
+                            self.forget_file(&file.id);
+                        }
+                    }
+                    continue;
+                }
                 ChangedPath::Unknown => {
                     place_unknown = true;
                     continue;

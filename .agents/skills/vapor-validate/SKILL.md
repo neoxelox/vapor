@@ -32,7 +32,7 @@ nothing.
 | Tests only | `format`, `lint`, `test` |
 | Anything under `core/*` or `scripts/*` that a user could observe through the daemon or CLI, including startup, shutdown, IPC, schema, config and build changes to the shipping binaries | `format`, `lint`, `test`, `e2e` |
 | `apps/macos`, the packaging scripts, or the installer | `format`, `lint`, `test`, `vm`; hand the owner the screenshots of the run and a list of what to judge, since an agent verifies behaviour and never the look |
-| Performance-sensitive engine changes | the above plus `./scripts/perf.sh` (Tier 2, release gate; not a PR gate: one release-profile soak cell with the SLO checks) |
+| Performance-sensitive engine changes | the above plus `./scripts/perf.sh` (Tier 2, release gate; not a PR gate: the property tests at 4 000 cases each, and one release-profile soak cell with the SLO checks) |
 | Changes to the executor, reconcile, deletion, or conflict paths | the above plus a soak (`vapor-soak` skill); quote its report |
 
 ## Tier 1 rules

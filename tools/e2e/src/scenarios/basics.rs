@@ -392,8 +392,8 @@ fn profiles_command_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
         "--json",
     ])?;
     ensure!(
-        added["profile"]["id"] == "default" && added["applies"] == "live",
-        "the first profile is the default one and applies live: {added}"
+        added["profile"]["id"] == "default",
+        "the first profile is the default one: {added}"
     );
     cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
     let status = cli

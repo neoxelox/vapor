@@ -104,6 +104,17 @@ decision waits; the sign-in notice has a Sign In button.
       whether the setting is on, and it names the setting in another
       way than the Dashboard and Settings ("Start Vapor at login").
       Show it as one item with a checkmark and the same wording.
+- [ ] M3-21 Sign In while a sign-in waits. The button is off while
+      `vapor auth login --browser` runs, so a user who closed the
+      consent tab waits until the app ends the command, 5 minutes
+      later. The CLI waits 30 minutes for a slow consent since
+      2026-11-24, and answers a late one with a page that says to
+      start again; the app does not take that wait, because 30 minutes
+      with the button off is worse than a consent that came too late.
+      Let the button start the sign-in again (and end the command that
+      waits), then give the app the wait of the CLI. With several
+      profiles on hold the waits add up today, one after the other.
+      Found by the review of the pull request, 2026-11-24.
 - [ ] M3-19 "Start Vapor at login" set to off stops sync at once. On
       macOS the removal of a launchd job ends its process, so the
       toggle stops the daemon while the app stays open, and
@@ -128,8 +139,9 @@ Exit gate:
 - [ ] M4-1 App UI flows to create, rename, select, enable/disable, and
       delete profiles; bind each profile to a provider + authenticated
       account. The create flow is the onboarding sequence re-entered
-      from Settings (O-3); the others drive `vapor profiles` (`cli.md`
-      L1-7 for enable, disable, and rename).
+      from Settings (O-3); the others drive `vapor profiles enable`,
+      `disable`, `rename`, and `remove`, and a running daemon takes
+      each but `remove` with no restart.
 - [ ] M4-2 Settings UI for profile-scoped override knobs (sync roots,
       ignore rules, resource ceilings, idle-boost, and the per-profile
       `syncMode` selector: `two-way` / `pull-only` / `push-only`). Surface
@@ -268,8 +280,8 @@ for tests; the app never assumes it.
 - [ ] O-3 Re-entry. "Add profile…" in Settings reuses the same steps
       for a second profile (this is the create half of M4-1); the
       provider list, the pickers, and the validation are shared, not
-      copied. A profile after the first one needs a daemon restart, and
-      the flow says so.
+      copied. A running daemon starts the new profile with no
+      restart.
 - [ ] O-4 Copy in `assets/locales/en.json`, logic tests for the step
       model and the gate (which state opens the window, what each
       answer writes, what a cancel leaves behind), no UI tests in Tier

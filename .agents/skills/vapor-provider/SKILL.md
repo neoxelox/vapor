@@ -20,7 +20,9 @@ Full checklist with acceptance criteria:
 - **Scope safety.** Every remote path is a `RemotePath` relative to the
   cloud root; resolve it inside the root and refuse anything that
   escapes. Names that cannot be represented (a `/` inside a Drive
-  name) are skipped with a WARNING that names the entry.
+  name) are no entries: the listing reports them
+  (`enumerate_with_unsyncable`), and the engine asks the user about
+  each one.
 - **Op-id tags.** Writes carry the engine's op id; enumeration and
   changes echo it back so loop prevention can drop the daemon's own
   writes. Without native metadata, use the side-file fallback.
@@ -33,8 +35,11 @@ Full checklist with acceptance criteria:
   walks the folder that holds them. `FolderMoved` with the root as its
   path means "a change whose place could not be read": the engine walks
   everything. Never drop a change because a lookup failed.
-- **Capabilities.** Two flags, both honest: `supports_remote_changes_feed`
-  and `supports_server_side_move`. Write preconditions are not a flag:
+- **Capabilities.** Four flags, all honest: `supports_remote_changes_feed`,
+  `supports_server_side_move`, `changes_feed_is_watched` (a poll costs
+  no request), and `small_transfers_share_a_commit` (one flush of a
+  drive covers the transfers of a moment, so the engine runs small
+  transfers in a wider lane). Write preconditions are not a flag:
   every backend honours them.
 - **Transfers.** `begin_upload` / `begin_download` return a
   `TransferSession`; each `step(max_bytes)` moves a bounded budget and

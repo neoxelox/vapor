@@ -145,7 +145,14 @@ pub struct IpcSocketLocation {
 /// collide, and the daemon's one-socket-per-`vapor_dir` invariant is
 /// preserved.
 pub fn ipc_socket_location() -> IpcSocketLocation {
-    resolve_ipc_socket_location(&vapor_directory(), &env::temp_dir())
+    ipc_socket_location_of(&vapor_directory())
+}
+
+/// Where the IPC socket of the runtime directory `vapor_dir` is: for a
+/// process that stands in for the daemon of another directory than its
+/// own.
+pub fn ipc_socket_location_of(vapor_dir: &std::path::Path) -> IpcSocketLocation {
+    resolve_ipc_socket_location(vapor_dir, &env::temp_dir())
 }
 
 fn resolve_ipc_socket_location(

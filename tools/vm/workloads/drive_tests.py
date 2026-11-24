@@ -210,14 +210,35 @@ def d_conflict(ctx):
     ctx.info(f"files after a conflict: {sorted(ta)}; {round(time.time() - t0)} s with the wait for quiet")
 
 
+def wait_burst(sub, sender="default", timeout=1800):
+    """Waits until both folders hold the same files under `sub`. Also
+    says when the queue of the sending profile was last seen to go
+    empty before that: about when the uploads were done, so the upload
+    and the download can be told apart. Returns (upload seconds or
+    None, end-to-end seconds or None)."""
+    t0, uploaded, had_work = time.time(), None, False
+    while time.time() - t0 < timeout:
+        queued = status().get(sender, {}).get("queued", 0)
+        if queued > 0:
+            had_work, uploaded = True, None
+        elif had_work and uploaded is None:
+            uploaded = time.time() - t0
+        ta, tb = tree(A, sub), tree(B, sub)
+        if ta and ta == tb:
+            return uploaded, time.time() - t0
+        time.sleep(1.0)
+    return uploaded, None
+
+
 def d_burst(ctx):
     sub = "t-burst"
     t0 = time.time()
     for i in range(400):
         w(os.path.join(A, sub, f"pkg{i % 20:02d}", f"mod_{i:03d}.js"), f"export const v{i} = {i};\n" * 30)
-    t = wait_equal(sub, 1800)
+    up, t = wait_burst(sub)
     ctx.expect(t is not None, f"400 small files reach the other device ({diff(sub)})")
-    ctx.info(f"400 files, A -> Drive -> B: {t and round(t)} s ({t and round(400 / t, 1)} files/s end to end)")
+    ctx.info(f"400 files, A -> Drive -> B: {t and round(t)} s ({t and round(400 / t, 1)} files/s end to end); "
+             f"the queue of the sending profile was empty after {up and round(up)} s ({up and round(400 / up, 1)} uploads/s)")
     st = status()
     ctx.info(f"status after the burst: {st}")
     shutil.rmtree(os.path.join(A, sub))

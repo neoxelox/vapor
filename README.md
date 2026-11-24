@@ -66,13 +66,14 @@ Available now:
 - ⚙️ **Resource ceilings.** You cap the share of CPU, memory, and bandwidth, and Vapor measures itself against it.
 - 🌩 **Storm control.** A burst of thousands of changes becomes one scan, not thousands of uploads.
 - 🧹 **Ignore rules.** Your `.gitignore` files work as they are, and `vapor ignored` shows what they hold back.
-- ♻️ **Live settings.** Ceilings, ignore rules, and safeguards apply while Vapor runs, with no restart.
+- ♻️ **Live settings.** Ceilings, ignore rules, safeguards, and which profiles run apply while Vapor runs, with no restart.
 - 🚀 **Always on.** It starts at login, restarts after a crash with or without the app open, and stops retrying when something is really broken.
 - 🧰 **One installer.** The app, the daemon, and `vapor` on your `PATH` arrive together, and installing a newer file updates all three.
 - ⏯️ **Pause, resume, Sync now.** Changes wait while paused, and Sync now compares both folders right away.
 - 📈 **Explains itself.** Status with a reason, a live timeline, and a support report with your file names hidden.
 - ⌨️ **Full command line.** Everything the app does, `vapor` does too, for scripts and for servers with no app.
 - 🔐 **Private by design.** Tokens stay in the system keychain, logs hold no secrets, and only your files leave the device.
+- 🏢 **Built for managed networks.** Vapor follows an HTTP proxy from the system's settings or the environment and trusts the certificates your device trusts, so an office network that inspects traffic can carry sync. A proxy set by a script (PAC) or a SOCKS proxy is not followed yet.
 - 🔑 **Sign-in hold.** An expired cloud sign-in puts sync on hold, and signing in again resumes it where it stopped.
 - 🔕 **Menu bar app.** No window unless you ask, and the mark turns orange only when Vapor needs you.
 
@@ -111,7 +112,10 @@ In flight and coming next:
 | `vapor resume` | `--profile <id>`, `--json` | Resumes sync, for every profile or for one. |
 | `vapor reconcile` | `--profile <id>`, `--json` | Compares both folders now and syncs the differences, for every profile or for one. |
 | `vapor profiles list` | `--json` | Lists the sync profiles: the folders, the cloud, the direction. |
-| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. The first one starts syncing at once. `vapor init` runs it for a fresh install, with the sign-in and the background service. |
+| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. A running daemon starts it within seconds, with no restart. `vapor init` runs it for a fresh install, with the sign-in and the background service. |
+| `vapor profiles enable <id>` | `--json` | Starts a profile that was disabled, where it stopped. No restart. |
+| `vapor profiles disable <id>` | `--json` | Stops syncing a profile and keeps its sync state, its sign-in, and the files. The other profiles go on. |
+| `vapor profiles rename <id> <name>` | `--json` | Sets the name that `vapor status` and the app show. The id stays. |
 | `vapor profiles remove <id>` | `--yes`, `--json` | Stops syncing a profile and forgets its sync state and sign-in. The files on both sides stay. Needs the daemon stopped. |
 | `vapor ignored` | `--profile <id>`, `--json` | Lists what the ignore rules keep out of sync, with the rule that hides each path. |
 | `vapor decisions list` | `--all`, `--json` | Lists the questions waiting for you: conflicts, and actions Vapor will not take on its own. `--all` adds the answered ones. |
@@ -160,7 +164,7 @@ The Applies column says when a change takes effect: **live** within a few second
 | `timelineLimit` | `1000` | live | How many entries `vapor timeline` keeps, at most `10000`. |
 | `language` | `"en"` | app | The app's language. |
 | `deviceId` | the host name plus four random characters | restart | This device's name in conflict copies. Written once on the first run. |
-| `profiles` | none: one profile named `default` | restart | Several sync pairs at once, each with its own state. See below. |
+| `profiles` | none: one profile named `default` | live | Several sync pairs at once, each with its own state. A profile that is added, enabled, disabled, or renamed applies at once; other folders, another provider, or another mode for one that runs wait for a restart. See below. |
 | `resourceLimits.cpuPercent` | `15` | live | CPU ceiling, as a share of the whole device. |
 | `resourceLimits.memoryPercent` | `10` | live | Memory ceiling, as a share of physical memory. |
 | `resourceLimits.bandwidthPercent` | `25` | live | Network ceiling, as a share of what the link carries, which Vapor measures. |
@@ -181,7 +185,7 @@ The Applies column says when a change takes effect: **live** within a few second
 | `trash.retentionDays` | `7` | live | Days an item stays in the trash. |
 | `trash.useSystem` | `false` | live | Try the system trash (the Finder's Trash) first. |
 
-Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you; on a terminal it suggests `~/Vapor` and `/Vapor` for the two folders. The first profile starts without a restart.
+Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you; on a terminal it suggests `~/Vapor` and `/Vapor` for the two folders. A profile that is added starts without a restart.
 
 ### Environment variables
 
@@ -194,6 +198,7 @@ Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, 
 | `VAPOR_GDRIVE_CLIENT_SECRET` | the secret built in | The matching client secret, read the same two ways. |
 | `VAPOR_SECRETS_COMMAND` | unset | Linux only: a program that stores Vapor's secrets (`pass`, a vault CLI), used instead of the desktop Secret Service. |
 | `VAPOR_THROTTLE_INPUTS` | `host` | Test harnesses only: `static` or `file:<path>` replace the device's real load readings. Never set it on a real install. |
+| `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | unset | The standard proxy variables, for a server or a container, for a proxy reached as `http://host:port`. With none set, Vapor uses the proxy of the system's network settings (macOS). |
 
 The build, release, and test variables are in `.env.example`.
 

@@ -1,11 +1,25 @@
-# Known-Good Local Baseline (Mar 2026)
+# Known-Good Local Baseline (Nov 2026)
 
-- macOS: `26.3` (Tahoe)
-- Rust: `rustc 1.93.1 (01f6ddf75 2026-02-11)`
-- Cargo: `cargo 1.93.1 (083ac5135 2025-12-15)`
-- Swift driver: `1.127.15`
-- Swift: `6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)`
-- Swift target: `arm64-apple-macosx26.0`
+- macOS: `27.2.1`
+- Rust: `rustc 1.100.0 (0ef1bc386 2026-11-09)`
+- Cargo: `cargo 1.100.0 (3acc79c0c 2026-11-05)`
+- Swift driver: `1.168.6`
+- Swift: `6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)`
+- Swift target: `arm64-apple-macosx27.2.0`
+
+## Keep Rust in step with CI
+
+CI installs the latest stable Rust at each run, and
+`rust-toolchain.toml` names the channel, not a version. A local
+toolchain that is some months older passes `./scripts/lint.sh` on code
+that the newer clippy rejects, and the difference costs a CI run.
+
+- Check: `rustup check`. The line for `stable` says `up to date` or
+  `Update available`.
+- Update: `rustup update stable`.
+- `./scripts/lint.sh` runs the check itself and prints one line when a
+  newer stable is out. It does not fail on it: the lint of the old
+  toolchain is still worth its result.
 
 Tier VM (`docs/development/vm-verification.md`) was verified in
 November 2026 with:

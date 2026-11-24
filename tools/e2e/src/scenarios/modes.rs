@@ -128,6 +128,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: pause_one_profile,
         },
         Scenario {
+            id: "S82",
+            name: "profile-changes-need-no-restart",
+            proves: "a profile that vapor profiles adds, disables, enables, or renames while the daemon runs is started, stopped, or renamed within seconds; the other profile keeps syncing and status asks for no restart",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: profile_changes_need_no_restart,
+        },
+        Scenario {
             id: "S31",
             name: "mass-delete-decision-apply",
             proves: "a burst of local deletions is held whole behind a mass-delete decision while other work continues; vapor decisions resolve --choose apply releases it",
@@ -155,6 +163,14 @@ pub fn scenarios() -> Vec<Scenario> {
             ],
             expect: Expect::Pass,
             run: unsyncable_name_decision,
+        },
+        Scenario {
+            id: "S83",
+            name: "unsyncable-cloud-name-decision",
+            proves: "a file in the cloud folder whose name has a backslash opens an unsyncable-name decision that says where the file is, never reaches this device, and the question is withdrawn once the file is renamed in the cloud",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::Unix],
+            expect: Expect::Pass,
+            run: unsyncable_cloud_name_decision,
         },
         Scenario {
             id: "S42",
@@ -874,6 +890,110 @@ fn pause_one_profile(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
+fn profile_changes_need_no_restart(ctx: &mut Ctx) -> Result<(), Failure> {
+    let alpha_local = ctx.sandbox.root.join("alpha-local");
+    let alpha_cloud = ctx.sandbox.root.join("cloud").join("Alpha");
+    let beta_local = ctx.sandbox.root.join("beta-local");
+    let beta_cloud = ctx.sandbox.root.join("cloud").join("Beta");
+    let cli = ctx.cli();
+    let add = |id: &str, local: &Path, cloud: &Path| {
+        cli.json(&[
+            "profiles",
+            "add",
+            "--id",
+            id,
+            "--provider",
+            "filesystem",
+            "--local",
+            &local.to_string_lossy(),
+            "--cloud",
+            &cloud.to_string_lossy(),
+            "--json",
+        ])
+    };
+    add("alpha", &alpha_local, &alpha_cloud)?;
+    ctx.start_daemon()?;
+    let profile = |id: &str| {
+        cli.status()?
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id == id)
+    };
+    let runs = |id: &str| profile(id).is_some_and(|profile| profile.run.state == "running");
+    let no_restart = |after: &str| -> Result<(), Failure> {
+        // A status that did not come is no answer.
+        let Some(status) = cli.status() else {
+            return Err(Failure::new(format!("no status after {after}")));
+        };
+        ensure!(
+            status.restart_required.is_none(),
+            "status asks for a restart after {after}: {:?}",
+            status.restart_required
+        );
+        Ok(())
+    };
+    write_file(&alpha_local.join("a1.txt"), "alpha one\n")?;
+    ctx.wait_exists(&alpha_cloud.join("a1.txt"), CONVERGE_TIMEOUT)?;
+
+    // A second profile, added next to one that runs.
+    add("beta", &beta_local, &beta_cloud)?;
+    ctx.wait_until(CONVERGE_TIMEOUT, "beta to run", || runs("beta"))?;
+    no_restart("profiles add")?;
+    write_file(&beta_local.join("b1.txt"), "beta one\n")?;
+    ctx.wait_exists(&beta_cloud.join("b1.txt"), CONVERGE_TIMEOUT)?;
+
+    // Disabled: beta leaves status and syncs nothing; alpha goes on.
+    let disabled = cli.json(&["profiles", "disable", "beta", "--json"])?;
+    ensure!(
+        disabled["changed"] == true && disabled["profile"]["enabled"] == false,
+        "disable reports the profile as it is now: {disabled}"
+    );
+    ctx.wait_until(CONVERGE_TIMEOUT, "beta to leave status", || {
+        cli.status().is_some() && profile("beta").is_none()
+    })?;
+    no_restart("profiles disable")?;
+    ensure!(runs("alpha"), "alpha stopped with beta");
+    write_file(&beta_local.join("b2.txt"), "beta two\n")?;
+    write_file(&alpha_local.join("a2.txt"), "alpha two\n")?;
+    ctx.wait_exists(&alpha_cloud.join("a2.txt"), CONVERGE_TIMEOUT)?;
+    ensure!(
+        !beta_cloud.join("b2.txt").exists(),
+        "the disabled profile synced a file"
+    );
+
+    // A new name, taken while the profile runs.
+    cli.ok(&["profiles", "rename", "alpha", "Main files"])?;
+    ctx.wait_until(CONVERGE_TIMEOUT, "alpha to show its new name", || {
+        profile("alpha").is_some_and(|profile| profile.name == "Main files")
+    })?;
+    no_restart("profiles rename")?;
+
+    // Enabled again: beta starts on the state it left and syncs what
+    // changed while it was off.
+    cli.ok(&["profiles", "enable", "beta"])?;
+    ctx.wait_until(CONVERGE_TIMEOUT, "beta to run again", || runs("beta"))?;
+    no_restart("profiles enable")?;
+    ctx.wait_exists(&beta_cloud.join("b2.txt"), CONVERGE_TIMEOUT)?;
+    write_file(&beta_local.join("b3.txt"), "beta three\n")?;
+    ctx.wait_exists(&beta_cloud.join("b3.txt"), CONVERGE_TIMEOUT)?;
+
+    let oracle = crate::oracle::TreeOracle::new(&crate::oracle::OracleOptions {
+        extra_ignore_rules: Vec::new(),
+        compare_mode: cfg!(unix),
+    })?;
+    for (label, local, cloud) in [
+        ("alpha", &alpha_local, &alpha_cloud),
+        ("beta", &beta_local, &beta_cloud),
+    ] {
+        let report = oracle.compare(local, cloud)?;
+        ensure!(report.is_clean(), "profile {label}: {}", report.summary(10));
+    }
+    ctx.set_oracle(OracleMode::Skip(
+        "profiles use their own roots; compared explicitly above".to_string(),
+    ));
+    Ok(())
+}
+
 /// The one open mass-delete decision, once the daemon has opened it.
 fn wait_open_mass_deletion(cli: &crate::cli::Cli, timeout: Duration) -> Result<i64, Failure> {
     let mut found = None;
@@ -1103,6 +1223,69 @@ fn unsyncable_name_decision(ctx: &mut Ctx) -> Result<(), Failure> {
         "one skipped, one withdrawn, none re-asked: {choices:?}"
     );
     ensure!(skipped.is_file(), "the skipped file stays on this device");
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+fn unsyncable_cloud_name_decision(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    ctx.allow_warning("cannot be synced");
+    fs::create_dir_all(&home.cloud)?;
+    let bad = home.cloud.join("back\\slash.txt");
+    fs::write(&bad, b"stays in the cloud")?;
+    write_file(&home.cloud.join("fine.txt"), "fine\n")?;
+    ctx.configure_scope(&home)?;
+    ctx.start_daemon()?;
+    ctx.wait_exists(&home.local.join("fine.txt"), CONVERGE_TIMEOUT)?;
+    let cli = ctx.cli();
+    // `None` when the command failed: a list that did not come is not
+    // an empty list.
+    let open_questions = || -> Option<Vec<serde_json::Value>> {
+        let report = cli.json(&["decisions", "list", "--json"]).ok()?;
+        Some(
+            report["decisions"]
+                .as_array()?
+                .iter()
+                .filter(|decision| {
+                    decision["kind"] == "unsyncable-name" && decision["choice"].is_null()
+                })
+                .cloned()
+                .collect(),
+        )
+    };
+    wait::wait_until(
+        Duration::from_secs(60),
+        "an unsyncable-name decision for the cloud file",
+        || open_questions().is_some_and(|open| open.len() == 1),
+    )?;
+    let question = open_questions()
+        .and_then(|open| {
+            open.first()
+                .and_then(|decision| decision["question"].as_str().map(str::to_string))
+        })
+        .unwrap_or_default();
+    ensure!(
+        question.starts_with("back\\slash.txt in the cloud folder cannot be synced")
+            && question.contains("backslash"),
+        "the question says where the file is and why: {question}"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        !home.local.join("back\\slash.txt").exists(),
+        "a name the model cannot carry never reaches this device"
+    );
+    ensure!(bad.is_file(), "the file stays in the cloud");
+
+    // Renamed in the cloud: the file syncs, and the next comparison of
+    // both folders finds the name gone and withdraws the question.
+    fs::rename(&bad, home.cloud.join("slash.txt"))?;
+    ctx.wait_exists(&home.local.join("slash.txt"), CONVERGE_TIMEOUT)?;
+    cli.ok(&["reconcile"])?;
+    wait::wait_until(
+        Duration::from_secs(60),
+        "no open unsyncable-name decision",
+        || open_questions().is_some_and(|open| open.is_empty()),
+    )?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     Ok(())
 }

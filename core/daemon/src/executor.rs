@@ -391,6 +391,9 @@ struct TransferPlan {
     /// by op-id instead of falling back to a full-remote-read hash
     /// comparison. `None` for uploads (they record their own op-id).
     remote_op_id: Option<String>,
+    /// For a download, the size of the remote object as the planner's
+    /// probe saw it. It decides whether the download is a small one.
+    remote_size: Option<u64>,
 }
 
 enum ActiveStage {
@@ -613,10 +616,13 @@ impl StagedExecutor {
         // Twice the Idle tier so upload + download can both run at
         // full width, bounded so a many-core machine cannot spawn an
         // unreasonable thread count (threads are lazy + parked anyway).
-        let worker_cap = (2 * crate::throttle::idle_concurrency()).clamp(
-            constants::engine::PROVIDER_JOB_WORKERS_MIN,
-            constants::engine::PROVIDER_JOB_WORKERS_MAX,
-        );
+        let worker_cap = (2
+            * crate::throttle::idle_concurrency()
+            * (1 + constants::engine::SMALL_TRANSFERS_PER_SLOT))
+            .clamp(
+                constants::engine::PROVIDER_JOB_WORKERS_MIN,
+                constants::engine::PROVIDER_JOB_WORKERS_MAX,
+            );
         self.jobs = crate::provider_jobs::ProviderJobPool::threaded(worker_cap, waker);
     }
 
@@ -2209,7 +2215,12 @@ impl StagedExecutor {
         now_inst: Instant,
         report: &mut StagedExecutorReport,
     ) -> Result<Option<ActiveExecution>, StateDbError> {
-        let Ok(permit) = app.try_acquire_work(WorkClass::Upload) else {
+        // A deletion in the cloud moves no bytes.
+        let small = intent.kind == PendingIntentKind::Delete
+            || plan
+                .hashed_local_state
+                .is_some_and(|(size, _)| size <= constants::engine::SMALL_TRANSFER_MAX_BYTES);
+        let Ok(permit) = acquire_transfer(app, WorkClass::Upload, small) else {
             return Ok(Some(ActiveExecution {
                 intent,
                 stage: ActiveStage::WaitingForUpload { plan },
@@ -2472,7 +2483,10 @@ impl StagedExecutor {
         stage_started_inst: Instant,
         now_inst: Instant,
     ) -> Result<Option<ActiveExecution>, StateDbError> {
-        let Ok(permit) = app.try_acquire_work(WorkClass::Download) else {
+        let small = plan
+            .remote_size
+            .is_some_and(|size| size <= constants::engine::SMALL_TRANSFER_MAX_BYTES);
+        let Ok(permit) = acquire_transfer(app, WorkClass::Download, small) else {
             return Ok(Some(ActiveExecution {
                 intent,
                 stage: ActiveStage::WaitingForDownload { plan },
@@ -2738,6 +2752,27 @@ impl ActiveExecution {
             }
         }
     }
+}
+
+/// A permit for a transfer. A small one, on a provider whose commits
+/// are shared by the transfers of the moment, takes a place in the
+/// lane of small transfers; when the lane is full or closed it takes a
+/// transfer slot like any other.
+fn acquire_transfer(
+    app: &mut DaemonApp,
+    class: WorkClass,
+    small: bool,
+) -> Result<crate::workgate::WorkPermit, crate::workgate::WorkPermitDenied> {
+    if small && app.provider().capabilities().small_transfers_share_a_commit {
+        let lane = match class {
+            WorkClass::Download => WorkClass::SmallDownload,
+            _ => WorkClass::SmallUpload,
+        };
+        if let Ok(permit) = app.try_acquire_work(lane) {
+            return Ok(permit);
+        }
+    }
+    app.try_acquire_work(class)
 }
 
 /// How long an intent waits for the move that another intent carries
@@ -3064,6 +3099,7 @@ fn plan_intent(
                 remote_unchanged_since_sync: false,
                 hashed_local_state: None,
                 remote_op_id: None,
+                remote_size: None,
             };
             // Best-effort: probe the remote object's op-id so the sync
             // index records the writer's id, not this device's download
@@ -3197,6 +3233,7 @@ fn plan_delete(
         remote_unchanged_since_sync: false,
         hashed_local_state: None,
         remote_op_id: None,
+        remote_size: None,
     };
     // Every mode probes first: the stat tells a directory (which
     // expands into per-entry deletes, since no provider deletes a tree
@@ -3798,6 +3835,7 @@ fn plan_upload(
         remote_unchanged_since_sync: false,
         hashed_local_state: None,
         remote_op_id: None,
+        remote_size: None,
     };
     if env.sync_mode != vapor_shared::SyncMode::TwoWay {
         return PlanOutcome::Upload(plan);
@@ -4079,6 +4117,7 @@ fn continue_plan_download(
         );
     }
     plan.remote_op_id = remote_entry.and_then(|entry| entry.op_id.clone());
+    plan.remote_size = remote_entry.map(|entry| entry.size_bytes);
     // An object with the size of the content last synced here, while
     // the local file is here: the object may have been touched and not
     // changed (a `touch`, a rewrite with the same bytes). Its content
@@ -4177,6 +4216,7 @@ fn continue_download_unchanged_check(
         return PlanOutcome::Download(plan);
     };
     plan.remote_op_id = remote.op_id.clone();
+    plan.remote_size = Some(remote.size_bytes);
     if remote.size_bytes == index.size_bytes
         && probe.content_hash_ok().as_deref() == Some(index.content_hash.as_str())
     {
@@ -4285,6 +4325,7 @@ fn continue_download_move_check(
         return PlanOutcome::Download(plan);
     };
     plan.remote_op_id = remote.op_id.clone();
+    plan.remote_size = Some(remote.size_bytes);
     // Only "no object" under the old name makes this a move. An object
     // there, or no answer, leaves a copy: the download brings it.
     let old_name_is_gone = matches!(probe.also_stat, Some(Ok(None)));
@@ -6005,6 +6046,51 @@ mod tests {
 
     /// The fixture's wall clock: past the move-settle window, so a
     /// delete under test is never mistaken for a rename in flight.
+    #[test]
+    fn a_small_transfer_takes_the_lane_only_where_commits_are_shared() {
+        // The filesystem provider flushes one drive for the transfers
+        // of a moment: its small transfers have a lane.
+        let mut shared = DaemonApp::new(Box::new(FilesystemProvider::new()));
+        shared.apply_throttle_inputs(ThrottleInputs::default());
+        let slots = shared.workgate_snapshot().caps.upload_concurrency;
+        let lane = slots * constants::engine::SMALL_TRANSFERS_PER_SLOT;
+        let small: Vec<_> = (0..lane + slots)
+            .map(|_| acquire_transfer(&mut shared, WorkClass::Upload, true).expect("a permit"))
+            .collect();
+        assert_eq!(
+            small
+                .iter()
+                .filter(|permit| permit.class == WorkClass::SmallUpload)
+                .count(),
+            lane,
+            "the lane fills first, and the slots take what is left"
+        );
+        assert!(acquire_transfer(&mut shared, WorkClass::Upload, true).is_err());
+        assert_eq!(
+            acquire_transfer(&mut shared, WorkClass::Download, true)
+                .expect("the other direction")
+                .class,
+            WorkClass::SmallDownload
+        );
+        // A transfer that is not small never takes a place in the lane.
+        assert_eq!(
+            acquire_transfer(&mut shared, WorkClass::Download, false)
+                .expect("a slot")
+                .class,
+            WorkClass::Download
+        );
+
+        // A provider that pays for each transfer on its own has none.
+        let mut alone = DaemonApp::default();
+        alone.apply_throttle_inputs(ThrottleInputs::default());
+        assert_eq!(
+            acquire_transfer(&mut alone, WorkClass::Upload, true)
+                .expect("a slot")
+                .class,
+            WorkClass::Upload
+        );
+    }
+
     fn fixture_now() -> SystemTime {
         timestamp_ms(constants::engine::MOVE_SETTLE_DELAY_SECONDS * 1_000 + 1_000)
     }
@@ -8369,6 +8455,7 @@ mod tests {
             remote_unchanged_since_sync: false,
             hashed_local_state: None,
             remote_op_id: None,
+            remote_size: None,
         };
         let mut env = ExecutionEnv {
             local_root: Some(&fixture.local_root),

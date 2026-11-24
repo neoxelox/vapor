@@ -125,6 +125,40 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// What every implementation holds to: a sample comes back with no
+    /// wait, a share of the device is never over 100, and Vapor never
+    /// uses more memory than the device has.
+    fn exercise_contract(sampler: &dyn PlatformMetricsSampler) {
+        for _ in 0..2 {
+            let sample = sampler.sample();
+            assert!(sample.system_cpu_load_percent <= 100, "{sample:?}");
+            assert!(sample.vapor_cpu_load_percent <= 100, "{sample:?}");
+            assert!(sample.network_error_rate_percent <= 100, "{sample:?}");
+            if let (Some(vapor), Some(device)) =
+                (sample.vapor_memory_bytes, sample.device_memory_bytes)
+            {
+                assert!(vapor <= device, "{sample:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fake_samplers_satisfy_the_contract() {
+        exercise_contract(&StaticPlatformMetricsSampler::default());
+        exercise_contract(&StaticPlatformMetricsSampler::new(ThrottleInputs {
+            on_battery: true,
+            system_cpu_load_percent: 100,
+            vapor_memory_bytes: Some(64 << 20),
+            device_memory_bytes: Some(8 << 30),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn the_native_sampler_satisfies_the_contract() {
+        exercise_contract(&NativePlatformMetricsSampler::for_current_host());
+    }
+
     #[test]
     fn static_sampler_returns_seeded_snapshot() {
         let sampler = StaticPlatformMetricsSampler::new(ThrottleInputs {

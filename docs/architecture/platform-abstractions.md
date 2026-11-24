@@ -134,6 +134,15 @@ Per-provider OAuth tokens and other credentials. `get`, `set`,
 `delete`, `list`, plus `is_persistent` so a surface can tell the user
 when a value will not outlive the process.
 
+A read has three failures, and a caller must keep them apart.
+`NotFound`: the store answered, and the secret is not there.
+`Unavailable`: the store could not be asked, and the secret may be
+there (a locked login keychain on macOS; on Linux a keyring that is
+locked, a keyring service or a secrets command that fails). `Backend`:
+the store answered and refused (an item that names another binary).
+For a sign-in the first is a sign-out, the second is a wait, and the
+third is a new sign-in.
+
 | OS | Native API | Status |
 |---|---|---|
 | macOS | Keychain Services (`SecItem*` through `security-framework-sys` and `core-foundation`) | Shipped. One generic-password item per secret under the `sh.arn.vapor` service, created by `vapord` (`vapor auth login` hands it the value on standard input), so the daemon reads a token with no dialog. A background read never opens one. Details: `docs/operations/provider-auth-operations.md`. |
@@ -261,6 +270,23 @@ The fake (`InMemoryTrashBin`) moves into a directory the test owns and
 can be told to refuse, which is how the fallback is tested. The fake
 and the native bin run the same contract test.
 
+### `ProxySettings`
+
+The HTTPS proxy that the network settings of the system name, for the
+HTTP transport of the providers. `https_proxy()` gives a host, a port,
+and the hosts that go around the proxy, or nothing. The transport asks
+again each 30 seconds, so a device that moves to another network
+follows.
+
+| OS | Mechanism | Status |
+|---|---|---|
+| macOS | `SCDynamicStoreCopyProxies` (System Configuration): the proxies of the current network, as System Settings shows them | Shipped. A proxy with a fixed address only: a network that names its proxy with an auto-configuration script is not followed (`docs/tasks/core.md`). |
+| Windows | WinHTTP proxy settings | Planned. Reports none today. |
+| Linux | none in one place: a desktop keeps it in its own settings store | Reports none. The environment of the service carries the proxy, and the transport reads `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` on every OS before it asks this trait. |
+
+The fake (`FixedProxySettings`) gives a fixed answer. The fake and the
+native settings run the same contract test.
+
 ## Parity matrix
 
 Every trait must deliver the same contract on an OS before that OS
@@ -276,6 +302,7 @@ ships a surface (`AGENTS.md` §1). Where each one stands:
 | `FilesystemCapabilities` | shipped (xattr) | shipped (xattr, side-file fallback) | stub |
 | `ProcessSupervisor` | shipped (signals) | shipped (signals) | stub |
 | `TrashBin` | shipped (`NSFileManager`) | shipped (freedesktop trash) | stub |
+| `ProxySettings` | shipped (System Configuration) | none to read; the environment carries it | reports none |
 
 macOS is the one shipping OS today. Linux has its native
 implementations and no app or release lane yet. The stubs compile, so

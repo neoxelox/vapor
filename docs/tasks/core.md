@@ -99,53 +99,75 @@ a task costs a user.
       routine (content-addressed stores such as `.git/objects`,
       dependency folders, build output), and a count in the question
       that follows the burst.
-- [ ] E-31 Small files move at about 340 a second to a cloud folder on
-      this device, and the drive is the limit. Measured on 2026-11-23
-      with a release build in `Idle` on 12 cores: 6 000 files of 100
-      bytes reach the cloud folder in 19 s, the first after 2 s. Before
-      the flushes of the drive were shared and the scan of a burst
-      started on time, the figures were 200 a second and 31 s. A file
-      now costs its share of one flush of the drive (`F_FULLFSYNC`) and
-      three commits of the state database, which wait behind the
-      flushes of the other files. Three changes were measured and gave
-      nothing: one transaction for the outcomes of one harvest, a short
-      wait for the job that follows a job, and a least time between two
-      ticks. Left to try: more small uploads at a time than the
-      transfer cap of the throttle state, because the files in flight
-      share a flush and the cap is 6 on that host; and one commit for a
-      whole tick. The removal of a folder of 6 000 files is one
-      deletion in the cloud and takes 3 s after the answer to the
-      mass-delete question.
-- [ ] E-44 The look for another spelling of a folder reads every
-      index row under the folder when all of them are spelled as the
-      folder is (`sync_index_row_spelled_otherwise`). It runs on the
-      tick thread each time the removal of a folder is planned, so a
-      folder of 100 000 files costs a scan of 100 000 index entries for
-      each look. The index now holds the path next to the folded key,
-      so the scan reads no table row; a seek that needs no scan is
-      still to find. Found by the review of the pull request,
-      2026-11-23.
-- [ ] E-43 Ask about a name in the cloud folder that cannot be synced,
-      as a local one is asked about. A file with a backslash in its
-      name in the cloud folder of the filesystem provider stays there
-      with one warning in the log, and `vapor decisions` and
-      `vapor ignored` do not show it. The provider trait carries a
-      remote entry only as a valid path, so the walk never sees such a
-      name: the trait needs a way to report it.
+- [ ] E-31 Small files move at about 530 a second to a cloud folder on
+      this device, and the tick thread is the limit. Measured on
+      2026-11-24 with a release build in `Idle` on 12 cores: 6 000
+      files of 100 bytes reach the cloud folder in 11 s, the first
+      after 2.5 s (310 a second and 19.3 s before, on the same host).
+      Three changes gave that: small transfers run 30 at a time next
+      to the 6 transfer slots and share each flush of the drive
+      (`F_FULLFSYNC`), every write of a tick is one write to the log of
+      the state database, and a status snapshot is built four times a
+      second under load and not at each tick. With every stage at 32
+      at a time the same burst ran at 610 a second, so the stages
+      before the upload (the probe of the planner and the hash, 6 at a
+      time each) hold a little, and the rest is the tick thread: one
+      commit and one harvest for each wake-up, and the checks of a
+      name's spelling on the volume (`stored_spelling`). Left to try:
+      fewer wake-ups under load, so a tick harvests more than a few
+      outcomes, and the planner and hash stages wider for small files.
+      The removal of a folder of 6 000 files is one deletion in the
+      cloud and takes 3 s after the answer to the mass-delete question.
+- [ ] E-44 The first look for another spelling of a folder still
+      reads every index row under the folder when all of them are
+      spelled as the folder is (`sync_index_row_spelled_otherwise`): 8
+      ms for a folder of 100 000 files, in a release build, on the
+      tick thread. The answer is now remembered until the index gets a
+      new path, so a folder removal that is planned again while it
+      waits costs no second read. A seek that needs no read at all is
+      still to find: no index answers "in this range of folded keys
+      and outside that range of paths". A table of the folder
+      spellings the index holds would, at the cost of a write for each
+      new folder. Found by the review of the pull request, 2026-11-23.
+- [ ] E-45 A scan that the user asks for, or that a profile starts
+      with, holds every other piece of work of the profile until the
+      scan ends, for 60 seconds at most
+      (`STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS`). The wait is
+      there for a start after a crash, where the scan rebuilds what the
+      daemon held in memory. `vapor reconcile` and Sync now queue the
+      same scan with the same wait, so on a large Google Drive folder a
+      file that changed on another device arrives up to a minute later
+      because the user asked for a sync. With the test account on
+      2026-11-24 a profile that was enabled again got a waiting file
+      after 64 s, on a tree of 77 folders whose scan took 90 s then and
+      takes about 10 s now. Decide which scans need the wait, and
+      whether a scan asked for by the user needs it at all.
 
 ## Providers
 
 - [ ] P-1 Give the second of two Google Drive files with one name in
       one folder a local name of its own (an alias, as a case collision
-      gets). Today one of the two syncs, the choice is stable, and a
-      warning names the other.
+      gets). Today one of the two syncs, the choice is stable, a
+      warning names the other, and since 2026-11-24 an
+      `unsyncable-name` question says that a second file of that name
+      stays in the cloud. Checked with the test account on 2026-11-24:
+      both devices ask, and the question goes when one of the two
+      files gets another name in Google Drive.
 - [ ] P-2 Keep the Drive file id in the sync index. The Drive feed
       reports a deletion by id, and the provider's id cache is empty
       after a restart, so a deletion made in the cloud while the daemon
       was down is found by the startup reconcile and not by the feed.
-- [ ] P-3 Make the HTTP transport read the proxy settings and the
-      system's root certificates. Today it uses neither, so a network
-      that inspects TLS cannot sync.
+- [ ] P-3 Check the HTTP transport on a network that inspects TLS, and
+      follow a proxy that an auto-configuration script names. The
+      transport now trusts the system's root certificates next to the
+      shipped ones, and reads the proxy from `HTTPS_PROXY`,
+      `ALL_PROXY`, and `NO_PROXY`, or from the network settings of
+      macOS. A stand-in for a proxy proves in Tier 1 that a request
+      asks it for a tunnel. Nobody ran it on a network that inspects
+      TLS or behind a real proxy, and no test may use the network. A
+      proxy that needs a sign-in other than a user and a password in
+      its address, and a script that names the proxy (PAC), are not
+      followed.
 - [ ] P-13 Decide whether a guarded overwrite on Google Drive goes
       through version 2 of the API, which has a conditional write of
       content. Version 3 has none, so the provider reads the versions
@@ -176,19 +198,19 @@ a task costs a user.
       Also seen with the account: `files.version` grows by 2 or 3 for
       one overwrite of content and by 5 to 7 for two, so it does not
       tell a second writer.
-- [ ] P-14 A folder that is moved into the synced folder of Google
-      Drive from outside it reaches a device only at the next scan of
-      everything. Drive has one entry for the folder and none for the
-      files in it. The provider sends `FolderMoved` only for a folder
-      it knows (one it listed or resolved since the daemon started),
-      because the same entry stands for each new folder, whose files
-      come with entries of their own. A walk for each unknown folder
-      would close it, at the cost of one walk for each new folder of a
-      burst. The same holds for a folder that comes back from the
-      trash of Drive, or that moves out of the synced folder and back:
-      the entry of its removal makes the provider forget it, and the
-      entry of its return then reads as a new folder (not measured
-      with the account). Found with the test account, 2026-11-24.
+- [ ] P-14 A young folder that is moved into the synced folder of
+      Google Drive can still wait for the next scan of everything.
+      Drive has one entry for a folder that moved and none for what it
+      holds. The provider takes a folder that it never saw and that
+      was made in the last two minutes for a new one, whose files come
+      with entries of their own, unless the feed showed that folder
+      or a file in it outside the synced folder a moment before. Two
+      cases are left: a folder that was made and filled while no
+      daemon polled, and a young folder that holds only folders at its
+      top. An older folder gets its walk. Checked with the test
+      account on 2026-11-24: a folder that left and came back, and a
+      young folder that got a file outside and was moved back, each
+      held all its files on both devices within seconds.
 - [ ] P-15 A folder that moves in Google Drive can cost one device a
       new transfer. After the folder signal, of two devices that
       followed the move of a folder with 2 files into another folder,
@@ -211,6 +233,25 @@ a task costs a user.
       would cost a few requests. The walk of everything that such a
       rename starts counts as the scan of the day. Found by the review
       of the change, 2026-11-24.
+- [ ] P-17 The check of the cloud root costs Google Drive requests all
+      day. Each profile checks its two roots every 15 seconds
+      (`ROOT_CHECK_INTERVAL_SECONDS`), and on Google Drive one check
+      is two requests for each folder of the cloud root's path: 11 520
+      requests a day for `/Vapor`, on a device where nothing changes.
+      The changes feed already reports a root folder that moved, got
+      another name, or went to the trash. A check that follows the
+      feed, with the timer as a fallback at a longer interval, costs
+      nothing while nothing changes. Seen with the test account,
+      2026-11-24.
+- [ ] P-18 Check what the changes feed of Google Drive does with a
+      file that has a `/` in its name. The listing reports such a name
+      as one that cannot sync, and the user is asked. The feed builds
+      the path of a changed file from its name and the names of its
+      folders, so `2024/budget.txt` in the synced folder reads there
+      as a file `budget.txt` in a folder `2024`. With the test account
+      on 2026-11-24 the file never reached a device and nothing
+      failed, but what the intent of that entry did was not read.
+      Found by the review of the pull request.
 - [ ] P-12 Make the Drive check for a replaced version survive a stop
       of the daemon. An upload that lands leaves the check in memory
       for the next changes poll. A daemon that stops in between makes
@@ -235,14 +276,6 @@ a task costs a user.
       verification, or a narrower scope with what it costs. It gates
       general availability of the Drive provider and waits for the
       owner.
-- [ ] P-7 Give a removal that the `filesystem` feed derives from an
-      older event the time of the poll. An object that is gone when
-      the feed reads its create or write event becomes a removal with
-      the time of the newest event of the batch. When the removal
-      event of the watcher is in a later batch, that time is older
-      than the last sync, and the engine drops the removal until the
-      next whole-scope scan. The feed needs the clock of the daemon
-      for this, which the provider does not get today.
 - [ ] P-9 Small files move through Google Drive at about 2 a second.
       400 files of 1 KB took 214 s from one device to the other (the
       upload, the changes poll, and the download together), and 31
@@ -252,8 +285,18 @@ a task costs a user.
       took 9 s to 12 s from device to device. On the build of
       2026-11-24 the 400 files took 208 s (1.9 a second), their
       removal 82 s after the answer, the 31 files 32 s, and one save
-      5 s to 11 s. Measure the upload and the download apart, then
+      5 s to 11 s. The later runs of that day timed the upload apart:
+      the 400 files took 154 s with a quiet host and 181 s with a soak
+      on it, and the queue of the sending device was empty after 63 s
+      and 73 s (about 6 uploads a second). So more than half of the
+      way is the changes poll and the downloads of the other device.
+      Measure those two apart, then
       raise what runs in parallel within the rate limits of the API.
+      The engine has a lane for small transfers since 2026-11-24, five
+      for each transfer slot, and Google Drive leaves it off
+      (`small_transfers_share_a_commit`): each of its transfers is a
+      request that counts against the rate limit, so the width for
+      Drive has to come from a measurement with the account.
       Found with the dedicated test account in a Mac guest,
       2026-11-22.
 ## Platform layer
@@ -282,47 +325,35 @@ a task costs a user.
         on the Linux CI job, as the macOS test does, and
         `docs/architecture/platform-abstractions.md` no longer says
         "with no interface speed".
-- [ ] PL-8 On a build with no Developer ID, `vapor` cannot read the
-      sign-in that `vapord` wrote to the keychain. The keychain lets a
-      process read an item with no dialog only when the item names the
-      code of that process, and an item holds the code of the one
-      binary that made it. The daemon binary makes it, so the daemon
-      of an install reads it. Two things then hold for a sign-in: the
-      look for the cloud folder in `vapor init`, right after the
-      sign-in, and a daemon started as `vapor run` with Google Drive.
-      A release signed with a Developer ID has one team for both and
-      is not affected. A second item made by `vapor` itself, or the
-      token handed to the look in memory, would close it. Found by the
-      review of the pull request, 2026-11-23. Seen in a guest with the
-      test account the same day: `vapor init --provider gdrive --token
-      -` stores the sign-in, the daemon reads it and syncs, and the
-      profile step of `init` says that the cloud folder "was not looked
-      up" with the raw keychain error ("The user name or passphrase you
-      entered is not correct"), which reads as a failed sign-in.
-- [ ] PL-9 A secret store that does not answer must not read as "no
-      secret". The Linux store runs `secret-tool lookup` and takes exit
-      code 1 with no output for a secret that is not there; a D-Bus
-      failure or a locked collection may answer the same way (not
-      checked on a Linux desktop). The Drive provider looks at the
-      store each 30 seconds, so such an answer at two looks holds the
-      profile for a sign-in until the store answers again; before, a
-      daemon that ran did not look. Give the store an answer for "could
-      not ask" that is not `NotFound`. One more case of the same kind,
-      on every OS: a request that Drive refuses with 401 drops the
-      tokens in memory before it reads the store, so with a locked
-      keychain the profile says "sign in again" until the keychain
-      opens. Found by the review of the change, 2026-11-24.
+- [ ] PL-8 On a build with no Developer ID, a daemon started as
+      `vapor run` with Google Drive cannot read the sign-in that
+      `vapord` wrote to the keychain. The keychain lets a process read
+      an item with no dialog only when the item names the code of that
+      process, and an item holds the code of the one binary that made
+      it. The daemon binary makes it, so the daemon of an install
+      reads it, and `vapor run` holds for a sign-in that a new sign-in
+      does not give it. A release signed with a Developer ID has one
+      team for both and is not affected. A second item made by `vapor`
+      itself would close it, at the cost of two items that a sign-out
+      and a refresh must keep in step; `vapor run` could also start
+      the `vapord` next to it. The look for the cloud folder in `vapor
+      init` no longer reads the keychain: it uses the sign-in of that
+      run from memory. Found by the review of the pull request,
+      2026-11-23.
 - [ ] PL-1 Check in Finder that a file which Vapor moved to the macOS
       trash offers Put Back. The move goes through
       `NSFileManager.trashItem` now, and a contract test proves the
       file is in the trash of its volume; only a person at Finder sees
       the menu item. Needs the owner, in a guest window.
-- [ ] CT-5 Every `core/platform` trait ships with (a) an in-memory
-      fake, (b) a parameterized contract-test suite, and (c) native
-      implementations wired into that suite on every shipping OS.
-      `SecretStore` and `FsWatcher` have theirs; `ServiceInstaller`,
-      `PlatformMetricsSampler`, `IdleNotifier`, `FilesystemCapabilities`,
-      `ProcessSupervisor`, and `TrashBin` are open.
+- [ ] CT-5 Run the contract of `ServiceInstaller` against a native
+      implementation in Tier 1. Every other `core/platform` trait has
+      an in-memory fake and one contract body that the fake and the
+      native implementation both run. The native `ServiceInstaller`
+      registers a real job with the service manager of the host, which
+      no test may do on a contributor's device: its round trip runs in
+      Tier E2E with `--full` on a disposable runner and in Tier VM. A
+      service manager that a test owns (a launchd domain or a systemd
+      instance of its own) would let Tier 1 run it.
 
 ### Windows (deferred, optional)
 
@@ -366,6 +397,10 @@ the primary path is blocked by it. See `docs/tasks/README.md`.
       and backslash separators in the configuration, the logs, and the
       live state. The redactor splits a path at `/` today, and its
       tests with path fixtures run on Unix only.
+- [ ] C6-12 `core/platform/proxy` on Windows: the WinHTTP proxy
+      settings of the user, into `ProxySettings::https_proxy`. It
+      reports none today, so only `HTTPS_PROXY` in the environment is
+      followed there.
 - [ ] C6-11 The Windows installers, `Vapor-windows-x64` and
       `Vapor-windows-arm64`, as a `package (windows)` entry of
       `release.yml`. One installer holds the app, `vapord.exe`, and
@@ -397,6 +432,15 @@ runners. What remains before Linux ships a surface:
       `PATH`, as the macOS one does. Open with it: where `vapord` goes
       (`/usr/bin` or a private directory), and a distribution with
       neither format, which builds from source.
+- [ ] PL-10 Check on a Linux desktop what `secret-tool` answers for a
+      secret in a keyring that is locked. The store takes `lookup` with
+      exit code 1 and no output for "could not ask" when `search` still
+      lists the item, and for "not there" when it does not. That is
+      what the source of libsecret says, and a stand-in for the tool
+      proves the store's side of it in Tier 1. Nobody ran it against a
+      real locked keyring. The same run settles whether `secret-tool
+      search` prints the attributes on stdout or on stderr: the listing
+      of the store reads stdout only.
 - The `vapor service` round-trip against a real `systemctl --user`
   session (`cli.md` L2-6) and the rest of the Linux soak (TR-10).
 
@@ -420,12 +464,19 @@ runners. What remains before Linux ships a surface:
       allocation under contention and `BoundedFsEventRecorder`
       drop-count semantics. Run under the Tier-2 release gate; not a PR
       gate. Keep the test set small: `loom` is slow.
-- [ ] CT-11 Rerun Tier-1 property tests with a higher case count
-      (1 000 to 4 000 per property) under the Tier-2 release gate to
-      catch rare counterexamples the PR budget does not reach. Add the
-      properties that explicit cases cover today: throttle
-      monotonicity, conflict-suffix determinism, durable-queue FIFO,
-      ignore-rule precedence, the IPC handshake skew matrix.
+- [ ] CT-11 Add the properties that explicit cases cover today:
+      throttle monotonicity, ignore-rule precedence, and the IPC
+      handshake skew matrix. Path normalization, scheduler
+      superseding, retry backoff, the order of the durable queue, and
+      conflict copy names have theirs, and the release gate runs all
+      of them at 4 000 cases each (`scripts/perf.sh`).
+- [ ] CT-12 A Tier 1 test of a profile that ends while the daemon
+      runs with transfer workers on. The end of a runtime on its own
+      thread, and a profile with the same id that waits for that end
+      (`retiring`, `awaiting_retirement`), run in Tier E2E only: the
+      Tier 1 test of the live profile set runs every provider call on
+      the tick thread. Found by the review of the pull request,
+      2026-11-24.
 - [ ] T-16 Resource-ceiling integration tests over the cross-product in
       `docs/performance/acceptance-budgets-and-benchmark-harness.md`
       (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,
@@ -447,11 +498,13 @@ runners. What remains before Linux ships a surface:
       `soak.yml`), cgroup CPU and memory limits, Linux budgets for
       `perf.yml`, and the Google Drive soak mode once TR-8 lands.
 - [ ] TR-11 Scenarios through the real binaries that nothing runs yet:
-      a backward wall-clock step while the daemon runs, the CLI against
-      a daemon of another IPC version through two real binaries (the
-      skew matrix is in-process), and an upgrade (a state DB and a
-      config written by an older binary, opened by the new one, which
-      sets the database aside and rebuilds it). Each is one scenario.
+      a backward wall-clock step while the daemon runs, which needs a
+      host whose clock a test may set, and the CLI of one build against
+      the daemon of a build with another IPC version, which needs two
+      builds. The skew matrix is in-process, and
+      `core/cli/tests/fake_daemon.rs` runs the built CLI against a
+      stand-in that answers as a daemon of another version. The
+      upgrade of the state database has its scenario (S84).
 - [ ] TR-12 The Google Drive leg of the release gate has not run yet:
       the first release after the dedicated test account exists runs
       `./scripts/release.sh` with the Drive leg for real, and TR-8's
@@ -511,10 +564,3 @@ runners. What remains before Linux ships a surface:
       layout (six documents), and the test tiers (five places). The
       other places link to the owner. The toolchain baseline and the
       script list have one owner each already.
-- [ ] D-2 Bring the Rust toolchain of the contributor Mac in step with
-      the one that CI installs, and say in
-      `docs/development/toolchain-baseline.md` how to check it. CI
-      takes the latest stable at each run. A local toolchain that is
-      some months older passes `./scripts/lint.sh` on code that CI
-      rejects for a new deprecation, which cost one CI cycle on
-      2026-11-22.

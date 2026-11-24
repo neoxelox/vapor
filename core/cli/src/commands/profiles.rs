@@ -1,4 +1,5 @@
-//! `vapor profiles`: list, add, and remove sync profiles.
+//! `vapor profiles`: list, add, enable, disable, rename, and remove
+//! sync profiles.
 //!
 //! A profile is one pair of folders that Vapor keeps in sync: a local
 //! root, a cloud root, a provider, and a sync mode. `add` is the setup
@@ -7,9 +8,10 @@
 //! the checks live here once: a provider the daemon knows, a sync mode
 //! it knows, roots that do not overlap.
 //!
-//! Every write goes through the configuration lock. The first profile
-//! composes in a running daemon without a restart; a profile added next
-//! to running ones starts at the next daemon start.
+//! Every write goes through the configuration lock. A running daemon
+//! takes a profile that was added, enabled, disabled, or renamed
+//! within a few seconds, with no restart. `remove` deletes the sync
+//! state of a profile, so the daemon has to be stopped for it.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -103,9 +105,16 @@ impl ProfilesListReport {
             out.push_str("No sync profile yet. Set Vapor up with: vapor init\n");
         }
         for profile in &self.profiles {
+            // The id is what every command takes. The name is shown
+            // when the user gave the profile one of its own.
+            let label = if profile.name == profile.id {
+                profile.id.clone()
+            } else {
+                format!("{} \"{}\"", profile.id, profile.name)
+            };
             out.push_str(&format!(
                 "{}  {} -> {}  ({}, {}{})\n",
-                profile.id,
+                label,
                 profile
                     .local_root
                     .as_deref()
@@ -206,10 +215,6 @@ pub struct AddRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AddOutcome {
     pub profile: ProfileRow,
-    /// `live`: a running daemon composes the profile within seconds.
-    /// `restart`: other profiles run, so this one starts with the next
-    /// daemon start.
-    pub applies: &'static str,
     /// The command that signs the profile in, for a provider with an
     /// account.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,10 +236,7 @@ impl AddOutcome {
             profile.provider,
             profile.sync_mode,
         );
-        out.push_str(match self.applies {
-            "live" => "A running daemon starts it within a few seconds.\n",
-            _ => "It starts with the next daemon start: vapor service restart\n",
-        });
+        out.push_str("A running daemon starts it within a few seconds.\n");
         if let Some(command) = &self.sign_in {
             out.push_str(&format!("Sign in to {}: {command}\n", profile.provider));
         }
@@ -606,7 +608,6 @@ struct PlanOnDisk {
     planned: PlannedProfile,
     document: Map<String, Value>,
     config: VaporConfig,
-    existing: Vec<ResolvedProfile>,
 }
 
 /// Plans the request against the file on disk. The caller holds the
@@ -626,7 +627,6 @@ fn plan_on_disk(config_path: &Path, request: &AddRequest) -> Result<PlanOnDisk, 
         planned,
         document,
         config: load.config,
-        existing,
     })
 }
 
@@ -681,10 +681,24 @@ fn write_profile(
         );
         return;
     }
+    let mut list = take_profile_list(document, config);
+    list.push(profile_entry(profile));
+    document.insert(keys::KEY_PROFILES.to_string(), Value::Array(list));
+}
+
+/// The `profiles` list of the document, taken out of it. A file with
+/// no list whose top-level roots name the implicit `default` profile
+/// gives a list with that profile in it: only an entry of the list can
+/// stand next to another profile, or carry a name or an `enabled` of
+/// its own.
+fn take_profile_list(document: &mut Map<String, Value>, config: &VaporConfig) -> Vec<Value> {
+    use constants::config as keys;
     let mut list = match document.remove(keys::KEY_PROFILES) {
         Some(Value::Array(list)) => list,
         _ => Vec::new(),
     };
+    let implicit_exists = config.profiles.is_empty()
+        && (config.configured_local_root().is_some() || config.configured_cloud_root().is_some());
     if implicit_exists {
         let mut implicit = json!({
             constants::profile::KEY_ID: constants::profile::DEFAULT_PROFILE_ID,
@@ -703,8 +717,7 @@ fn write_profile(
         document.remove(keys::KEY_LOCAL_ROOT);
         document.remove(keys::KEY_CLOUD_ROOT);
     }
-    list.push(profile_entry(profile));
-    document.insert(keys::KEY_PROFILES.to_string(), Value::Array(list));
+    list
 }
 
 /// `vapor profiles add`. `prompter` is given on a terminal: it confirms
@@ -735,12 +748,12 @@ pub fn add(
             confirmed = Some(planned);
         }
     }
-    let (planned, others_run) = with_config_lock(config_path, || {
+    let planned = with_config_lock(config_path, || {
         let PlanOnDisk {
             planned,
             mut document,
             config,
-            existing,
+            ..
         } = plan_on_disk(config_path, request)?;
         if confirmed.as_ref().is_some_and(|asked| *asked != planned) {
             // The answer was about another mirror than the file gives now.
@@ -750,10 +763,7 @@ pub fn add(
         }
         write_profile(&mut document, &config, &planned);
         vapor_shared::runtime_paths::write_config_document(config_path, &Value::Object(document))?;
-        // A profile that can run next to this one keeps the daemon
-        // shaped as it is until a restart.
-        let others_run = existing.iter().any(|profile| profile.invalid.is_none());
-        Ok((planned, others_run))
+        Ok(planned)
     })?;
 
     let one_way = if planned.mode == SyncMode::TwoWay {
@@ -791,9 +801,179 @@ pub fn add(
             enabled: true,
             problem: None,
         },
-        applies: if others_run { "restart" } else { "live" },
         sign_in,
         one_way,
+    })
+}
+
+/// What `enable`, `disable`, and `rename` do to a profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Change {
+    Enable,
+    Disable,
+    Rename(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeOutcome {
+    /// The profile as it is after the command.
+    pub profile: ProfileRow,
+    /// `false` when the profile was already as the command asks, and
+    /// nothing was written.
+    pub changed: bool,
+    #[serde(skip)]
+    change: Change,
+}
+
+impl ChangeOutcome {
+    pub fn render_text(&self) -> String {
+        let profile = &self.profile;
+        let id = &profile.id;
+        match (&self.change, self.changed) {
+            // The text says what the JSON carries: a profile that
+            // cannot run as it is written does not start.
+            (Change::Enable, true) => match &profile.problem {
+                Some(problem) => {
+                    format!("Enabled profile {id}. It cannot run as it is written: {problem}\n")
+                }
+                None => format!(
+                    "Enabled profile {id}. A running daemon starts it within a few seconds.\n"
+                ),
+            },
+            (Change::Enable, false) => format!("Profile {id} is enabled already.\n"),
+            (Change::Disable, true) => format!(
+                "Disabled profile {id}. Vapor stops syncing {} with {}. Its sync state, its \
+                 sign-in, and the files on both sides stay; start it again with: \
+                 vapor profiles enable {id}\n",
+                profile.local_root.as_deref().unwrap_or("its local folder"),
+                profile.cloud_root.as_deref().unwrap_or("its cloud folder"),
+            ),
+            (Change::Disable, false) => format!("Profile {id} is disabled already.\n"),
+            (Change::Rename(_), true) => {
+                format!("Profile {id} is now named \"{}\".\n", profile.name)
+            }
+            (Change::Rename(_), false) => {
+                format!("Profile {id} is named \"{}\" already.\n", profile.name)
+            }
+        }
+    }
+}
+
+/// `vapor profiles enable|disable|rename`: one edit of one profile in
+/// `vapor.json`. A running daemon takes it within a few seconds, and
+/// the other profiles go on meanwhile.
+///
+/// The id of a profile never changes: it names the sync state and the
+/// sign-in of the profile. `rename` sets the name that the surfaces
+/// show.
+pub fn change(
+    config_path: &Path,
+    profile_id: &str,
+    change: &Change,
+) -> Result<ChangeOutcome, ProfilesError> {
+    use constants::profile as keys;
+    let new_name = match change {
+        Change::Rename(name) => {
+            let name = name.trim();
+            if name.is_empty() || name.chars().any(char::is_control) {
+                return Err(ProfilesError::Invalid(
+                    "a profile name has one or more characters, on one line".to_string(),
+                ));
+            }
+            Some(name.to_string())
+        }
+        Change::Enable | Change::Disable => None,
+    };
+    vapor_shared::runtime_paths::with_config_lock(config_path, || {
+        let mut document = read_document(config_path)?;
+        let load = vapor_shared::config::load_from(config_path);
+        let problems = vapor_daemon::profiles::unusable_configuration(&load);
+        if !problems.is_empty() {
+            return Err(ProfilesError::UnreadableConfig(problems.join("; ")));
+        }
+        let before = vapor_daemon::profiles::resolve_profiles(&load.config);
+        let Some(current) = before.iter().find(|profile| profile.id == profile_id) else {
+            return Err(ProfilesError::UnknownProfile {
+                requested: profile_id.to_string(),
+                known: before.iter().map(|profile| profile.id.clone()).collect(),
+            });
+        };
+        let outcome =
+            |profile: &ResolvedProfile, config: &VaporConfig, changed: bool| ChangeOutcome {
+                profile: row(profile, &written_sync_mode(config, &profile.id)),
+                changed,
+                change: change.clone(),
+            };
+        let already = match change {
+            Change::Enable => current.enabled,
+            Change::Disable => !current.enabled,
+            Change::Rename(_) => Some(&current.name) == new_name.as_ref(),
+        };
+        if already {
+            return Ok(outcome(current, &load.config, false));
+        }
+
+        let mut list = take_profile_list(&mut document, &load.config);
+        let entry = list
+            .iter_mut()
+            .find(|entry| entry[keys::KEY_ID].as_str().map(str::trim) == Some(profile_id))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                ProfilesError::UnreadableConfig(format!(
+                    "the entry of profile '{profile_id}' is not an object"
+                ))
+            })?;
+        match change {
+            // Enabled is what a profile is with no key, as `add` writes it.
+            Change::Enable => {
+                entry.remove(keys::KEY_ENABLED);
+            }
+            Change::Disable => {
+                entry.insert(keys::KEY_ENABLED.to_string(), json!(false));
+            }
+            Change::Rename(_) => {
+                entry.insert(keys::KEY_NAME.to_string(), json!(new_name));
+            }
+        }
+        document.insert(
+            constants::config::KEY_PROFILES.to_string(),
+            Value::Array(list),
+        );
+
+        // The daemon decides from the whole file which profiles can
+        // run next to each other. A profile that the daemon would
+        // refuse once it is enabled, or that would make it refuse
+        // another one, is not enabled.
+        let after_config = vapor_shared::config::load_from_document(&document).config;
+        let after = vapor_daemon::profiles::resolve_profiles(&after_config);
+        let new_problem = after.iter().find_map(|profile| {
+            let had = before
+                .iter()
+                .find(|earlier| earlier.id == profile.id)
+                .and_then(|earlier| earlier.invalid.as_ref());
+            match (&profile.invalid, had) {
+                (Some(problem), None) => Some((profile.id.clone(), problem.clone())),
+                _ => None,
+            }
+        });
+        if let Some((id, problem)) = new_problem {
+            return Err(ProfilesError::Invalid(if id == profile_id {
+                format!("profile {id} cannot run: {problem}")
+            } else {
+                format!("profile {id} could not run next to it: {problem}")
+            }));
+        }
+        let changed = after
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| {
+                ProfilesError::UnreadableConfig(format!(
+                    "profile '{profile_id}' is not in the edited file"
+                ))
+            })?;
+        vapor_shared::runtime_paths::write_config_document(config_path, &Value::Object(document))?;
+        Ok(outcome(changed, &after_config, true))
     })
 }
 
@@ -1057,13 +1237,12 @@ mod tests {
     }
 
     #[test]
-    fn the_first_add_writes_the_top_level_scope_and_applies_live() {
+    fn the_first_add_writes_the_top_level_scope() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
         let outcome =
             add(&path, &storage(&temp), &request(&temp, "home"), None, now()).expect("add");
         assert_eq!(outcome.profile.id, "default");
-        assert_eq!(outcome.applies, "live");
         assert_eq!(outcome.sign_in, None);
         assert_eq!(outcome.one_way, None);
 
@@ -1089,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_profile_keeps_the_first_one_and_waits_for_a_restart() {
+    fn a_second_profile_keeps_the_first_one() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
         add(&path, &storage(&temp), &request(&temp, "home"), None, now()).expect("first");
@@ -1103,7 +1282,6 @@ mod tests {
             ..request(&temp, "work")
         };
         let outcome = add(&path, &storage(&temp), &second, None, now()).expect("second");
-        assert_eq!(outcome.applies, "restart");
         assert_eq!(outcome.profile.name, "Work files");
 
         let listed = list(&path);
@@ -1719,6 +1897,162 @@ mod tests {
         assert!(matches!(unknown, ProfilesError::UnknownProfile { .. }));
     }
 
+    fn document(path: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json")
+    }
+
+    #[test]
+    fn disable_enable_and_rename_edit_one_profile_and_keep_the_rest_of_the_file() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        add(&path, &storage(&temp), &request(&temp, "home"), None, now()).expect("first");
+        let work = AddRequest {
+            id: Some("work".to_string()),
+            ..request(&temp, "work")
+        };
+        add(&path, &storage(&temp), &work, None, now()).expect("second");
+        let mut with_setting = document(&path);
+        with_setting["timelineLimit"] = json!(77);
+        std::fs::write(&path, with_setting.to_string()).expect("write");
+
+        let disabled = change(&path, "work", &Change::Disable).expect("disable");
+        assert!(disabled.changed);
+        assert!(!disabled.profile.enabled);
+        assert!(
+            disabled
+                .render_text()
+                .contains("vapor profiles enable work"),
+            "{}",
+            disabled.render_text()
+        );
+        let listed = list(&path);
+        assert!(
+            listed.profiles[0].enabled,
+            "the other profile is not touched"
+        );
+        assert!(!listed.profiles[1].enabled);
+        assert_eq!(document(&path)["timelineLimit"], 77);
+
+        let before = std::fs::read_to_string(&path).expect("read");
+        let again = change(&path, "work", &Change::Disable).expect("disable again");
+        assert!(!again.changed);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "a profile that is disabled already writes nothing"
+        );
+
+        let enabled = change(&path, "work", &Change::Enable).expect("enable");
+        assert!(enabled.changed && enabled.profile.enabled);
+        assert!(
+            enabled
+                .render_text()
+                .contains("starts it within a few seconds"),
+            "{}",
+            enabled.render_text()
+        );
+        let mut cannot_run = enabled.clone();
+        cannot_run.profile.problem = Some("`cloudRoot` is not set".to_string());
+        assert_eq!(
+            cannot_run.render_text(),
+            "Enabled profile work. It cannot run as it is written: `cloudRoot` is not set\n"
+        );
+        let entry = document(&path)["profiles"][1].clone();
+        assert!(
+            entry.get("enabled").is_none(),
+            "an enabled profile is written as `add` writes it: {entry}"
+        );
+
+        let renamed =
+            change(&path, "work", &Change::Rename("  Work files ".to_string())).expect("rename");
+        assert!(renamed.changed);
+        assert_eq!(renamed.profile.id, "work", "the id never changes");
+        assert_eq!(renamed.profile.name, "Work files");
+        assert_eq!(list(&path).profiles[1].name, "Work files");
+        let text = list(&path).render_text();
+        assert!(
+            text.contains("work \"Work files\"  "),
+            "the list shows the name next to the id: {text}"
+        );
+        let same = change(&path, "work", &Change::Rename("Work files".to_string())).expect("same");
+        assert!(!same.changed);
+
+        for bad in ["", "   ", "two\nlines"] {
+            let refused = change(&path, "work", &Change::Rename(bad.to_string()))
+                .expect_err("a name that is no name");
+            assert!(matches!(refused, ProfilesError::Invalid(_)), "{refused}");
+        }
+        let unknown = change(&path, "nope", &Change::Disable).expect_err("unknown");
+        assert_eq!(
+            unknown.to_string(),
+            "no profile 'nope' (profiles: default, work)"
+        );
+    }
+
+    #[test]
+    fn the_first_profile_of_an_install_can_be_disabled_and_renamed_too() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        add(&path, &storage(&temp), &request(&temp, "home"), None, now()).expect("first");
+        assert!(document(&path).get("profiles").is_none());
+        let before = list(&path).profiles[0].clone();
+
+        let disabled = change(&path, "default", &Change::Disable).expect("disable");
+        assert_eq!(disabled.profile.id, "default");
+        assert!(!disabled.profile.enabled);
+        let written = document(&path);
+        assert!(
+            written.get("localRoot").is_none() && written.get("cloudRoot").is_none(),
+            "the roots moved into the profile entry: {written}"
+        );
+        let after = list(&path).profiles[0].clone();
+        assert_eq!(
+            ProfileRow {
+                enabled: true,
+                ..after
+            },
+            before,
+            "the profile is the same one, with the same folders"
+        );
+
+        change(&path, "default", &Change::Rename("Home".to_string())).expect("rename");
+        change(&path, "default", &Change::Enable).expect("enable");
+        let listed = list(&path);
+        assert_eq!(listed.profiles.len(), 1);
+        assert_eq!(listed.profiles[0].name, "Home");
+        assert!(listed.profiles[0].enabled);
+        assert!(listed.problems.is_empty(), "{listed:?}");
+    }
+
+    #[test]
+    fn a_profile_that_cannot_run_next_to_the_others_is_not_enabled() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        let outer = temp.path().join("outer");
+        // `inner` was written while it was disabled: its local folder
+        // lies inside the folder of the profile that runs.
+        std::fs::write(
+            &path,
+            json!({ "profiles": [
+                { "id": "outer", "provider": "filesystem",
+                  "localRoot": outer, "cloudRoot": temp.path().join("outer-cloud") },
+                { "id": "inner", "provider": "filesystem", "enabled": false,
+                  "localRoot": outer.join("sub"), "cloudRoot": temp.path().join("inner-cloud") },
+            ] })
+            .to_string(),
+        )
+        .expect("write");
+        let before = std::fs::read_to_string(&path).expect("read");
+        let refused = change(&path, "inner", &Change::Enable).expect_err("overlap");
+        assert!(
+            refused
+                .to_string()
+                .starts_with("profile inner cannot run: "),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), before);
+    }
+
     #[test]
     fn the_json_shapes_are_stable() {
         let temp = TempDir::new().expect("temp");
@@ -1752,7 +2086,6 @@ mod tests {
                     "syncMode": "push-only",
                     "enabled": true
                 },
-                "applies": "live",
                 "signIn": "vapor auth login --profile default",
                 "oneWay": "asks"
             })
@@ -1770,6 +2103,24 @@ mod tests {
                     "enabled": true
                 }],
                 "problems": []
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(
+                change(&path, "default", &Change::Rename("Shape".to_string())).expect("rename")
+            )
+            .expect("json"),
+            json!({
+                "profile": {
+                    "id": "default",
+                    "name": "Shape",
+                    "provider": "gdrive",
+                    "localRoot": local,
+                    "cloudRoot": "/Shape",
+                    "syncMode": "push-only",
+                    "enabled": true
+                },
+                "changed": true
             })
         );
         let mut yes = |_: &ProfileRow| Ok(true);

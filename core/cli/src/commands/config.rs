@@ -86,6 +86,13 @@ pub fn apply_hint(key: &str, value: &str) -> String {
     let top = key.split('.').next().unwrap_or(key);
     let mut hint = if constants::config::LIVE_RELOAD_KEYS.contains(&top) {
         format!("{key} saved; a running daemon applies it within a few seconds")
+    } else if top == constants::config::KEY_PROFILES {
+        // Which profiles there are applies at once; the folders, the
+        // provider, and the mode of one that runs do not.
+        format!(
+            "{key} saved; a running daemon starts and stops profiles within a few seconds, \
+             and `vapor status` says when a change to a profile that runs needs a restart"
+        )
     } else if constants::config::RESTART_REQUIRED_KEYS.contains(&top) {
         format!("{key} saved; restart the daemon to apply it (vapor service restart)")
     } else {
@@ -96,6 +103,58 @@ pub fn apply_hint(key: &str, value: &str) -> String {
         hint.push_str(&warning);
     }
     hint
+}
+
+/// What `config set` says after it saved `key`. The folders, the
+/// provider, and the mode are set at the top level for a profile that
+/// sets none of its own. Where a profile of the list sets its own,
+/// that one wins, and the answer says which profiles the value did not
+/// change: a user who turns a mirror back to `two-way` must not read
+/// "saved" for a profile that is still a mirror.
+pub fn set_hint(path: &Path, key: &str, value: &str) -> String {
+    use constants::config as keys;
+    const OF_EACH_PROFILE: [&str; 4] = [
+        keys::KEY_LOCAL_ROOT,
+        keys::KEY_CLOUD_ROOT,
+        keys::KEY_PROVIDER,
+        keys::KEY_SYNC_MODE,
+    ];
+    let entries: Vec<Value> = if OF_EACH_PROFILE.contains(&key) {
+        read_or_empty_object(path)
+            .ok()
+            .and_then(|document| document.get(keys::KEY_PROFILES).cloned())
+            .and_then(|profiles| profiles.as_array().cloned())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let with_their_own: Vec<String> = entries
+        .iter()
+        .filter(|entry| entry.get(key).is_some_and(|own| !own.is_null()))
+        .map(|entry| {
+            entry
+                .get(constants::profile::KEY_ID)
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string()
+        })
+        .collect();
+    if with_their_own.is_empty() {
+        return apply_hint(key, value);
+    }
+    let names = with_their_own.join(", ");
+    if with_their_own.len() == entries.len() {
+        return format!(
+            "{key} saved as the value for a profile that sets none of its own.\n\
+             No profile changed: each one sets its own {key} ({names}). \
+             Change it in the entry of the profile in vapor.json (vapor config get profiles)."
+        );
+    }
+    format!(
+        "{}\nNot changed: {names}. A profile that sets its own {key} keeps it; \
+         change it in the entry of the profile in vapor.json (vapor config get profiles).",
+        apply_hint(key, value)
+    )
 }
 
 /// What a one-way `syncMode` does, for the command that sets it. The
@@ -387,6 +446,49 @@ mod tests {
             .expect("has a default");
         assert!(limits.contains("\"cpuPercent\":15"), "{limits}");
         assert_eq!(get(&config_path(&temp), "deviceId").expect("get"), None);
+    }
+
+    #[test]
+    fn a_value_that_each_profile_sets_for_itself_is_not_reported_as_a_change() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        // No list: the top-level value is the profile's value.
+        std::fs::write(&path, r#"{"localRoot":"/tmp/a","cloudRoot":"/tmp/b"}"#).expect("write");
+        assert_eq!(
+            set_hint(&path, "syncMode", "two-way"),
+            apply_hint("syncMode", "two-way")
+        );
+
+        // A list where the one profile is a mirror by its own entry:
+        // the top-level value changes nothing, and the answer says so.
+        std::fs::write(
+            &path,
+            r#"{"profiles":[{"id":"default","localRoot":"/tmp/a","cloudRoot":"/tmp/b","syncMode":"pull-only"}]}"#,
+        )
+        .expect("write");
+        let hint = set_hint(&path, "syncMode", "two-way");
+        assert!(hint.contains("No profile changed"), "{hint}");
+        assert!(hint.contains("(default)"), "{hint}");
+        assert!(!hint.contains("restart the daemon"), "{hint}");
+
+        // One profile sets its own and one takes the top-level value.
+        std::fs::write(
+            &path,
+            r#"{"profiles":[
+                {"id":"default","localRoot":"/tmp/a","cloudRoot":"/tmp/b","syncMode":"pull-only"},
+                {"id":"work","localRoot":"/tmp/c","cloudRoot":"/tmp/d"}
+            ]}"#,
+        )
+        .expect("write");
+        let hint = set_hint(&path, "syncMode", "push-only");
+        assert!(hint.contains("restart the daemon"), "{hint}");
+        assert!(hint.contains("Not changed: default."), "{hint}");
+
+        // A key that no profile sets for itself.
+        assert_eq!(
+            set_hint(&path, "timelineLimit", "50"),
+            apply_hint("timelineLimit", "50")
+        );
     }
 
     #[test]

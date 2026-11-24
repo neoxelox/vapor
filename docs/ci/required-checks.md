@@ -152,6 +152,7 @@ to scripts.
   - triggers: `workflow_call` from `.github/workflows/release.yml`, `workflow_dispatch`
   - runner matrix: `macos-latest` (platforms join as their budgets are calibrated)
   - cell shape via env: `VAPOR_PERF_SOAK_DURATION` (default `12m`), `VAPOR_PERF_SOAK_SEED` (default `11`)
+  - cases for each property via env: `VAPOR_PERF_PROPERTY_CASES` (default `4000`)
   - `./scripts/perf.sh`
 - Soak workflow (`.github/workflows/soak.yml`)
   - triggers: `workflow_call` from `.github/workflows/release.yml`, `workflow_dispatch`

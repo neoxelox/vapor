@@ -631,12 +631,15 @@ of the following:
   monotonicity, retry backoff monotonicity, conflict-suffix determinism,
   durable-queue FIFO, ignore-rule precedence, IPC handshake skew
   matrix). `proptest` covers path normalization, scheduler superseding,
-  and retry backoff (`core/daemon/tests/properties.rs`); explicit cases
-  cover the rest until their properties land (`docs/tasks/core.md`).
+  retry backoff, durable-queue FIFO, and conflict-suffix determinism
+  (`core/daemon/tests/properties.rs`), 256 cases each in Tier 1 and
+  4 000 in the release gate; explicit cases cover the rest until their
+  properties land (`docs/tasks/core.md`).
 - **Platform-trait contract tests.** Each trait's test body runs against
-  the in-memory fake and the native impl on the shipping OS (the secret
-  store and the fs watcher do this today; the other traits are open
-  work in `docs/tasks/core.md`). Catches fake-vs-native drift.
+  the in-memory fake and the native impl on the shipping OS (every
+  trait but `ServiceInstaller` does this today; its native round trip
+  runs in Tier E2E `--full` and in Tier VM, and the rest is open work
+  in `docs/tasks/core.md`). Catches fake-vs-native drift.
 - **Bidirectional race tests**: simultaneous local/remote edits,
   rename+modify, delete/restore, loop-prevention verification.
 - **Crash / restart / recovery tests**: pre/post-restart durable
@@ -691,10 +694,10 @@ If a test's failure mode is "I typo'd a default value", skip it.
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, a release gate and on
   demand.
-  One bounded soak cell against the release profile with the SLO
-  checks asserted on its report; long-running property cases, fuzz
-  corpora, and `loom`-backed concurrency tests as they land. Not a PR
-  gate.
+  The property tests at 4 000 cases each, then one bounded soak cell
+  against the release profile with the SLO checks asserted on its
+  report; fuzz corpora and `loom`-backed concurrency tests as they
+  land. Not a PR gate.
 - **Tier S**: `./scripts/soak.sh` (the `tools/soak` driver), a
   release gate in `soak.yml` and on demand. Hours of seeded file churn on
   both sides of a real daemon, fault injection, and a model-checked

@@ -465,6 +465,47 @@ def f_if_match_race(root, rounds):
                           f"statuses and versions of each round: {outcomes}")
 
 
+def f_if_match_resumable(root):
+    """The same condition on a resumable upload through the older API
+    version: whether it is checked when the last chunk commits the
+    write, or only when the session opens. A large upload takes
+    minutes, and another device can write in that time."""
+    chunk = 256 * 1024
+    for label, write_between in (("another device writes between the first chunk and the last", True), ("nobody else writes", False)):
+        doc = create(root, f"guarded-resumable-{int(write_between)}.bin", b"base\n")
+        v2 = "https://www.googleapis.com/drive/v2/files/" + doc["id"]
+        etag = js("GET", v2 + "?fields=etag").get("etag") or ""
+        content = os.urandom(2 * chunk + 5)
+        opened, headers, raw = call(
+            "PUT",
+            "https://www.googleapis.com/upload/drive/v2/files/" + doc["id"] + "?uploadType=resumable",
+            {"If-Match": etag, "Content-Type": "application/json", "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(len(content))},
+            b"{}",
+        )
+        session = headers.get("Location") or headers.get("location")
+        if opened >= 300 or not session:
+            note("if-match-resumable", f"{label}: the session did not open ({opened}): {raw[:200]!r}")
+            continue
+        first, _, _ = call("PUT", session, {"Content-Range": f"bytes 0-{chunk - 1}/{len(content)}"}, content[:chunk])
+        if write_between:
+            overwrite(doc["id"], b"another device wrote while the upload ran\n")
+        last, _, raw = call("PUT", session, {"Content-Range": f"bytes {chunk}-{len(content) - 1}/{len(content)}"}, content[chunk:])
+        head = js("GET", f"{API}/files/{doc['id']}?fields=md5Checksum").get("md5Checksum")
+        holds = "the upload" if head == md5(content) else "the write of the other device" if write_between and head == md5(b"another device wrote while the upload ran\n") else "other content"
+        note("if-match-resumable", f"{label}: the session opened with {opened}, the first chunk answered {first}, the last chunk answered {last}; the file holds {holds}")
+    # A session that opens with a condition that no longer holds.
+    doc = create(root, "guarded-resumable-stale.bin", b"base\n")
+    etag = js("GET", "https://www.googleapis.com/drive/v2/files/" + doc["id"] + "?fields=etag").get("etag") or ""
+    overwrite(doc["id"], b"another device wrote first\n")
+    opened, _, _ = call(
+        "PUT",
+        "https://www.googleapis.com/upload/drive/v2/files/" + doc["id"] + "?uploadType=resumable",
+        {"If-Match": etag, "Content-Type": "application/json", "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": "10"},
+        b"{}",
+    )
+    note("if-match-resumable", f"a session whose condition no longer holds when it opens answered {opened}")
+
+
 def f_ranges(big_id, first, second):
     revs = revisions(big_id)
     old = [r for r in revs if r.get("md5Checksum") == md5(first)]
@@ -556,6 +597,21 @@ def cloud(args):
         head = js("GET", f"{API}/files/{target['id']}?fields=md5Checksum,headRevisionId")
         for r in revisions(target["id"]):
             print(json.dumps({"time": r.get("modifiedTime"), "size": r.get("size"), "head": r.get("md5Checksum") == head.get("md5Checksum")}))
+    elif action == "create":
+        # A new file in the folder `path`, with a name as it is given: a
+        # name with a `/` in it is one that no sync path can carry.
+        done = create(target["id"], args[2], (args[3] if len(args) > 3 else "written in the cloud").encode() + bytes([10]))
+        print(f"created {done['name']!r} in {target['name']}")
+    elif action == "rename-child":
+        # A child of the folder `path` by its exact name, which may hold
+        # a `/` and is then no part of a path that `find` can follow.
+        escaped = args[2].replace("\\", "\\\\").replace("'", "\\'")
+        q = urllib.parse.quote(f"'{target['id']}' in parents and name = '{escaped}' and trashed = false")
+        found = [f for f in js("GET", f"{API}/files?q={q}&fields=files(id,name)&pageSize=100").get("files", []) if f["name"] == args[2]]
+        if not found:
+            sys.exit(f"drive_probe: no child {args[2]!r} in {target['name']}")
+        done = js("PATCH", f"{API}/files/{found[0]['id']}?fields=id,name", {"name": args[3]})
+        print(f"renamed {args[2]!r} to {done['name']!r}")
     elif action == "trash":
         done = js("PATCH", f"{API}/files/{target['id']}?fields=id,name,trashed", {"trashed": True})
         print(f"{done['name']} is in the trash of the account")
@@ -602,6 +658,7 @@ def main():
             f_folder_entries(root["id"])
             f_if_match(root["id"])
             f_if_match_race(root["id"], 10)
+            f_if_match_resumable(root["id"])
             return
         if sys.argv[1:2] == ["race"]:
             f_race_detail(root["id"], int(sys.argv[2]) if len(sys.argv) > 2 else 8)

@@ -377,6 +377,9 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S79 | a version that an upload replaced unseen, left by the provider as a `~conflict-replaced` copy, is one conflict decision whose option says what the copy is, and the answer keeps it on both sides |
 | S80 | two profiles on one cloud folder that both change one file before either upload lands keep both edits on both devices and in the cloud |
 | S81 | a burst of new files that the watcher folds into one scan of their folder starts to reach the cloud a few seconds after the burst ends, not after the 30 s the scan may be put off for |
+| S82 | a profile that `vapor profiles` adds, disables, enables, or renames while the daemon runs is started, stopped, or renamed within seconds; the other profile keeps syncing, and status asks for no restart |
+| S83 | a file in the cloud folder whose name has a backslash opens an `unsyncable-name` decision that says where the file is, never reaches this device, and the question is withdrawn once the file is renamed in the cloud |
+| S84 | a state database that a build with another schema wrote is set aside next to itself at the start, the index is built again from both folders, and a file that left this device while the daemon was down comes back from the cloud: nothing is deleted on either side |
 | R01 | install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own (`--full`, disposable runners only) |
 
 ## Extending the harness
@@ -395,6 +398,9 @@ Discipline rules:
 - **Observe through product surfaces.** CLI exit codes and `--json`
   output, the daemon log, the trees, and read-only state-DB queries.
   Never add a test-only hook to the daemon for the harness's benefit.
+  A scenario may prepare a state database while no daemon runs, as
+  the one for a database of another build does; what it asserts, it
+  reads.
 - **Bounded waits, never bare sleeps.** Every wait has a deadline on
   the clock and a named condition. To prove something stays true, use
   `hold_for`, which polls the condition for the window.
@@ -440,7 +446,7 @@ Discipline rules:
 |---|---|---|---|
 | Tier 1 | `./scripts/test.sh` | every PR | module + composed correctness, in-process |
 | Tier E2E | `./scripts/e2e.sh` | every PR (all three OS jobs; `--full` on macOS) + locally for runtime-affecting changes | the shipped binaries work black-box, end to end |
-| Tier 2 | `./scripts/perf.sh` | release pipeline | one soak cell with the SLO checks asserted on its report |
+| Tier 2 | `./scripts/perf.sh` | release pipeline | the property tests at 4 000 cases each, and one soak cell with the SLO checks asserted on its report |
 | Tier S | `./scripts/soak.sh` | release pipeline + on demand | five cells of churn with faults; nothing lost, both trees converged (`soak-testing.md`) |
 
 Tier E2E complements Tier 1; it never replaces the Tier 1 tests that

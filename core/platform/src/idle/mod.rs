@@ -96,6 +96,31 @@ impl IdleNotifier for ManualIdleNotifier {
 mod tests {
     use super::*;
 
+    /// What every implementation holds to: a reading comes back with
+    /// no wait, and the derived view follows it at both ends. The
+    /// reading itself is whatever the host says: a device that nobody
+    /// touched for a weekend reads two days, and the contract holds
+    /// there too.
+    fn exercise_contract(notifier: &dyn IdleNotifier) {
+        for _ in 0..2 {
+            let _ = notifier.idle_for();
+        }
+        assert_eq!(notifier.user_activity(Duration::ZERO), UserActivity::Idle);
+        assert_eq!(notifier.user_activity(Duration::MAX), UserActivity::Active);
+    }
+
+    #[test]
+    fn the_fakes_satisfy_the_contract() {
+        exercise_contract(&AlwaysIdleNotifier);
+        exercise_contract(&ManualIdleNotifier::new(Duration::ZERO));
+        exercise_contract(&ManualIdleNotifier::new(Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn the_native_notifier_satisfies_the_contract() {
+        exercise_contract(&NativeIdleNotifier::for_current_host());
+    }
+
     #[test]
     fn always_idle_notifier_classifies_user_as_idle_against_threshold() {
         let notifier = AlwaysIdleNotifier;

@@ -685,7 +685,8 @@ impl RemotePoller {
                         crate::safeguards::IntentSource::Fresh,
                     )?;
                 }
-                // The intents are durable; only now may the cursor move.
+                // The intents and the cursor are written in one
+                // transaction of the tick: both are saved, or neither.
                 if self.cursor.as_deref() != Some(page.next_cursor.as_str()) {
                     state_db.set_state(&self.cursor_state_key, &page.next_cursor, now)?;
                     self.cursor = Some(page.next_cursor);

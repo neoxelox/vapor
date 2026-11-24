@@ -13,7 +13,7 @@ in its pull request and in the documents under `docs/`.
 
 - Two-way sync between a folder on this device and a folder in the cloud, with two providers: any mounted folder (`filesystem`) and Google Drive (`gdrive`, `vapor auth login`).
 - One-way modes for each profile: `pull-only` (a read-only local mirror) and `push-only` (a read-only cloud backup). A one-way profile syncs nothing until you confirm what the mode overwrites and removes.
-- Several sync profiles at once, each with its own state. `vapor profiles list|add|remove` manages them, and the first `add` sets a fresh install up with no restart.
+- Several sync profiles at once, each with its own state. `vapor profiles list|add|enable|disable|rename|remove` manages them, and the first `add` sets a fresh install up with no restart.
 - Conflicts keep every version. When several devices edit a file before it syncs, one question in `vapor decisions` lists the versions and lets you pick the one to keep.
 - Decisions. When an action that cannot be undone rests on evidence that reads two ways, Vapor holds only the files in question and asks: a burst of deletions, a sync folder that is missing or replaced, a file where the other side has a folder, a name that cannot sync, a one-way mode.
 - A trash for everything Vapor removes on this device (`vapor trash list|restore|empty`), kept for `trash.retentionDays`.
@@ -24,6 +24,7 @@ in its pull request and in the documents under `docs/`.
 - The bandwidth ceiling is a share of what your link carries. Vapor measures that from its own transfers, so a faster link syncs faster.
 - Settings apply while Vapor runs: ceilings, ignore rules, safeguards, and the trash within seconds. `vapor status` says when a setting needs a restart.
 - Ignore rules in both directions: `preIgnoreRules`, `.gitignore`, `.vaporignore`, `postIgnoreRules`. `vapor status` counts what they hold back, and `vapor ignored` lists each path with its rule.
+- `vapor profiles enable|disable|rename`, and a profile change needs no restart. Small files move about 70% faster to a folder on this device. Vapor follows an HTTP proxy of the system or the environment and trusts the system's certificates, and a locked keychain or a slow consent no longer costs a sign-in. A scan of a Google Drive folder is about eight times faster, and a file or a folder that is moved out of the synced Drive folder and back follows on every device.
 - The `vapor` command line: `init`, `status`, `pause`, `resume`, `reconcile`, `profiles`, `decisions`, `ignored`, `trash`, `config`, `auth`, `service`, `timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`. Most take `--json`.
 - `vapor report` writes a support report with file and folder names replaced by codes. `--keep-paths` keeps the names.
 - Start at login, crash-loop protection that survives a restart, and a supervisor on every install that restarts a crashed daemon, with the app open or closed.

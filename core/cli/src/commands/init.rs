@@ -75,7 +75,17 @@ pub trait InitHost {
     /// and no token on stdin.
     fn sign_in(&mut self, provider: &str) -> Option<Result<String, String>>;
     /// Looks for the cloud folder in the account of `profile_id`.
-    fn cloud_folder(&mut self, provider: &str, profile_id: &str, cloud_root: &str) -> CloudFolder;
+    /// `sign_in` is the token this run has just stored, when it made
+    /// the sign-in itself: the look then needs no read of the secret
+    /// store, which on a build with no team signature gives a token
+    /// only to the daemon binary that wrote it.
+    fn cloud_folder(
+        &mut self,
+        provider: &str,
+        profile_id: &str,
+        cloud_root: &str,
+        sign_in: Option<&str>,
+    ) -> CloudFolder;
     fn service(&mut self) -> ServiceState;
     /// Registers the background service and starts the daemon. `Ok`
     /// may carry a line for the user.
@@ -313,7 +323,10 @@ fn first_profile(
     // look into the account. The profile does not exist yet: the
     // sign-in is stored under the id the first profile gets.
     let id = constants::profile::DEFAULT_PROFILE_ID;
-    let sign_in = sign_in_step(secrets, host, &[(id.to_string(), provider.clone())])?;
+    let SignIn {
+        step: sign_in,
+        made,
+    } = sign_in_step(secrets, host, &[(id.to_string(), provider.clone())])?;
     if sign_in.state == names::STATE_FAILED {
         return Ok(FirstProfile::Stopped(vec![sign_in]));
     }
@@ -340,7 +353,11 @@ fn first_profile(
     let folder = if sign_in.state == names::STATE_WAITS {
         CloudFolder::Unchecked("not signed in yet".to_string())
     } else {
-        host.cloud_folder(&preview.provider, &preview.id, &preview.cloud_root)
+        let token = made
+            .iter()
+            .find(|(profile_id, _)| *profile_id == preview.id)
+            .map(|(_, token)| token.as_str());
+        host.cloud_folder(&preview.provider, &preview.id, &preview.cloud_root, token)
     };
     let folder_line = match &folder {
         CloudFolder::Exists => format!(
@@ -414,6 +431,20 @@ fn existing_profiles_step(
             Some(problems.join("; ")),
         );
     }
+    // Set up, and switched off: nothing here is left to do, and the
+    // run must not read as "Vapor syncs now".
+    if !rows.is_empty() && rows.iter().all(|row| !row.enabled) {
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        return InitStep::new(
+            names::STEP_PROFILE,
+            names::STATE_WAITS,
+            Some(format!(
+                "every profile is disabled ({}); start one with: vapor profiles enable {}",
+                ids.join(", "),
+                ids[0]
+            )),
+        );
+    }
     // A one-way profile syncs nothing until its question has an
     // answer, however many runs ago the profile was written.
     let config = vapor_shared::config::load_from(config_path).config;
@@ -450,7 +481,23 @@ fn sign_in_existing(
         .filter(|entry| entry.state != constants::auth::STATE_NOT_NEEDED)
         .map(|entry| (entry.profile_id, entry.provider))
         .collect();
-    sign_in_step(secrets, host, &accounts)
+    Ok(sign_in_step(secrets, host, &accounts)?.step)
+}
+
+/// The sign-in step, and the tokens it stored: `(profile id, token)`
+/// for each sign-in this run made.
+struct SignIn {
+    step: InitStep,
+    made: Vec<(String, String)>,
+}
+
+impl SignIn {
+    fn of(step: InitStep) -> Self {
+        Self {
+            step,
+            made: Vec::new(),
+        }
+    }
 }
 
 /// Signs in each `(profile id, provider)` whose provider has an
@@ -459,20 +506,21 @@ fn sign_in_step(
     secrets: &Secrets<'_>,
     host: &mut dyn InitHost,
     accounts: &[(String, String)],
-) -> Result<InitStep, InitError> {
+) -> Result<SignIn, InitError> {
     let store = secrets.store;
     let accounts: Vec<&(String, String)> = accounts
         .iter()
         .filter(|(_, provider)| constants::provider::SIGN_IN_REQUIRED.contains(&provider.as_str()))
         .collect();
     if accounts.is_empty() {
-        return Ok(InitStep::new(
+        return Ok(SignIn::of(InitStep::new(
             names::STEP_SIGN_IN,
             names::STATE_NOT_NEEDED,
             None,
-        ));
+        )));
     }
     let mut waiting = Vec::new();
+    let mut made = Vec::new();
     for (profile_id, provider) in accounts {
         if auth::signed_in(store, profile_id, provider)? {
             continue;
@@ -481,38 +529,43 @@ fn sign_in_step(
             // Nothing here keeps a sign-in, so none is made: a browser
             // round whose token is gone when this command ends would
             // read as done and leave the daemon signed out.
-            return Ok(InitStep::new(
+            return Ok(SignIn::of(InitStep::new(
                 names::STEP_SIGN_IN,
                 names::STATE_FAILED,
                 Some(format!(
                     "{provider}: this host keeps no sign-in ({problem})"
                 )),
-            ));
+            )));
         }
         match host.sign_in(provider) {
-            Some(Ok(token)) => auth::store_sign_in(store, profile_id, provider, &token)?,
+            Some(Ok(token)) => {
+                auth::store_sign_in(store, profile_id, provider, &token)?;
+                made.push((profile_id.clone(), token));
+            }
             Some(Err(reason)) => {
-                return Ok(InitStep::new(
+                return Ok(SignIn::of(InitStep::new(
                     names::STEP_SIGN_IN,
                     names::STATE_FAILED,
                     Some(format!("{provider}: {reason}")),
-                ));
+                )));
             }
             None => waiting.push(profile_id.clone()),
         }
     }
-    if waiting.is_empty() {
-        return Ok(InitStep::new(names::STEP_SIGN_IN, names::STATE_DONE, None));
-    }
-    Ok(InitStep::new(
-        names::STEP_SIGN_IN,
-        names::STATE_WAITS,
-        Some(format!(
-            "sign in on a terminal with `vapor init`, or pipe a token: \
-             `<command that prints the token> | vapor init --token -` (profile {})",
-            waiting.join(", ")
-        )),
-    ))
+    let step = if waiting.is_empty() {
+        InitStep::new(names::STEP_SIGN_IN, names::STATE_DONE, None)
+    } else {
+        InitStep::new(
+            names::STEP_SIGN_IN,
+            names::STATE_WAITS,
+            Some(format!(
+                "sign in on a terminal with `vapor init`, or pipe a token: \
+                 `<command that prints the token> | vapor init --token -` (profile {})",
+                waiting.join(", ")
+            )),
+        )
+    };
+    Ok(SignIn { step, made })
 }
 
 fn service_step(
@@ -610,8 +663,17 @@ mod tests {
             self.sign_in.clone()
         }
 
-        fn cloud_folder(&mut self, provider: &str, profile_id: &str, _: &str) -> CloudFolder {
-            self.calls.push(format!("folder {provider} {profile_id}"));
+        fn cloud_folder(
+            &mut self,
+            provider: &str,
+            profile_id: &str,
+            _: &str,
+            sign_in: Option<&str>,
+        ) -> CloudFolder {
+            self.calls.push(match sign_in {
+                Some(token) => format!("folder {provider} {profile_id} with {token}"),
+                None => format!("folder {provider} {profile_id}"),
+            });
             self.folder.clone()
         }
 
@@ -806,6 +868,32 @@ mod tests {
     }
 
     #[test]
+    fn a_run_on_an_install_whose_profiles_are_all_disabled_says_how_to_start_one() {
+        let install = Install::fresh();
+        let mut host = Scripted::default();
+        install
+            .run(&install.flags(), None, &mut host)
+            .expect("first run");
+        profiles::change(&install.config(), "default", &profiles::Change::Disable)
+            .expect("disable");
+
+        let report = install
+            .run(&InitRequest::default(), None, &mut host)
+            .expect("second run");
+        assert!(
+            !report.initialized,
+            "an install that syncs nothing is not reported as set up: {report:?}"
+        );
+        assert!(
+            report
+                .render_text()
+                .contains("vapor profiles enable default"),
+            "{}",
+            report.render_text()
+        );
+    }
+
+    #[test]
     fn with_no_terminal_the_two_folders_have_to_be_given() {
         let install = Install::fresh();
         let mut host = Scripted::default();
@@ -849,12 +937,13 @@ mod tests {
             ]
         );
         // The sign-in comes before the folders, so the cloud folder is
-        // looked up in the account.
+        // looked up in the account, with the sign-in of this run and no
+        // read of the secret store.
         assert_eq!(
             host.calls,
             [
                 "sign-in gdrive",
-                "folder gdrive default",
+                "folder gdrive default with ya29.test",
                 "service",
                 "install None",
             ]

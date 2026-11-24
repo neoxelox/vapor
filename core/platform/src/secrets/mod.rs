@@ -34,9 +34,15 @@ pub use windows::NativeSecretStore;
 pub enum SecretStoreError {
     /// The named secret does not exist in the backing store.
     NotFound(String),
-    /// The OS-native store rejected the operation (e.g. user denied
-    /// Keychain access, libsecret D-Bus call timed out).
+    /// The OS-native store rejected the operation (the user denied
+    /// Keychain access, the item names another binary, a write failed).
     Backend(Box<dyn Error + Send + Sync>),
+    /// The store could not be asked: a keychain or a keyring that is
+    /// locked, a keyring service that gives no answer. It did not say
+    /// that the secret is gone, and it may answer later. A caller must
+    /// never take this for [`Self::NotFound`]: for a sign-in that would
+    /// read as a sign-out.
+    Unavailable(String),
     /// Operation is not supported on the current OS yet.
     Unsupported(&'static str),
 }
@@ -46,6 +52,7 @@ impl Display for SecretStoreError {
         match self {
             Self::NotFound(name) => write!(f, "secret '{name}' not found"),
             Self::Backend(error) => write!(f, "secret store backend failed: {error}"),
+            Self::Unavailable(reason) => write!(f, "secret store did not answer: {reason}"),
             Self::Unsupported(reason) => write!(f, "secret store not supported: {reason}"),
         }
     }

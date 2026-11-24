@@ -153,6 +153,14 @@ fn contract_upload_stat_download_delete_round_trip() {
             .unwrap_or_else(|error| panic!("{name}: enumerate failed: {error}"));
         assert_eq!(listed.len(), 1, "{name}: exactly the uploaded file");
 
+        // The listing that the walk asks for holds the same entries,
+        // and a folder of names that all sync reports no other name.
+        let listing = provider
+            .enumerate_with_unsyncable(&RemotePath::new("docs").expect("path"))
+            .unwrap_or_else(|error| panic!("{name}: listing failed: {error}"));
+        assert_eq!(listing.entries, listed, "{name}");
+        assert!(listing.unsyncable.is_empty(), "{name}");
+
         // Download round-trips the bytes.
         let destination = scratch.path().join("downloaded.bin");
         let outcome = provider
@@ -343,6 +351,7 @@ impl Provider for MockObjectStoreProvider {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
             changes_feed_is_watched: false,
+            small_transfers_share_a_commit: false,
         }
     }
 

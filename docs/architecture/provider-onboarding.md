@@ -23,7 +23,8 @@ Reference implementations:
 | `content_hash_algorithm()` | The hash the backend can serve cheaply (`Sha256` default, `Md5` for Drive-style metadata hashes). The engine hashes local files with the same algorithm so comparisons are meaningful. |
 | `ensure_cloud_sync_directory()` | Resolve-or-create the configured cloud root. Required, no silent-Ok default: a failure blocks sync with an actionable error. |
 | `root_identity()` / `adopt_root()` | The cloud root's stable identity, so a re-created or swapped folder at the same path is told apart from the adopted one (`data-flow.md` §Root identity). `root_identity` never creates the root: `NotFound` when missing, `Ok(None)` for a backend without an identity. `adopt_root` writes whatever marker the backend needs (the filesystem provider's `.vapor-root`) and returns the identity; Drive-style backends answer with the folder id for both. |
-| `enumerate()` / `stat()` / `content_hash()` | Read-side used by reconcile walks; `enumerate` is non-recursive so walks stay slice-interruptible. |
+| `enumerate()` / `stat()` / `content_hash()` | Read-side used by reconcile walks; `enumerate` is non-recursive so walks stay slice-interruptible. A walk asks for the listings of several folders at one time, each on a thread of its own, so a listing must be safe next to other listings and next to transfers. |
+| `enumerate_with_unsyncable()` | The listing the walk asks for: the entries of `enumerate`, and the names in the directory that cannot be a sync path (a `/` in a Drive name, a backslash). Such a name is no entry and never syncs; the engine asks the user about it for as long as a listing reports it. A backend that leaves a name out of `enumerate` reports it here at every listing. The default reports none. |
 | `begin_upload()` / `begin_download()` | Return a `TransferSession` that moves a bounded byte budget per `step()`. The session names its own step size (`step_bytes`, the chunk the backend wants) and, when it knows, what is left to move (`remaining_bytes`); the engine grants each step from the bandwidth bucket and never asks for more than is left. Uploads take a `RemotePrecondition` guard (keep-both safety), and every backend must honour it: `HashEquals` and `Absent` are part of the contract, not a capability. A backend that cannot make the check of `HashEquals` and the write one step must find a version that the write replaced without having compared it, and keep it next to the file as a copy named with `vapor_shared::conflict::copy_name` and `constants::conflict::REPLACED_VERSION` (`data-flow.md` §Conflict handling): the filesystem provider exchanges the two files, Google Drive reads the stored versions after the upload. The completed `TransferOutcome` carries the content hash and the remote object's mtime as the backend reports it after the transfer (`remote_modified_at`); the sync index records that mtime so the reconcile walk can tell a same-size remote edit from an untouched object, so report it whenever the backend has one. |
 | `delete()` | Prefer recoverable semantics (Drive moves to trash; filesystem removes). |
 | `move_object()` | One-call move of a file to another path, keeping its content and tagging it with the op-id, when `supports_server_side_move`. A missing source is `NotFound`, an occupied destination `PreconditionFailed`; the engine falls back to a plain upload on either. The filesystem provider renames; Drive patches name and parents. |
@@ -51,6 +52,16 @@ these flags (`ProviderCapabilities`):
   engine falls back to periodic reconcile enumeration.
 - `supports_server_side_move`: `move_object` moves a file with no
   re-upload; without it a rename is a delete and an upload.
+- `changes_feed_is_watched`: the feed is fed by a watcher on this
+  device and a poll costs no request, so the engine reads it each
+  second.
+- `small_transfers_share_a_commit`: the commit of a transfer is one
+  flush of a drive that the transfers of the same moment share. The
+  engine then runs small transfers (256 KiB at most, and deletions) in
+  a lane of their own: five for each transfer slot of the throttle
+  state, in each direction. A backend that pays for each transfer on
+  its own, with a request that counts against a rate limit, leaves it
+  off; its small transfers take the slots like any other.
 
 Nothing else is a flag, because the engine does not plan around
 anything else. An entry or a change carries the engine's op-id tag when
@@ -67,13 +78,18 @@ a content hash when the listing has one.
 1. **Module.** `core/providers/src/<name>/mod.rs`; constructor takes
    its dependencies injectable (HTTP transport, secret store, clock)
    so every flow tests offline.
-2. **Networking.** All HTTP goes through the `HttpTransport` seam
+2. **Networking.** The production transport trusts the certificate
+   authorities that ship with Vapor and the ones the system trusts, so
+   a network that inspects TLS with an authority of its own works. It
+   sends a request through the proxy that `HTTPS_PROXY` or `ALL_PROXY`
+   names (with `NO_PROXY` for the hosts that go around it), and with
+   neither set through the proxy of the system's network settings
+   (`ProxySettings` in `platform-abstractions.md`). A provider gets
+   both with no code of its own.
+   All HTTP goes through the `HttpTransport` seam
    (`core/providers/src/http.rs`). Production uses
    `NativeHttpTransport`; tests script `ScriptedHttpTransport`. Never
-   contact the network in Tier 1 tests (AGENTS.md §9.1). The native
-   transport reads no proxy setting and uses its bundled root
-   certificates, so a network that inspects TLS cannot sync yet
-   (`docs/tasks/core.md`).
+   contact the network in Tier 1 tests (AGENTS.md §9.1).
 3. **Auth.** Tokens live only in `core/platform/secrets::SecretStore`
    under `auth.{profile_id}.{provider}.token`, opened through
    `open_store` so the runtime directory's scope applies

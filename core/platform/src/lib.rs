@@ -29,6 +29,7 @@ pub mod fs_watch;
 pub mod idle;
 pub mod metrics;
 pub mod process;
+pub mod proxy;
 pub mod secrets;
 pub mod service;
 pub mod time;
@@ -49,6 +50,7 @@ pub use metrics::{
     StaticPlatformMetricsSampler, ThrottleInputs,
 };
 pub use process::{NativeProcessSupervisor, NoopProcessSupervisor, ProcessSupervisor};
+pub use proxy::{FixedProxySettings, NativeProxySettings, ProxySettings, SystemProxy};
 pub use secrets::{
     InMemorySecretStore, NativeSecretStore, ScopedSecretStore, SecretAccess, SecretStore,
     SecretStoreError, open_store,

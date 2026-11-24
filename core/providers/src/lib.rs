@@ -123,6 +123,14 @@ pub struct ProviderCapabilities {
     /// seen when it happens. A feed that is a network call is polled at
     /// the cadence of the throttle state.
     pub changes_feed_is_watched: bool,
+    /// The commit of a transfer is one flush of a drive that the
+    /// transfers of the same moment share, so many small transfers at
+    /// a time cost the device about what one costs. The engine then
+    /// runs small transfers in a lane of their own, wider than the
+    /// transfer slots of the throttle state. A provider that pays for
+    /// each transfer on its own (a request to a cloud API, which counts
+    /// against a rate limit) leaves this off.
+    pub small_transfers_share_a_commit: bool,
 }
 
 impl ProviderCapabilities {
@@ -130,12 +138,14 @@ impl ProviderCapabilities {
         supports_remote_changes_feed: true,
         supports_server_side_move: true,
         changes_feed_is_watched: true,
+        small_transfers_share_a_commit: true,
     };
 
     pub const GDRIVE_MVP: Self = Self {
         supports_remote_changes_feed: true,
         supports_server_side_move: true,
         changes_feed_is_watched: false,
+        small_transfers_share_a_commit: false,
     };
 }
 
@@ -159,6 +169,23 @@ pub struct RemoteEntry {
     /// The engine op-id tag if this object was written by Vapor and the
     /// provider supports tags.
     pub op_id: Option<String>,
+}
+
+/// A name in a remote directory that cannot be a sync path, so the
+/// object stays in the cloud only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsyncableRemoteName {
+    /// The name, as closely as text can show it.
+    pub name: String,
+    /// Why the sync path model cannot carry it, in words for the user.
+    pub reason: String,
+}
+
+/// What one listing of a remote directory gives.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteListing {
+    pub entries: Vec<RemoteEntry>,
+    pub unsyncable: Vec<UnsyncableRemoteName>,
 }
 
 /// Write guard for uploads (deterministic race resolution). A
@@ -372,6 +399,22 @@ pub trait Provider: Send + Sync {
     /// [`RemotePath::root`].
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError>;
 
+    /// The children of `directory` as [`Self::enumerate`] gives them,
+    /// and with them the names in it that cannot be a sync path. Such a
+    /// name is no entry: it never syncs. The engine asks the user about
+    /// it, so a backend that leaves a name out of its listing says so
+    /// here, at every listing, for as long as the name is there. The
+    /// default is for a backend that can hold no such name.
+    fn enumerate_with_unsyncable(
+        &self,
+        directory: &RemotePath,
+    ) -> Result<RemoteListing, ProviderError> {
+        Ok(RemoteListing {
+            entries: self.enumerate(directory)?,
+            unsyncable: Vec::new(),
+        })
+    }
+
     /// Metadata for a single remote path; `Ok(None)` when absent.
     fn stat(&self, path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError>;
 
@@ -490,6 +533,7 @@ impl Provider for SuspendedProvider {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
             changes_feed_is_watched: false,
+            small_transfers_share_a_commit: false,
         }
     }
 
@@ -562,6 +606,7 @@ impl Provider for FilesystemStubProvider {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
             changes_feed_is_watched: false,
+            small_transfers_share_a_commit: false,
         }
     }
 

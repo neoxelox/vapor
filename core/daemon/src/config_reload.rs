@@ -5,10 +5,11 @@
 //! recomposing anything: resource ceilings, idle boost, the mass-delete
 //! guard, ignore toggles and rules, and the timeline length. Those are
 //! `constants::config::LIVE_RELOAD_KEYS`, and the multi-profile runtime
-//! applies them within one poll interval of the file changing. Roots,
-//! provider, sync direction and the profile set reshape the pipeline;
-//! a change to one of those is reported in status as
-//! `restartRequired` until the daemon restarts.
+//! applies them within one poll interval of the file changing. So is
+//! the profile set: a profile that joins is composed and one that
+//! leaves ends. The roots, the provider, and the sync direction of a
+//! profile that runs reshape its pipeline; a change to one of those is
+//! reported in status as `restartRequired` until the daemon restarts.
 //!
 //! The poll is one `stat` per second. A file that does not parse is
 //! reported and left alone: the daemon keeps the configuration it last
@@ -101,6 +102,9 @@ pub struct ConfigReloader {
     /// and op-ids, so a new one waits for a restart.
     started_device_id: Option<String>,
     last_seen: Option<(SystemTime, u64)>,
+    /// The last poll found the file gone or empty and did not act on
+    /// it yet.
+    saw_gone: bool,
     last_poll: Option<Instant>,
     poll_interval: Duration,
 }
@@ -112,6 +116,7 @@ impl ConfigReloader {
             last_seen: file_stamp(path),
             started_device_id: vapor_shared::device_id::persisted(path),
             applied,
+            saw_gone: false,
             last_poll: None,
             poll_interval: Duration::from_millis(constants::engine::CONFIG_RELOAD_POLL_MILLIS),
         }
@@ -134,8 +139,19 @@ impl ConfigReloader {
         self.last_poll = Some(now);
         let stamp = file_stamp(&self.path);
         if stamp == self.last_seen {
+            self.saw_gone = false;
             return None;
         }
+        // A file that is gone or empty names no profile, and the daemon
+        // then ends every profile that runs. A writer that truncates
+        // the file and then writes it shows the same for a moment, so
+        // this state counts only when the next poll finds it again.
+        let gone = stamp.is_none_or(|(_, length)| length == 0);
+        if gone && !self.saw_gone {
+            self.saw_gone = true;
+            return None;
+        }
+        self.saw_gone = false;
         self.last_seen = stamp;
         let loaded = load_from(&self.path);
         if loaded.unreadable {
@@ -265,6 +281,43 @@ mod tests {
         write_at(&path, "{ not json", epoch + Duration::from_secs(30));
         assert!(reloader.poll(start + Duration::from_secs(8)).is_none());
         assert_eq!(reloader.applied().timeline_limit, 43);
+    }
+
+    #[test]
+    fn a_file_that_is_empty_for_one_poll_changes_nothing() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        let epoch = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let with_roots = "{\"localRoot\": \"/a\", \"cloudRoot\": \"/b\"}\n";
+        write_at(&path, with_roots, epoch);
+        let mut reloader = ConfigReloader::new(&path, load_from(&path).config);
+        let start = Instant::now();
+
+        // A writer truncated the file and has not written it yet.
+        write_at(&path, "", epoch + Duration::from_secs(10));
+        assert!(
+            reloader.poll(start + Duration::from_secs(2)).is_none(),
+            "an empty file seen one time is a file that is being written"
+        );
+        write_at(&path, with_roots, epoch + Duration::from_secs(11));
+        assert!(
+            reloader.poll(start + Duration::from_secs(4)).is_none(),
+            "the file is back as it was: nothing changed"
+        );
+
+        // A file that stays empty, or goes, is what the user did.
+        write_at(&path, "", epoch + Duration::from_secs(20));
+        assert!(reloader.poll(start + Duration::from_secs(6)).is_none());
+        let (change, _) = reloader
+            .poll(start + Duration::from_secs(8))
+            .expect("the second look acts on it");
+        assert_eq!(
+            change.restart,
+            vec![
+                constants::config::KEY_LOCAL_ROOT,
+                constants::config::KEY_CLOUD_ROOT
+            ]
+        );
     }
 
     #[test]

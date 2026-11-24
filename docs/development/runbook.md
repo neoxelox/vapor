@@ -13,7 +13,9 @@
 
 ## Local script entry points
 
-- Build both stacks (release): `./scripts/build.sh`
+- Build both stacks (release): `./scripts/build.sh`. The Rust build
+  ends with the size of `vapor` and `vapord` and fails when one is over
+  10 MiB (on Windows it only prints the sizes).
 - Build + package macOS app bundle: `./scripts/build.sh package`
 - Clean build and dist artifacts, the repo-local `.vapor/`, and the Tier VM guests of this checkout: `./scripts/clean.sh`
 - Lint both stacks: `./scripts/lint.sh`
@@ -25,7 +27,7 @@
 - Version helper: `./scripts/version.sh`
 - Release gate (format check, lint, Tier 1, the e2e suite once per provider, and the Tier VM suite; the Google Drive leg needs the test account, and the Tier VM leg needs Tart and the guest image): `./scripts/release.sh`
 - Release body for a version (the changelog section, cut at GitHub's limit): `./scripts/notes.sh <version>`
-- Performance gate (one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
+- Performance gate (the property tests at 4 000 cases each, then one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_PROPERTY_CASES`, `VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
 - Soak verification (Tier S): `./scripts/soak.sh` (`--duration`, `--seed`, `--mode`, `--load`, `--faults`, `--throttle`, `--release`, `--status`, `--verify`; see `docs/development/soak-testing.md`)
 - Verification of the installed Mac app in a macOS virtual machine (Tier VM): `./scripts/vm.sh` (`--only Vxx`, `--keep`, `--video`, `--skip-build`, `--json`, `--list`, `--guest`, `--guest-stop`, `--setup`, `--clean`; needs Tart; see `docs/development/vm-verification.md`)
 - End-to-end verification of the real binaries in disposable sandboxes: `./scripts/e2e.sh` (`--only Sxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--sandbox`, `--sandbox-stop`; see `docs/development/e2e-verification.md`)

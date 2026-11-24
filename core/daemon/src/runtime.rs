@@ -99,6 +99,12 @@ pub enum DaemonRuntimeError {
     /// The local root the profile adopted is not there. Waited for by
     /// the caller; never re-created.
     LocalRootMissing(PathBuf),
+    /// The state database did not take the writes of a tick (a full
+    /// drive, an I/O error at the commit). What the runtime holds in
+    /// memory is ahead of the database from here on, so the caller
+    /// composes the profile again from the database, as after a kill
+    /// inside a tick.
+    TickNotSaved(StateDbError),
 }
 
 impl From<FsEventsWatcherError> for DaemonRuntimeError {
@@ -735,6 +741,35 @@ impl DaemonRuntime {
         now: SystemTime,
         throttle_inputs: ThrottleInputs,
     ) -> Result<RuntimeTickReport, DaemonRuntimeError> {
+        // Every write of the tick is one write to the log of the state
+        // database. What the tick did before an error or a panic stays
+        // done, as it did when each statement was a transaction of its
+        // own, and the batch never outlives the tick: a profile that is
+        // suspended after a panic is composed again on this database.
+        //
+        // A commit that fails takes every write of the tick with it,
+        // while the memory of the runtime moved on (the cursor of the
+        // changes feed, the changes the scheduler handed over). That
+        // error has a name of its own, and the caller ends this runtime.
+        self.state_db.begin_batch()?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.tick_in_batch(now, throttle_inputs)
+        }));
+        let committed = self.state_db.commit_batch();
+        match outcome {
+            Ok(report) => {
+                committed.map_err(DaemonRuntimeError::TickNotSaved)?;
+                report
+            }
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    fn tick_in_batch(
+        &mut self,
+        now: SystemTime,
+        throttle_inputs: ThrottleInputs,
+    ) -> Result<RuntimeTickReport, DaemonRuntimeError> {
         self.apply_pending_control_requests(now)?;
         self.sample_throttle_inputs(now, throttle_inputs);
         self.queue_whole_scope_scan_when_due(now)?;
@@ -1103,9 +1138,35 @@ impl DaemonRuntime {
                         .checkpoint_reconcile(&mut self.scheduler, now)
                         .is_some()
                     {
+                        // A walk that used its slice on the tick thread
+                        // gives the next tick to other work. One that
+                        // waits for a listing used none of it: it is
+                        // due at once, so the tick that the listing
+                        // wakes goes on with the walk. With a wait for
+                        // the timer of the loop after each slice, a
+                        // walk of a cloud API took a second a folder.
+                        //
+                        // A scan holds a planner slot and a read token.
+                        // It takes them back in this tick only when
+                        // that leaves one of each for other work: in a
+                        // throttle state with one read token, a walk
+                        // that never let go would keep every hash, and
+                        // so every upload, waiting until it ends.
+                        let waits_for_a_listing = self
+                            .reconcile_walker
+                            .as_ref()
+                            .is_some_and(|walker| walker.waits_for_a_listing());
+                        let gate = self.app.workgate_snapshot();
+                        let leaves_room = gate.available_planner_workers() > 1
+                            && gate.available_read_tokens() > 1;
+                        let due = if waits_for_a_listing && leaves_room {
+                            now
+                        } else {
+                            now + self.tick_interval
+                        };
                         self.requeue_runtime_intent(
                             reconcile_intent_id,
-                            now + self.tick_interval,
+                            due,
                             "reconcile yielded for next safe slice",
                         )?;
                         self.running_reconcile_intent_id = None;
@@ -1905,6 +1966,15 @@ impl DaemonRuntime {
         Ok(runtime)
     }
 
+    /// Whether the profile waits for a local root that is not there.
+    /// No watcher can start on such a folder, and the runtime says
+    /// when it is back ([`Self::take_local_root_changed`]).
+    pub(crate) fn waits_for_its_local_root(&self) -> bool {
+        self.root_hold
+            .as_ref()
+            .is_some_and(|hold| hold.missing && hold.side == crate::root_identity::RootSide::Local)
+    }
+
     /// Whether the folder at the local root changed since the last
     /// call; the caller that owns the watchers starts them again.
     pub(crate) fn take_local_root_changed(&mut self) -> bool {
@@ -2055,6 +2125,17 @@ impl DaemonRuntime {
         let workgate = self.app.workgate_snapshot();
         let paused = self.app.snapshot().run_state == RunState::Paused;
 
+        // The lane of small transfers, when it is open: a small
+        // transfer waits only while the lane and the slots are full.
+        let small_lane = |active: usize, slots: usize| {
+            if workgate.small_transfers_per_slot == 0 {
+                return String::new();
+            }
+            format!(
+                ", small transfers {active}/{}",
+                slots * workgate.small_transfers_per_slot
+            )
+        };
         for (intent_id, path, kind, stage, elapsed_ms, attempt_count, last_error) in
             self.staged_executor.active_stages()
         {
@@ -2068,12 +2149,22 @@ impl DaemonRuntime {
                     workgate.caps.read_tokens
                 ),
                 crate::executor::ExecutionStage::WaitingForUpload => format!(
-                    "upload concurrency {}/{} in use",
-                    workgate.active_uploads, workgate.caps.upload_concurrency
+                    "upload concurrency {}/{} in use{}",
+                    workgate.active_uploads,
+                    workgate.caps.upload_concurrency,
+                    small_lane(
+                        workgate.active_small_uploads,
+                        workgate.caps.upload_concurrency
+                    )
                 ),
                 crate::executor::ExecutionStage::WaitingForDownload => format!(
-                    "download concurrency {}/{} in use",
-                    workgate.active_downloads, workgate.caps.download_concurrency
+                    "download concurrency {}/{} in use{}",
+                    workgate.active_downloads,
+                    workgate.caps.download_concurrency,
+                    small_lane(
+                        workgate.active_small_downloads,
+                        workgate.caps.download_concurrency
+                    )
                 ),
                 _ => String::new(),
             };
@@ -4010,11 +4101,18 @@ impl DaemonRuntime {
                 Some(&name.shown_path),
                 &question(name),
                 &options(),
-                &serde_json::json!({ "reason": name.reason }),
+                &serde_json::json!({
+                    "reason": name.reason,
+                    "side": if name.in_the_cloud { "cloud" } else { "local" },
+                }),
                 now,
             )?;
             logging::warning(
-                "A local file has a name that cannot be synced; asking once",
+                if name.in_the_cloud {
+                    "A file in the cloud folder has a name that cannot be synced; asking once"
+                } else {
+                    "A local file has a name that cannot be synced; asking once"
+                },
                 &[
                     ("path", name.shown_path.display().to_string()),
                     ("reason", name.reason.clone()),
@@ -4858,10 +4956,22 @@ impl DaemonRuntime {
         let deadline =
             clock.now() + Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS);
         let should_continue = move || clock.now() < deadline;
+        // A provider that asked for fewer requests gets one listing at
+        // a time, as it gets one transfer at a time.
+        let slowed = self
+            .app
+            .retry_slowdown_until()
+            .is_some_and(|until| until > now);
+        let listings = if slowed {
+            1
+        } else {
+            listings_in_flight(self.app.snapshot().throttle_state)
+        };
         let walker = self
             .reconcile_walker
             .as_mut()
             .expect("walker was just ensured");
+        walker.set_listings_in_flight(listings);
         walker.process(
             self.app.provider_handle(),
             &self.provider_call_mode,
@@ -4978,6 +5088,17 @@ fn name_collision_message(wanted: &Path, existing: &Path) -> String {
         wanted.display(),
         existing.display()
     )
+}
+
+/// Cloud listings a reconcile walk asks for at one time under `state`.
+/// A throttle state makes the scan slower and never stops it.
+fn listings_in_flight(state: vapor_shared::ThrottleState) -> usize {
+    use vapor_shared::ThrottleState;
+    match state {
+        ThrottleState::Idle => constants::engine::RECONCILE_LISTINGS_IN_FLIGHT,
+        ThrottleState::Light => constants::engine::RECONCILE_LISTINGS_IN_FLIGHT / 2,
+        ThrottleState::Throttled | ThrottleState::Suspended => 1,
+    }
 }
 
 /// Requeue delay applied when a leased intent cannot start because no
@@ -5647,6 +5768,7 @@ mod tests {
                         downloads_fail: Arc::default(),
                         cloud_full: Arc::default(),
                         offline: Arc::default(),
+                        listings_held: Arc::default(),
                     })
                 });
             (fixture, handle)
@@ -5668,6 +5790,26 @@ mod tests {
                         downloads_fail: Arc::default(),
                         cloud_full: flag,
                         offline: Arc::default(),
+                        listings_held: Arc::default(),
+                    })
+                });
+            (fixture, handle)
+        }
+
+        /// A fixture whose provider does not answer a listing while the
+        /// returned hold is set.
+        fn new_with_listing_hold() -> (Self, Arc<ListingHold>) {
+            let hold = Arc::new(ListingHold::default());
+            let handle = hold.clone();
+            let fixture =
+                Self::new_with_provider(vapor_shared::SyncMode::TwoWay, move |provider| {
+                    Box::new(SwitchedProvider {
+                        inner: provider,
+                        signed_out: Arc::default(),
+                        downloads_fail: Arc::default(),
+                        cloud_full: Arc::default(),
+                        offline: Arc::default(),
+                        listings_held: hold,
                     })
                 });
             (fixture, handle)
@@ -5684,6 +5826,7 @@ mod tests {
                         downloads_fail: flag,
                         cloud_full: Arc::default(),
                         offline: Arc::default(),
+                        listings_held: Arc::default(),
                     })
                 });
             (fixture, handle)
@@ -5797,6 +5940,28 @@ mod tests {
         /// While set, a call that got past the sign-in fails the way a
         /// cloud with no route to it does.
         offline: Arc<std::sync::atomic::AtomicBool>,
+        /// While held, a listing does not answer: a cloud that is slow.
+        listings_held: Arc<ListingHold>,
+    }
+
+    #[derive(Default)]
+    struct ListingHold {
+        held: Mutex<bool>,
+        released: Condvar,
+    }
+
+    impl ListingHold {
+        fn set(&self, held: bool) {
+            *self.held.lock().expect("hold") = held;
+            self.released.notify_all();
+        }
+
+        fn wait(&self) {
+            let mut held = self.held.lock().expect("hold");
+            while *held {
+                held = self.released.wait(held).expect("hold");
+            }
+        }
     }
 
     impl SwitchedProvider {
@@ -5849,6 +6014,7 @@ mod tests {
             directory: &vapor_providers::RemotePath,
         ) -> Result<Vec<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
             self.gate()?;
+            self.listings_held.wait();
             self.inner.enumerate(directory)
         }
         fn stat(
@@ -5997,6 +6163,7 @@ mod tests {
                     downloads_fail: Arc::default(),
                     cloud_full: Arc::default(),
                     offline: offline_switch,
+                    listings_held: Arc::default(),
                 })
             },
         );
@@ -7534,6 +7701,92 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_that_waits_for_a_listing_when_its_slice_ends_goes_on_in_the_same_tick() {
+        let (mut fixture, hold) = BidirectionalFixture::new_with_listing_hold();
+        fixture.runtime.enable_transfer_workers(None);
+        std::fs::write(fixture.watch_root.join("a.txt"), b"a").expect("seed");
+        hold.set(true);
+        fixture
+            .runtime
+            .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("schedule");
+        // Bounded by iteration count: the walk starts when the threads
+        // that it waits for have answered.
+        for _ in 0..100_000 {
+            if fixture.runtime.running_reconcile_intent_id.is_some() {
+                break;
+            }
+            fixture.tick(250);
+            std::thread::yield_now();
+        }
+        assert!(fixture.runtime.running_reconcile_intent_id.is_some());
+
+        // The cloud does not answer the listing, and the slice of the
+        // walk ends. The walk used none of it on this thread, so it is
+        // the running reconcile again when the tick ends: the answer
+        // wakes the loop, and no timer stands between the two.
+        let mut yields = 0;
+        for _ in 0..8 {
+            let report = fixture.tick(250);
+            yields += report.requeued_intents;
+            assert!(
+                fixture.runtime.running_reconcile_intent_id.is_some(),
+                "the walk waits for the cloud as the running reconcile"
+            );
+        }
+        assert!(yields > 0, "the slice ended while the listing was out");
+
+        // On battery the gate has one read token, and a scan holds one.
+        // A walk that took it back in the same tick would keep every
+        // hash waiting until the walk ends. So there it lets go for a
+        // tick, as a walk that used its slice does.
+        let on_battery = |fixture: &mut BidirectionalFixture| {
+            fixture.clock.advance(Duration::from_millis(250));
+            fixture.now_ms += 250;
+            fixture
+                .runtime
+                .tick_with_inputs(
+                    timestamp_ms(fixture.now_ms),
+                    ThrottleInputs {
+                        on_battery: true,
+                        ..ThrottleInputs::default()
+                    },
+                )
+                .expect("runtime tick");
+        };
+        for _ in 0..40 {
+            if fixture.runtime.app.snapshot().throttle_state == vapor_shared::ThrottleState::Light {
+                break;
+            }
+            on_battery(&mut fixture);
+        }
+        assert_eq!(
+            fixture.runtime.app.snapshot().throttle_state,
+            vapor_shared::ThrottleState::Light
+        );
+        // Four slices pass: the first can still end on the caps of
+        // the state before, and each later one ends on those of now.
+        let mut let_go = false;
+        for _ in 0..8 {
+            on_battery(&mut fixture);
+            let_go |= fixture.runtime.running_reconcile_intent_id.is_none();
+        }
+        assert!(let_go, "the permit is free for a tick between two slices");
+
+        hold.set(false);
+        for _ in 0..100_000 {
+            fixture.tick(250);
+            if fixture.runtime.reconcile_walker.is_none()
+                && fixture.runtime.running_reconcile_intent_id.is_none()
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(fixture.runtime.reconcile_walker.is_none(), "the walk ended");
+    }
+
+    #[test]
     fn a_conflicted_file_is_one_decision_until_no_copy_is_left() {
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline
@@ -8734,6 +8987,7 @@ mod tests {
                 downloads_fail: Arc::default(),
                 cloud_full: Arc::default(),
                 offline: Arc::default(),
+                listings_held: Arc::default(),
             }),
             clock.clone(),
         );
@@ -8988,6 +9242,62 @@ mod tests {
         let runtime = fixture.run(&[]);
         assert_eq!(questions(&runtime, false), 1);
         assert_eq!(questions(&runtime, true), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_in_the_cloud_folder_that_cannot_be_synced_is_asked_about_too() {
+        let fixture = OfflineFixture::new();
+        std::fs::write(
+            fixture.cloud_root.join("back\\slash.txt"),
+            b"stays in the cloud",
+        )
+        .expect("seed");
+        std::fs::write(fixture.cloud_root.join("fine.txt"), b"fine").expect("seed");
+        let questions = |runtime: &DaemonRuntime, closed_too: bool| -> Vec<_> {
+            runtime
+                .state_db()
+                .decisions(closed_too)
+                .expect("decisions")
+                .into_iter()
+                .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+                .collect()
+        };
+
+        let runtime = fixture.run(&[]);
+        let open = questions(&runtime, false);
+        assert_eq!(open.len(), 1, "asked once: {open:?}");
+        assert!(
+            open[0]
+                .question
+                .starts_with("back\\slash.txt in the cloud folder cannot be synced"),
+            "{}",
+            open[0].question
+        );
+        assert_eq!(open[0].evidence["side"], "cloud");
+        assert!(fixture.watch_root.join("fine.txt").is_file());
+        assert!(
+            !fixture.watch_root.join("back\\slash.txt").exists(),
+            "the name never reaches this device"
+        );
+        drop(runtime);
+
+        // The next walk finds the same name: the same question.
+        let runtime = fixture.run(&[]);
+        assert_eq!(questions(&runtime, true).len(), 1);
+        drop(runtime);
+
+        // Renamed in the cloud: the question goes and the file syncs.
+        std::fs::rename(
+            fixture.cloud_root.join("back\\slash.txt"),
+            fixture.cloud_root.join("slash.txt"),
+        )
+        .expect("rename");
+        let runtime = fixture.run(&[]);
+        let history = questions(&runtime, true);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].choice.as_deref(), Some("withdrawn"));
+        assert!(fixture.watch_root.join("slash.txt").is_file());
     }
 
     #[cfg(unix)]
