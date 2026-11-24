@@ -153,8 +153,8 @@ it:
     6 s after `vapor auth logout`, a file written meanwhile stays on
     its device, and it reaches the other device 12 s after the next
     sign-in. Before, the profile went on to sync.
-- Tier VM: `./scripts/vm.sh`, 14 scenarios pass, with the launchd
-  round trip of the service in a fresh guest. In a manual guest with no
+- Tier VM: `./scripts/vm.sh`, 14 scenarios pass on the final tree,
+  with the launchd round trip of the service in a fresh guest. In a manual guest with no
   route to the Internet, a made-up token given to `vapor auth login
   --token -` through the link on the `PATH` was read by the daemon with
   no dialog: the keychain item names `vapord` in its access list and in
@@ -262,7 +262,11 @@ option of each is what is built.
     in, and of two writes of one moment the one that holds the name
     was listed first in 2 of 10 rounds. Wider bounds turn more of the
     history of a file into copies when a version carries a time its
-    writer set; narrower ones can miss a write.
+    writer set; narrower ones can miss a write. The cost of the
+    30 seconds was seen one time: a scripted case wrote a version, 12
+    seconds later another program wrote one dated 2019, and 22 seconds
+    after the first a device wrote its edit. The first version became
+    a copy that nobody needed. With a minute between them, none did.
 18. **Version 2 of the Drive API has the conditional write that
     version 3 lacks.** Not built. With the test account, of two
     uploads with one `If-Match` at the same moment exactly one landed

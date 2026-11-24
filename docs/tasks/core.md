@@ -179,6 +179,16 @@ a task costs a user.
       come with entries of their own. A walk for each unknown folder
       would close it, at the cost of one walk for each new folder of a
       burst. Found with the test account, 2026-11-24.
+- [ ] P-15 A folder that moves in Google Drive can cost one device a
+      new transfer. After the folder signal, of two devices that
+      followed the move of a folder with 2 files into another folder,
+      one renamed its files and the other put them in the trash and
+      downloaded them again under the new path. Both ended right, and
+      the trash kept the files. Why the two differ is not known: the
+      removal of the old path may reach a device before the walk sees
+      the new one. For a large folder that is a transfer of every
+      file, and the removals can open the mass-delete question (E-20).
+      Seen with the test account, 2026-11-24.
 - [ ] P-12 Make the Drive check for a replaced version survive a stop
       of the daemon. An upload that lands leaves the check in memory
       for the next changes poll. A daemon that stops in between makes
