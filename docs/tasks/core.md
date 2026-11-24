@@ -198,15 +198,19 @@ a task costs a user.
       Also seen with the account: `files.version` grows by 2 or 3 for
       one overwrite of content and by 5 to 7 for two, so it does not
       tell a second writer.
-- [ ] P-14 A folder that is made outside the synced folder of Google
-      Drive, filled, and moved in within two minutes waits for the next
-      scan of everything. Drive has one entry for a folder that moved
-      and none for the files in it. The provider takes a folder that it
-      never saw and that was made in the last two minutes for a new
-      one, whose files come with entries of their own, and asks for no
-      walk. An older folder gets its walk: with the test account on
-      2026-11-24, a folder that left the synced folder and came back a
-      minute later held its 10 files on both devices within seconds.
+- [ ] P-14 A young folder that is moved into the synced folder of
+      Google Drive can still wait for the next scan of everything.
+      Drive has one entry for a folder that moved and none for what it
+      holds. The provider takes a folder that it never saw and that
+      was made in the last two minutes for a new one, whose files come
+      with entries of their own, unless the feed showed that folder
+      or a file in it outside the synced folder a moment before. Two
+      cases are left: a folder that was made and filled while no
+      daemon polled, and a young folder that holds only folders at its
+      top. An older folder gets its walk. Checked with the test
+      account on 2026-11-24: a folder that left and came back, and a
+      young folder that got a file outside and was moved back, each
+      held all its files on both devices within seconds.
 - [ ] P-15 A folder that moves in Google Drive can cost one device a
       new transfer. After the folder signal, of two devices that
       followed the move of a folder with 2 files into another folder,
@@ -239,6 +243,15 @@ a task costs a user.
       feed, with the timer as a fallback at a longer interval, costs
       nothing while nothing changes. Seen with the test account,
       2026-11-24.
+- [ ] P-18 Check what the changes feed of Google Drive does with a
+      file that has a `/` in its name. The listing reports such a name
+      as one that cannot sync, and the user is asked. The feed builds
+      the path of a changed file from its name and the names of its
+      folders, so `2024/budget.txt` in the synced folder reads there
+      as a file `budget.txt` in a folder `2024`. With the test account
+      on 2026-11-24 the file never reached a device and nothing
+      failed, but what the intent of that entry did was not read.
+      Found by the review of the pull request.
 - [ ] P-12 Make the Drive check for a replaced version survive a stop
       of the daemon. An upload that lands leaves the check in memory
       for the next changes poll. A daemon that stops in between makes
@@ -425,7 +438,9 @@ runners. What remains before Linux ships a surface:
       lists the item, and for "not there" when it does not. That is
       what the source of libsecret says, and a stand-in for the tool
       proves the store's side of it in Tier 1. Nobody ran it against a
-      real locked keyring.
+      real locked keyring. The same run settles whether `secret-tool
+      search` prints the attributes on stdout or on stderr: the listing
+      of the store reads stdout only.
 - The `vapor service` round-trip against a real `systemctl --user`
   session (`cli.md` L2-6) and the rest of the Linux soak (TR-10).
 
@@ -455,6 +470,13 @@ runners. What remains before Linux ships a surface:
       superseding, retry backoff, the order of the durable queue, and
       conflict copy names have theirs, and the release gate runs all
       of them at 4 000 cases each (`scripts/perf.sh`).
+- [ ] CT-12 A Tier 1 test of a profile that ends while the daemon
+      runs with transfer workers on. The end of a runtime on its own
+      thread, and a profile with the same id that waits for that end
+      (`retiring`, `awaiting_retirement`), run in Tier E2E only: the
+      Tier 1 test of the live profile set runs every provider call on
+      the tick thread. Found by the review of the pull request,
+      2026-11-24.
 - [ ] T-16 Resource-ceiling integration tests over the cross-product in
       `docs/performance/acceptance-budgets-and-benchmark-harness.md`
       (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,
