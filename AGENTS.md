@@ -631,12 +631,15 @@ of the following:
   monotonicity, retry backoff monotonicity, conflict-suffix determinism,
   durable-queue FIFO, ignore-rule precedence, IPC handshake skew
   matrix). `proptest` covers path normalization, scheduler superseding,
-  and retry backoff (`core/daemon/tests/properties.rs`); explicit cases
-  cover the rest until their properties land (`docs/tasks/core.md`).
+  retry backoff, durable-queue FIFO, and conflict-suffix determinism
+  (`core/daemon/tests/properties.rs`), 256 cases each in Tier 1 and
+  4 000 in the release gate; explicit cases cover the rest until their
+  properties land (`docs/tasks/core.md`).
 - **Platform-trait contract tests.** Each trait's test body runs against
-  the in-memory fake and the native impl on the shipping OS (the secret
-  store and the fs watcher do this today; the other traits are open
-  work in `docs/tasks/core.md`). Catches fake-vs-native drift.
+  the in-memory fake and the native impl on the shipping OS (every
+  trait but `ServiceInstaller` does this today; its native round trip
+  runs in Tier E2E `--full` and in Tier VM, and the rest is open work
+  in `docs/tasks/core.md`). Catches fake-vs-native drift.
 - **Bidirectional race tests**: simultaneous local/remote edits,
   rename+modify, delete/restore, loop-prevention verification.
 - **Crash / restart / recovery tests**: pre/post-restart durable

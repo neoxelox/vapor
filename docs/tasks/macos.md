@@ -128,8 +128,9 @@ Exit gate:
 - [ ] M4-1 App UI flows to create, rename, select, enable/disable, and
       delete profiles; bind each profile to a provider + authenticated
       account. The create flow is the onboarding sequence re-entered
-      from Settings (O-3); the others drive `vapor profiles` (`cli.md`
-      L1-7 for enable, disable, and rename).
+      from Settings (O-3); the others drive `vapor profiles enable`,
+      `disable`, `rename`, and `remove`, and a running daemon takes
+      each but `remove` with no restart.
 - [ ] M4-2 Settings UI for profile-scoped override knobs (sync roots,
       ignore rules, resource ceilings, idle-boost, and the per-profile
       `syncMode` selector: `two-way` / `pull-only` / `push-only`). Surface
@@ -268,8 +269,8 @@ for tests; the app never assumes it.
 - [ ] O-3 Re-entry. "Add profile…" in Settings reuses the same steps
       for a second profile (this is the create half of M4-1); the
       provider list, the pickers, and the validation are shared, not
-      copied. A profile after the first one needs a daemon restart, and
-      the flow says so.
+      copied. A running daemon starts the new profile with no
+      restart.
 - [ ] O-4 Copy in `assets/locales/en.json`, logic tests for the step
       model and the gate (which state opens the window, what each
       answer writes, what a cancel leaves behind), no UI tests in Tier

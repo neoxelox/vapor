@@ -52,6 +52,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: conflict_with_slow_download,
         },
         Scenario {
+            id: "S84",
+            name: "state-db-of-another-build",
+            proves: "a state database that a build with another schema wrote is set aside next to itself at the start, the index is built again from both folders, and a file that left this device while the daemon was down comes back from the cloud: with no index row nothing is deleted on either side",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: state_db_of_another_build,
+        },
+        Scenario {
             id: "S32",
             name: "state-db-lost",
             proves: "with the state DB deleted, a restart rebuilds the index from both trees without losing a file or inventing a conflict copy for identical content",
@@ -405,6 +413,73 @@ fn state_db_lost(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         db.sync_index_count().unwrap_or(0) >= 4,
         "the rebuilt index does not cover the synced files: {:?}",
+        db.sync_index_count()
+    );
+    let conflicts: Vec<_> = fs::read_dir(&home.local)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("~conflict-"))
+        .collect();
+    ensure!(
+        conflicts.is_empty(),
+        "identical content on both sides produced conflict copies: {conflicts:?}"
+    );
+    Ok(())
+}
+
+fn state_db_of_another_build(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("keep.txt"), "stays on both sides\n")?;
+    write_file(&home.local.join("comes-back.txt"), "removed while down\n")?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ctx.stop_daemon(first)?;
+
+    // The database as an older build left it: the same file, with the
+    // schema number of that build. The harness writes it; the daemon
+    // only reads it.
+    let database = home.state_db();
+    {
+        let connection = rusqlite::Connection::open(&database)
+            .map_err(|error| Failure::new(format!("open the state DB: {error}")))?;
+        connection
+            .execute(
+                "UPDATE schema_meta SET schema_version = schema_version - 1",
+                [],
+            )
+            .map_err(|error| Failure::new(format!("rewrite the schema version: {error}")))?;
+    }
+    // While the daemon is down: one file leaves this device, one is
+    // new. The index that could say "this was synced, so the removal
+    // is a deletion" is the one that is set aside.
+    fs::remove_file(home.local.join("comes-back.txt"))?;
+    write_file(&home.local.join("new.txt"), "written while down\n")?;
+
+    ctx.start_daemon()?;
+    ctx.wait_exists(&home.cloud.join("new.txt"), Duration::from_secs(60))?;
+    ctx.wait_exists(&home.local.join("comes-back.txt"), Duration::from_secs(60))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        home.cloud.join("comes-back.txt").is_file() && home.cloud.join("keep.txt").is_file(),
+        "a database that was set aside is no evidence for a deletion: nothing leaves the cloud"
+    );
+
+    let state_dir = home.dir.join(constants::runtime::STATE_DIRECTORY_NAME);
+    let set_aside: Vec<String> = fs::read_dir(&state_dir)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".schema-v"))
+        .collect();
+    ensure!(
+        set_aside.len() == 1,
+        "the database of the other build is kept next to the new one: {set_aside:?}"
+    );
+    let db = ctx.db();
+    ensure!(
+        db.sync_index_count().unwrap_or(0) >= 3,
+        "the index was built again from both folders: {:?}",
         db.sync_index_count()
     );
     let conflicts: Vec<_> = fs::read_dir(&home.local)?

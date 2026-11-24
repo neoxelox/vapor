@@ -18,8 +18,8 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use vapor_platform::fs_watch::{
@@ -40,9 +40,20 @@ use crate::{
 #[derive(Clone)]
 pub struct ManualFeedHandle {
     sender: Sender<WatchEvent>,
+    poll_time: Arc<Mutex<Option<SystemTime>>>,
 }
 
 impl ManualFeedHandle {
+    /// Sets the time the feed takes for "now" at its next polls: what
+    /// the clock of the daemon says. A feed with a native watcher reads
+    /// the system clock, which is that clock outside a test.
+    pub fn set_poll_time(&self, now: SystemTime) {
+        *self
+            .poll_time
+            .lock()
+            .expect("changes feed poll time mutex poisoned") = Some(now);
+    }
+
     pub fn emit(
         &self,
         path: impl Into<std::path::PathBuf>,
@@ -74,6 +85,8 @@ pub(crate) struct ChangesFeed {
     receiver: Mutex<Receiver<WatchEvent>>,
     watcher: Mutex<Option<Box<dyn FsWatcher>>>,
     ring: Mutex<FeedRing>,
+    /// The time of a poll, when a test drives the feed by hand.
+    poll_time: Arc<Mutex<Option<SystemTime>>>,
 }
 
 struct FeedRing {
@@ -125,13 +138,32 @@ impl ChangesFeed {
                 next_sequence: 1,
                 lost_events: false,
             }),
+            poll_time: Arc::new(Mutex::new(None)),
         }
     }
 
     pub(crate) fn manual_handle(&self) -> ManualFeedHandle {
         ManualFeedHandle {
             sender: self.sender.clone(),
+            poll_time: self.poll_time.clone(),
         }
+    }
+
+    /// The time of this poll. With a native watcher it is the system
+    /// clock. A feed that a test drives by hand has the time the test
+    /// set, or none.
+    fn time_of_poll(&self) -> Option<SystemTime> {
+        let set = *self
+            .poll_time
+            .lock()
+            .expect("changes feed poll time mutex poisoned");
+        set.or_else(|| {
+            self.watcher
+                .lock()
+                .expect("changes feed watcher mutex poisoned")
+                .is_some()
+                .then(SystemTime::now)
+        })
     }
 
     pub(crate) fn ensure_native_watcher(&self, root: &Path) -> Result<(), ProviderError> {
@@ -222,12 +254,13 @@ impl ChangesFeed {
             .expect("changes feed receiver mutex poisoned");
         let mut ring = self.ring.lock().expect("changes feed ring mutex poisoned");
         let events: Vec<WatchEvent> = receiver.try_iter().collect();
-        // The newest thing the watcher said in this batch: the time an
-        // object that is gone now was last known to be there, at the
-        // least.
+        // When an object that is gone now was found gone: at this poll.
+        // The newest thing the watcher said in this batch is the least
+        // that time can be, for a feed with no clock.
         let Some(newest) = events.iter().map(|event| event.observed_at).max() else {
             return;
         };
+        let found_gone_at = self.time_of_poll().map_or(newest, |now| now.max(newest));
         for event in events {
             logging::debug(
                 "Changes-feed watcher event",
@@ -269,7 +302,7 @@ impl ChangesFeed {
                 );
                 continue;
             }
-            if let Some(change) = normalize_watch_event(root, tags, event, newest) {
+            if let Some(change) = normalize_watch_event(root, tags, event, found_gone_at) {
                 ring.push(change);
             }
         }
@@ -344,13 +377,14 @@ fn report_directory_files(
 /// Maps a raw watch event onto a feed change. `None` drops the event:
 /// paths outside the root, the root itself, internal temp/side-files,
 /// symlinks, and directory events (directories materialize through
-/// their children or reconcile). `newest` is the time of the newest
-/// event read in the same batch.
+/// their children or reconcile). `found_gone_at` is the time of the
+/// poll that reads the event: when an object that is gone was found
+/// gone.
 fn normalize_watch_event(
     root: &Path,
     tags: &OpIdTagStore,
     event: WatchEvent,
-    newest: SystemTime,
+    found_gone_at: SystemTime,
 ) -> Option<RemoteChange> {
     let name_os = event.path.file_name()?;
     let Some(name) = name_os.to_str() else {
@@ -418,12 +452,14 @@ fn normalize_watch_event(
             // and the removal came after it. The engine drops a removal
             // that is older than the last sync of its path, so the time
             // of a create or a write must not stand in for the time of
-            // the removal. Such a change gets the time of the newest
-            // event of its batch, which is no earlier than its own.
+            // the removal. Such a change gets the time of this poll,
+            // which found the object gone. The watcher can fold the
+            // write and the removal into one event, and then no later
+            // event carries the time of the removal.
             let observed_at = if event.kind == WatchEventKind::Removed {
                 event.observed_at
             } else {
-                newest
+                found_gone_at
             };
             Some(RemoteChange {
                 path: remote_path,
@@ -568,6 +604,47 @@ mod tests {
                 ("other.txt", RemoteChangeKind::Removed, ts(40)),
             ],
             "no removal of report.txt is older than the last time it was known to be there"
+        );
+    }
+
+    #[test]
+    fn an_object_found_gone_by_a_poll_was_removed_no_earlier_than_that_poll() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        // The watcher folded the write of an upload and the removal
+        // that followed it into one event, with the time of the write.
+        // The upload was recorded as synced after that time, so a
+        // removal dated by the event would be dropped as older than the
+        // last sync. The poll that finds the object gone dates it.
+        handle.emit_modified(root.join("report.txt"), ts(5));
+        handle.set_poll_time(ts(30_000));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+        assert_eq!(page.changes[0].observed_at, ts(30_000));
+
+        // A removal that the watcher reported keeps its own time, and a
+        // clock that is behind the events never moves a change back.
+        handle.emit_removed(root.join("seen.txt"), ts(31_000));
+        handle.emit_created(root.join("late.txt"), ts(90_000));
+        handle.set_poll_time(ts(32_000));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&page.next_cursor), 100)
+                .expect("poll"),
+        );
+        let times: Vec<(&str, SystemTime)> = page
+            .changes
+            .iter()
+            .map(|change| (change.path.as_str(), change.observed_at))
+            .collect();
+        assert_eq!(
+            times,
+            vec![("seen.txt", ts(31_000)), ("late.txt", ts(90_000))]
         );
     }
 

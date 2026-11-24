@@ -68,7 +68,7 @@ list of choices that wait for the owner.
 - Engine: `core.md` E-7, E-9, E-12, E-14. The owner put E-7 off: no
   shipping setup reaches it. E-12 needs a design, and E-14 needs the
   owner.
-- Providers: `core.md` P-1 … P-3, P-5, P-7, P-13. P-5 and P-13 need
+- Providers: `core.md` P-1 … P-3, P-5, P-13. P-5 and P-13 need
   the owner: the Google verification decision, and whether a guarded
   overwrite goes through version 2 of the Drive API.
 - Platform: `core.md` PL-1, a check in Finder that needs the owner.
@@ -85,11 +85,11 @@ decides the order; this is the order by what a user loses.
 
 - Sync that waits or stops, or a status that hides it: `core.md`
   E-20, which needs a design with the owner.
-- Speed: `core.md` E-31, P-9.
+- Speed: `core.md` E-31, E-45, P-9.
   `core.md` PT-3 measures each of them in the perf gate, so a
   slower build fails it.
-- The rest: `core.md` E-43, E-44, P-12, P-14, P-15, P-16, PL-8, PL-9,
-  `cli.md` L1-11, `macos.md` O-5, MT-7, M3-20.
+- The rest: `core.md` E-44, P-12, P-14, P-15, P-16, P-17, PL-8,
+  `macos.md` O-5, MT-7, M3-20.
 - A run that repeats the session: `core.md` TR-13. Real providers in a
   guest: `macos.md` MT-6.
 
@@ -106,8 +106,8 @@ Status: pending and unblocked.
 - `macos.md` M4-1 … M4-5: profiles UX: create, rename, select, enable,
   disable, and delete flows; profile-scoped settings (including the
   per-profile `syncMode` selector and its one-way question); safe
-  disconnect; multi-provider fan-out. Needs `cli.md` L1-7 for the
-  enable, disable, and rename commands.
+  disconnect; multi-provider fan-out. The commands underneath are in
+  place: `vapor profiles list|add|enable|disable|rename|remove`.
 
 ### Wave 9.5: First run and onboarding
 
@@ -163,7 +163,7 @@ implementations behind a stable trait surface, not a rewrite.
 
 ### Wave 12: Windows platform implementations (optional)
 
-- `core.md` C6-1 … C6-10: Windows native impls for every trait
+- `core.md` C6-1 … C6-10, C6-12: Windows native impls for every trait
   (ReadDirectoryChangesW, Task Scheduler, Credential Manager,
   power/thermal signals, `GetLastInputInfo`, NTFS ADS, console-ctrl),
   the Windows distribution trust chain doc, and the named-pipe IPC
@@ -186,6 +186,8 @@ shim or the desktop Secret Service. Left before Linux ships a surface:
 - `core.md` PL-3: the interface speed on Linux, the starting figure of
   the bandwidth ceiling.
 - `core.md` C3-11 (Linux part): display-server idle, PSI.
+- `core.md` PL-10: a check of the Secret Service store against a real
+  locked keyring.
 - `core.md` TR-10: the rest of the Linux soak.
 
 ### Wave 14: Install packages for Linux and Windows (optional)

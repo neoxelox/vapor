@@ -11,7 +11,13 @@ md-5 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# The TLS roots of the HTTP transport: the list that ships with Vapor
+# and the roots the system trusts. `rustls` is the version `ureq` uses,
+# with its feature set, so the two share one build of it.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-native-certs = "=0.8.5"
 ureq = "=2.12.1"
+webpki-roots = "=0.26.11"
 vapor-platform = { path = "../platform" }
 vapor-shared = { path = "../shared" }
 

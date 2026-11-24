@@ -23,7 +23,8 @@ enum Backend {
     /// `VAPOR_SECRETS_COMMAND`.
     Command(String),
     /// libsecret's `secret-tool`, under `service = <namespace>`.
-    SecretTool { namespace: String },
+    /// `program` is `secret-tool`; a test names a stand-in.
+    SecretTool { program: String, namespace: String },
 }
 
 #[derive(Debug)]
@@ -50,6 +51,7 @@ impl NativeSecretStore {
         if has_session_bus && secret_tool_available() {
             return Ok(Self {
                 backend: Backend::SecretTool {
+                    program: "secret-tool".to_string(),
                     namespace: namespace.to_string(),
                 },
             });
@@ -104,7 +106,7 @@ impl NativeSecretStore {
                 command.args(parts);
                 command
             }
-            Backend::SecretTool { .. } => Command::new("secret-tool"),
+            Backend::SecretTool { program, .. } => Command::new(program),
         };
         command
             .args(args)
@@ -129,6 +131,31 @@ impl NativeSecretStore {
             .map_err(|error| SecretStoreError::Backend(Box::new(error)))
     }
 
+    /// Whether the Secret Service has an item for `name`, locked or
+    /// not. No `--unlock`: the question is whether the item is there,
+    /// and a dialog must not open for it.
+    fn secret_tool_lists(&self, namespace: &str, name: &str) -> Result<bool, SecretStoreError> {
+        let output = self
+            .run(
+                &["search", "--all", "service", namespace, "name", name],
+                None,
+            )
+            .map_err(|error| SecretStoreError::Unavailable(error.to_string()))?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(SecretStoreError::Unavailable(
+                Self::failure(&["search", name], &output).to_string(),
+            ));
+        }
+        // The attributes of an item go to stdout or to stderr,
+        // depending on the version of the tool.
+        let wanted = format!("attribute.name = {name}");
+        Ok([&output.stdout, &output.stderr].into_iter().any(|stream| {
+            String::from_utf8_lossy(stream)
+                .lines()
+                .any(|line| line.trim() == wanted)
+        }))
+    }
+
     fn failure(args: &[&str], output: &std::process::Output) -> SecretStoreError {
         SecretStoreError::Backend(Box::new(std::io::Error::other(format!(
             "secret command {args:?} exited with {}: {}",
@@ -149,17 +176,36 @@ fn secret_tool_available() -> bool {
 
 impl SecretStore for NativeSecretStore {
     fn get(&self, name: &str) -> Result<String, SecretStoreError> {
+        // A read that could not be made says nothing of the secret: the
+        // program did not start, the keyring service gave no answer.
+        let could_not_ask = |error: SecretStoreError| match error {
+            SecretStoreError::Backend(error) => SecretStoreError::Unavailable(error.to_string()),
+            other => other,
+        };
         let output = match &self.backend {
-            Backend::Command(_) => self.run(&[constants::secrets::COMMAND_VERB_GET, name], None)?,
-            Backend::SecretTool { namespace } => {
-                self.run(&["lookup", "service", namespace, "name", name], None)?
-            }
+            Backend::Command(_) => self
+                .run(&[constants::secrets::COMMAND_VERB_GET, name], None)
+                .map_err(could_not_ask)?,
+            Backend::SecretTool { namespace, .. } => self
+                .run(&["lookup", "service", namespace, "name", name], None)
+                .map_err(could_not_ask)?,
         };
         if output.status.code() == Some(1) && output.stdout.is_empty() {
+            // `secret-tool lookup` ends this way for a secret that is
+            // not there, and also for one in a keyring that is locked
+            // and that nothing unlocked. A search lists a locked item
+            // with no secret, so it tells the two apart.
+            if let Backend::SecretTool { namespace, .. } = &self.backend
+                && self.secret_tool_lists(namespace, name)?
+            {
+                return Err(SecretStoreError::Unavailable(format!(
+                    "the keyring holds '{name}' and did not give it; it is locked"
+                )));
+            }
             return Err(SecretStoreError::NotFound(name.to_string()));
         }
         if !output.status.success() {
-            return Err(Self::failure(&["get", name], &output));
+            return Err(could_not_ask(Self::failure(&["get", name], &output)));
         }
         let mut value = String::from_utf8_lossy(&output.stdout).into_owned();
         if value.ends_with('\n') {
@@ -176,7 +222,7 @@ impl SecretStore for NativeSecretStore {
             Backend::Command(_) => {
                 self.run(&[constants::secrets::COMMAND_VERB_SET, name], Some(value))?
             }
-            Backend::SecretTool { namespace } => self.run(
+            Backend::SecretTool { namespace, .. } => self.run(
                 &[
                     "store",
                     "--label",
@@ -201,7 +247,7 @@ impl SecretStore for NativeSecretStore {
             Backend::Command(_) => {
                 self.run(&[constants::secrets::COMMAND_VERB_DELETE, name], None)?
             }
-            Backend::SecretTool { namespace } => {
+            Backend::SecretTool { namespace, .. } => {
                 self.run(&["clear", "service", namespace, "name", name], None)?
             }
         };
@@ -216,7 +262,7 @@ impl SecretStore for NativeSecretStore {
     fn list(&self) -> Result<Vec<String>, SecretStoreError> {
         let output = match &self.backend {
             Backend::Command(_) => self.run(&[constants::secrets::COMMAND_VERB_LIST], None)?,
-            Backend::SecretTool { namespace } => {
+            Backend::SecretTool { namespace, .. } => {
                 self.run(&["search", "--all", "--unlock", "service", namespace], None)?
             }
         };
@@ -307,6 +353,59 @@ mod tests {
         assert!(matches!(
             store.get(a).expect_err("gone"),
             SecretStoreError::NotFound(_)
+        ));
+    }
+
+    /// A stand-in for `secret-tool` that runs `body` with the
+    /// arguments of the call.
+    fn secret_tool_stand_in(dir: &std::path::Path, body: &str) -> NativeSecretStore {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("secret-tool");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stand-in");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        NativeSecretStore {
+            backend: Backend::SecretTool {
+                program: script.display().to_string(),
+                namespace: "sh.arn.vapor.test".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_keyring_that_is_locked_or_does_not_answer_is_not_a_missing_secret() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        // `lookup` gives nothing and exit code 1 in each case. `search`
+        // says whether the item is there.
+        let locked = secret_tool_stand_in(
+            temp.path(),
+            "case \"$1\" in\n  lookup) exit 1 ;;\n  search) echo '[/org/freedesktop/secrets/collection/login/7]'; echo 'attribute.name = auth.default.gdrive.token' ;;\nesac",
+        );
+        let error = locked
+            .get("auth.default.gdrive.token")
+            .expect_err("a locked keyring gives no secret");
+        assert!(
+            matches!(error, SecretStoreError::Unavailable(_)),
+            "the secret is there: {error}"
+        );
+
+        let absent = secret_tool_stand_in(
+            temp.path(),
+            "case \"$1\" in\n  lookup) exit 1 ;;\n  search) exit 1 ;;\nesac",
+        );
+        assert!(matches!(
+            absent.get("auth.default.gdrive.token").expect_err("absent"),
+            SecretStoreError::NotFound(_)
+        ));
+
+        let no_service = secret_tool_stand_in(
+            temp.path(),
+            "echo 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY' >&2; exit 2",
+        );
+        assert!(matches!(
+            no_service
+                .get("auth.default.gdrive.token")
+                .expect_err("no service"),
+            SecretStoreError::Unavailable(_)
         ));
     }
 

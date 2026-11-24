@@ -623,8 +623,18 @@ impl DaemonApp {
         }
 
         let throttle_caps = self.effective_throttle_caps(now);
-        self.lock_workgate()
-            .reconfigure(self.snapshot.throttle_state, throttle_caps);
+        // The lane of small transfers is closed while a ceiling of the
+        // user holds, which counts every transfer, and while the
+        // provider asked for fewer requests.
+        let small_transfers_per_slot =
+            if self.concurrent_transfers.is_some() || self.retry_slowdown_active(now) {
+                0
+            } else {
+                vapor_shared::constants::engine::SMALL_TRANSFERS_PER_SLOT
+            };
+        let mut workgate = self.lock_workgate();
+        workgate.reconfigure(self.snapshot.throttle_state, throttle_caps);
+        workgate.set_small_transfers_per_slot(small_transfers_per_slot);
     }
 }
 
@@ -667,6 +677,33 @@ mod tests {
         let suspended = app.workgate_snapshot().caps;
         assert_eq!(suspended.upload_concurrency, 0);
         assert_eq!(suspended.download_concurrency, 0);
+    }
+
+    #[test]
+    fn the_lane_of_small_transfers_closes_under_a_ceiling_of_the_user() {
+        let mut app = DaemonApp::default();
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        assert_eq!(
+            app.workgate_snapshot().small_transfers_per_slot,
+            vapor_shared::constants::engine::SMALL_TRANSFERS_PER_SLOT
+        );
+        app.try_acquire_work(WorkClass::SmallUpload)
+            .expect("the lane is open");
+
+        // `resourceLimits.concurrentTransfers` counts every transfer.
+        app.set_concurrent_transfers(Some(2));
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        assert_eq!(app.workgate_snapshot().small_transfers_per_slot, 0);
+        assert!(app.try_acquire_work(WorkClass::SmallUpload).is_err());
+        app.try_acquire_work(WorkClass::Upload)
+            .expect("a small transfer still has the slots");
+
+        app.set_concurrent_transfers(None);
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        assert_eq!(
+            app.workgate_snapshot().small_transfers_per_slot,
+            vapor_shared::constants::engine::SMALL_TRANSFERS_PER_SLOT
+        );
     }
 
     #[test]

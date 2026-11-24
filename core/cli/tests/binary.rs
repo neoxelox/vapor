@@ -107,6 +107,64 @@ fn status_without_a_daemon_fails_with_the_reason_on_stderr_only() {
     assert!(stdout(&output).is_empty());
 }
 
+/// The exit codes of `core/cli/README.md`, command by command, on a
+/// fresh runtime directory with no daemon.
+#[test]
+fn each_command_ends_with_its_documented_exit_code() {
+    let home = TempDir::new().expect("home");
+    let cases: &[(&[&str], i32)] = &[
+        // 0: done, and "nothing to do" counts.
+        (&["version"], 0),
+        (&["config", "get", "provider"], 0),
+        (&["profiles", "list"], 0),
+        (&["decisions", "list"], 0),
+        (&["trash", "list"], 0),
+        (&["trash", "empty", "--yes"], 0),
+        (&["ignored"], 0),
+        (&["auth", "status"], 0),
+        (&["logs"], 0),
+        // 1: it could not be done.
+        (&["config", "get", "nope"], 1),
+        (&["config", "set", "nope", "1"], 1),
+        (&["profiles", "enable", "nope"], 1),
+        (&["profiles", "rename", "nope", "Name"], 1),
+        (&["decisions", "show", "99"], 1),
+        (&["decisions", "resolve", "99", "--choose", "apply"], 1),
+        (&["trash", "restore", "99"], 1),
+        (&["init"], 1),
+        // 1: the commands that need the daemon, with none running.
+        (&["status"], 1),
+        (&["pause"], 1),
+        (&["resume"], 1),
+        (&["reconcile"], 1),
+        (&["timeline"], 1),
+        (&["diagnostics"], 1),
+        // 2: a command line that is wrong.
+        (&["nope"], 2),
+        (&["status", "--nope"], 2),
+        (&["profiles", "rename", "only-an-id"], 2),
+        (&["config", "set", "provider"], 2),
+    ];
+    for (args, expected) in cases {
+        let output = vapor(home.path(), args);
+        assert_eq!(
+            output.status.code(),
+            Some(*expected),
+            "vapor {}: stdout {:?}, stderr {:?}",
+            args.join(" "),
+            stdout(&output),
+            stderr(&output)
+        );
+        if *expected != 0 {
+            assert!(
+                !stderr(&output).is_empty(),
+                "vapor {} says nothing on stderr",
+                args.join(" ")
+            );
+        }
+    }
+}
+
 #[test]
 fn config_round_trips_and_types_its_keys() {
     let home = TempDir::new().expect("home");
@@ -177,6 +235,26 @@ fn profiles_set_an_install_up_without_a_daemon_and_never_ask_without_a_terminal(
         "with no terminal a one-way mode is left for the daemon to ask: {text}"
     );
     assert!(!local.exists(), "adding a profile creates no folder");
+
+    // One edit of one profile: the result on stdout, a refusal on
+    // stderr with exit code 1.
+    let disabled = vapor(home.path(), &["profiles", "disable", "default", "--json"]);
+    assert!(disabled.status.success(), "{}", stderr(&disabled));
+    assert_eq!(json(&disabled)["profile"]["enabled"], false);
+    assert_eq!(json(&disabled)["changed"], true);
+    let renamed = vapor(home.path(), &["profiles", "rename", "default", "Home"]);
+    assert!(renamed.status.success(), "{}", stderr(&renamed));
+    assert!(
+        stdout(&renamed).contains("\"Home\""),
+        "{}",
+        stdout(&renamed)
+    );
+    let enabled = vapor(home.path(), &["profiles", "enable", "default"]);
+    assert!(enabled.status.success(), "{}", stderr(&enabled));
+    let unknown = vapor(home.path(), &["profiles", "enable", "nope", "--json"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(stdout(&unknown).is_empty(), "{}", stdout(&unknown));
+    assert!(stderr(&unknown).contains("no profile 'nope'"));
 
     // No terminal and no --yes: remove does not guess a confirmation.
     let unconfirmed = vapor(home.path(), &["profiles", "remove", "default"]);

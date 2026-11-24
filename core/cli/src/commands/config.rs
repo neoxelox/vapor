@@ -86,6 +86,13 @@ pub fn apply_hint(key: &str, value: &str) -> String {
     let top = key.split('.').next().unwrap_or(key);
     let mut hint = if constants::config::LIVE_RELOAD_KEYS.contains(&top) {
         format!("{key} saved; a running daemon applies it within a few seconds")
+    } else if top == constants::config::KEY_PROFILES {
+        // Which profiles there are applies at once; the folders, the
+        // provider, and the mode of one that runs do not.
+        format!(
+            "{key} saved; a running daemon starts and stops profiles within a few seconds, \
+             and `vapor status` says when a change to a profile that runs needs a restart"
+        )
     } else if constants::config::RESTART_REQUIRED_KEYS.contains(&top) {
         format!("{key} saved; restart the daemon to apply it (vapor service restart)")
     } else {

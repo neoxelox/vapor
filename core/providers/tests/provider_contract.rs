@@ -343,6 +343,7 @@ impl Provider for MockObjectStoreProvider {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
             changes_feed_is_watched: false,
+            small_transfers_share_a_commit: false,
         }
     }
 

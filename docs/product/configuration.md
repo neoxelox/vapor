@@ -52,13 +52,17 @@ setting changed in one place survives a save in another.
   `useVaporignore`, `preIgnoreRules`, `postIgnoreRules`,
   `timelineLimit`, and the `resourceLimits`, `idleBoost`, `safeguards`,
   and `trash` groups.
-- **On the next start**: `localRoot`, `cloudRoot`, `provider`,
-  `syncMode`, `profiles`, and `deviceId` reshape the pipeline. `vapor
-  status` reports `restartRequired`, naming them, until the daemon
-  restarts, and `vapor service restart` applies them. The one
-  exception is the first profile: a daemon with no usable profile
-  (run state `unconfigured`) starts it as soon as its two roots are
-  set, with no restart.
+- **Within a few seconds too**: which profiles there are. A profile
+  that is added or enabled starts, one that is removed from the file or
+  disabled stops, and a new `name` shows, while the other profiles go
+  on. The first profile of a fresh install starts the same way, as
+  soon as its two roots are set.
+- **On the next start**: the folders, the provider, and the mode of a
+  profile that runs (`localRoot`, `cloudRoot`, `provider`, `syncMode`,
+  at the top level or in its `profiles` entry), and `deviceId`. `vapor
+  status` reports `restartRequired`, naming the keys, until the daemon
+  restarts or the file names what runs again. `vapor service restart`
+  applies them.
 - **Elsewhere**: `autoLaunch` is acted on by `vapor service install`
   and `uninstall` (which also set it) and by the app at startup through
   `vapor service bootstrap`. `language` is read by the app only.
@@ -156,9 +160,14 @@ so renaming the machine does not change it.
 
 Named sync profiles. Absent means one implicit profile named `default`
 built from the top-level keys, which exists once both roots are set.
-`vapor profiles list|add|remove` manages them: the first `add` starts
-syncing with no restart, and `vapor init` runs it for a fresh install,
-with the sign-in and the background service; `remove`
+`vapor profiles list|add|enable|disable|rename|remove` manages them. A
+running daemon takes an `add`, an `enable`, a `disable`, and a
+`rename` within a few seconds, with no restart, and `vapor init` runs
+the first `add` for a fresh install, with the sign-in and the
+background service. `disable` stops a profile and keeps its sync
+state, its sign-in, and its trash; `enable` starts it again where it
+stopped. `rename` sets the name the surfaces show, and the `id` never
+changes: it names the profile's state and sign-in. `remove`
 needs the daemon stopped, forgets the profile's sync state and
 sign-in, keeps its trash, and leaves the files on both sides. Each
 entry runs as an isolated pipeline with its own state database, trash,
@@ -207,7 +216,10 @@ memoryPercent: 10, bandwidthPercent: 25 }`.
 - `concurrentTransfers`: parallel uploads and, separately, parallel
   downloads, `1` to `16`. Absent means automatic: the idle width
   follows the core count (4 to 8 per direction) and always collapses
-  while you use the device.
+  while you use the device. With automatic, small files (256 KiB at
+  most) that go to a folder on a drive of this device also run five
+  for each of those transfers, because they share one flush of the
+  drive. A value you set counts every transfer, small ones too.
 
 ### `idleBoost`
 
@@ -253,3 +265,17 @@ for every profile on disk. `useSystem: true` tries the system trash
 first (the Finder's Trash on macOS, the freedesktop trash on Linux) and
 keeps the managed trash as the fallback. `enabled: false` deletes for
 good.
+
+## Network
+
+Vapor reaches a cloud over HTTPS. It trusts the certificate
+authorities that ship with it and the ones your device trusts, so a
+network that inspects traffic with a certificate of its own works when
+that certificate is in the trust store of the system.
+
+A proxy needs no setting in `vapor.json`. Vapor reads `HTTPS_PROXY`,
+then `ALL_PROXY`, with `NO_PROXY` for the hosts that go around the
+proxy: that is how a server or a container names one. With none of
+them set, it uses the HTTPS proxy of the system's network settings on
+macOS, and follows a change of network within 30 seconds. A proxy that
+a script names (automatic proxy configuration) is not followed.

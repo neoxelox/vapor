@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Tier 2 performance gate (a release gate, and on demand): one bounded soak cell
-# against the release profile, with the SLO checks from
+# Tier 2 performance gate (a release gate, and on demand): the property
+# tests at a case count that Tier 1 has no time for, then one bounded
+# soak cell against the release profile, with the SLO checks from
 # docs/performance/acceptance-budgets-and-benchmark-harness.md asserted
-# on its report. Long property, fuzz, and loom runs join here as they
-# land.
+# on its report. Fuzz and loom runs join here as they land.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,6 +12,13 @@ export VAPOR_ENV="${VAPOR_ENV:-dev}"
 
 DURATION="${VAPOR_PERF_SOAK_DURATION:-12m}"
 SEED="${VAPOR_PERF_SOAK_SEED:-11}"
+
+# Tier 1 runs each property 256 times. A counterexample that shows one
+# time in thousands needs thousands of cases.
+PROPERTY_CASES="${VAPOR_PERF_PROPERTY_CASES:-4000}"
+echo "[perf] property tests: $PROPERTY_CASES cases for each property"
+PROPTEST_CASES="$PROPERTY_CASES" cargo test --manifest-path "$ROOT_DIR/Cargo.toml" \
+  -p vapor-daemon --test properties --release
 
 echo "[perf] soak cell: two-way, mixed load, crash faults, release profile, $DURATION, seed $SEED"
 report="$ROOT_DIR/.vapor/e2e/soak-last-report.json"

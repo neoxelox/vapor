@@ -71,6 +71,11 @@ impl From<SecretStoreError> for AuthError {
     }
 }
 
+/// The name of the secret that holds the sign-in of a profile.
+pub fn token_name(profile_id: &str, provider: &str) -> String {
+    key(profile_id, provider)
+}
+
 fn key(profile_id: &str, provider: &str) -> String {
     vapor_daemon::profiles::secret_key(profile_id, provider, "token")
 }
@@ -296,7 +301,6 @@ pub fn build_native_store() -> (Box<dyn SecretStore>, Option<String>) {
 /// CLI waits for the consent hop. Returns the stored-token JSON that
 /// goes into the secret store.
 pub fn run_gdrive_pkce_flow() -> Result<String, String> {
-    use std::io::{BufRead, BufReader};
     use vapor_providers::gdrive::oauth;
 
     let oauth::ClientCredentials {
@@ -337,26 +341,83 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
             .stderr(std::process::Stdio::null())
             .spawn();
     }
-    eprintln!("Waiting for the authorization redirect on {redirect_uri} ...");
+    let wait = std::time::Duration::from_secs(
+        vapor_shared::constants::provider::BROWSER_SIGN_IN_TIMEOUT_SECONDS,
+    );
+    eprintln!(
+        "Waiting up to {} minutes for the authorization redirect on {redirect_uri} ...",
+        wait.as_secs() / 60
+    );
+    let code = match wait_for_redirect(&listener, &state, std::time::Instant::now() + wait) {
+        Ok(code) => code,
+        Err(RedirectError::TimedOut) => {
+            // The consent page is still open in the browser. Whoever
+            // signs in on it now is told to start again, by a process
+            // that outlives this one.
+            drop(listener);
+            leave_expired_page(port);
+            return Err(RedirectError::TimedOut.to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
 
-    // Loop on accept with a per-connection read timeout and an overall
-    // deadline: a stray/speculative connection (browser preconnect, a
-    // local probe) must not consume the one accept and kill the login, and
-    // a request whose `state` does not match ours is ignored. Only a
-    // request carrying our state and a code completes the flow.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let tokens = oauth::exchange_code(
+        &vapor_providers::http::NativeHttpTransport::default(),
+        &client_id,
+        client_secret.as_deref(),
+        &code,
+        &verifier,
+        &redirect_uri,
+        now_ms,
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&tokens).map_err(|error| error.to_string())
+}
+
+/// Why a wait for the redirect of the provider ended with no code.
+#[derive(Debug, Eq, PartialEq)]
+enum RedirectError {
+    TimedOut,
+    Denied(String),
+    Listener(String),
+}
+
+impl fmt::Display for RedirectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut => write!(
+                f,
+                "timed out waiting for the authorization redirect; run `vapor auth login` again"
+            ),
+            Self::Denied(error) => write!(f, "authorization was denied by the user: {error}"),
+            Self::Listener(error) => write!(f, "redirect listener failed: {error}"),
+        }
+    }
+}
+
+/// Waits on the loopback listener for the redirect that carries our
+/// `state` and a code, until `deadline`.
+///
+/// A stray or speculative connection (a browser preconnect, a local
+/// probe) must not use up the wait and end the sign-in, so each
+/// connection has its own read timeout, and a request whose `state` is
+/// not ours is answered and ignored.
+fn wait_for_redirect(
+    listener: &std::net::TcpListener,
+    state: &str,
+    deadline: std::time::Instant,
+) -> Result<String, RedirectError> {
+    use std::io::{BufRead, BufReader};
     listener
         .set_nonblocking(true)
-        .map_err(|error| format!("cannot configure the redirect listener: {error}"))?;
-    let overall_deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(
-            vapor_shared::constants::provider::BROWSER_SIGN_IN_TIMEOUT_SECONDS,
-        );
-    let code = loop {
-        if std::time::Instant::now() >= overall_deadline {
-            return Err(
-                "timed out waiting for the authorization redirect; rerun `vapor auth login`"
-                    .to_string(),
-            );
+        .map_err(|error| RedirectError::Listener(error.to_string()))?;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(RedirectError::TimedOut);
         }
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -364,8 +425,10 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
-            Err(error) => return Err(format!("redirect listener failed: {error}")),
+            Err(error) => return Err(RedirectError::Listener(error.to_string())),
         };
+        // An accepted connection can inherit the listener's mode.
+        let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
         let mut reader = BufReader::new(&stream);
         let mut request_line = String::new();
@@ -380,45 +443,90 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
             .nth(1)
             .and_then(|path| path.split('?').nth(1))
             .unwrap_or("");
-        // Reject any request whose state does not match ours.
-        if query_param(query, "state").as_deref() != Some(state.as_str()) {
-            let mut stream = stream;
+        let mut stream = &stream;
+        if query_param(query, "state").as_deref() != Some(state) {
             let _ = write_redirect_response(&mut stream, "This request was not recognized.");
             continue;
         }
         if let Some(error) = query_param(query, "error") {
-            let mut stream = stream;
             let _ = write_redirect_response(&mut stream, "Authorization was denied.");
-            return Err(format!("authorization was denied by the user: {error}"));
+            return Err(RedirectError::Denied(error));
         }
         // Google authorization codes contain '/' ("4/0A..."), which arrives
         // percent-encoded; decode before exchange (re-encoding a still-
         // encoded value yields invalid_grant).
         if let Some(code) = query_param(query, "code").filter(|code| !code.is_empty()) {
-            let mut stream = stream;
             let _ = write_redirect_response(
                 &mut stream,
                 "Vapor is authorized. You can close this tab.",
             );
-            break code;
+            return Ok(code);
+        }
+    }
+}
+
+/// The page a browser gets from the address of a sign-in that timed
+/// out.
+const EXPIRED_SIGN_IN_PAGE: &str = "This sign-in page expired: Vapor stopped waiting for it. Sign in again from the app, \
+     or run <code>vapor auth login</code> again. You can close this tab.";
+
+/// Starts a process that answers on the redirect port of a sign-in
+/// that timed out. Nothing depends on it: when it cannot start, the
+/// browser gets a refused connection, as before.
+fn leave_expired_page(port: u16) {
+    let Ok(vapor) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(vapor)
+        .args(["auth", "expired", "--port", &port.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// `vapor auth expired`: answers every request on the loopback `port`
+/// with the page of an expired sign-in, until `until`. The command
+/// that timed out starts it and exits.
+pub fn serve_expired_page(port: u16, until: std::time::Instant) -> Result<(), String> {
+    // The command that started this one may still hold the port.
+    let bind_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let listener = loop {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => break listener,
+            Err(error) if std::time::Instant::now() >= bind_deadline => {
+                return Err(format!("cannot bind 127.0.0.1:{port}: {error}"));
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     };
+    answer_with_expired_page(&listener, until).map_err(|error| error.to_string())
+}
 
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let tokens = oauth::exchange_code(
-        &vapor_providers::http::NativeHttpTransport,
-        &client_id,
-        client_secret.as_deref(),
-        &code,
-        &verifier,
-        &redirect_uri,
-        now_ms,
-    )
-    .map_err(|error| error.to_string())?;
-    serde_json::to_string(&tokens).map_err(|error| error.to_string())
+fn answer_with_expired_page(
+    listener: &std::net::TcpListener,
+    until: std::time::Instant,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader};
+    listener.set_nonblocking(true)?;
+    while std::time::Instant::now() < until {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        // The request is read before the answer goes out: a browser
+        // shows an answer that comes before its request as an error.
+        let mut request_line = String::new();
+        let _ = BufReader::new(&stream).read_line(&mut request_line);
+        let _ = write_redirect_response(&mut &stream, EXPIRED_SIGN_IN_PAGE);
+    }
+    Ok(())
 }
 
 /// Returns the percent-decoded value of `key` from a URL query string.
@@ -431,8 +539,7 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 }
 
 /// Writes a minimal HTML response body to the redirect connection.
-fn write_redirect_response(stream: &mut std::net::TcpStream, message: &str) -> std::io::Result<()> {
-    use std::io::Write;
+fn write_redirect_response(stream: &mut impl std::io::Write, message: &str) -> std::io::Result<()> {
     let body = format!("<html><body>{message}</body></html>");
     write!(
         stream,
@@ -477,6 +584,88 @@ fn percent_decode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn loopback() -> (std::net::TcpListener, std::net::SocketAddr) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        (listener, address)
+    }
+
+    /// Sends one request line and returns what the listener answers.
+    fn request(address: std::net::SocketAddr, line: &str) -> String {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(address).expect("connect");
+        stream.write_all(line.as_bytes()).expect("send");
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        answer
+    }
+
+    #[test]
+    fn the_redirect_wait_takes_the_code_with_our_state_and_ignores_the_rest() {
+        let (listener, address) = loopback();
+        let browser = std::thread::spawn(move || {
+            // A probe that sends nothing, a request with a state that
+            // is not ours, then the redirect.
+            drop(std::net::TcpStream::connect(address).expect("probe"));
+            let stranger = request(address, "GET /?code=stolen&state=other HTTP/1.1\r\n\r\n");
+            let ours = request(address, "GET /?code=4%2F0Aabc&state=ours HTTP/1.1\r\n\r\n");
+            (stranger, ours)
+        });
+        let code = wait_for_redirect(
+            &listener,
+            "ours",
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        assert_eq!(code, Ok("4/0Aabc".to_string()));
+        let (stranger, ours) = browser.join().expect("browser");
+        assert!(stranger.contains("not recognized"), "{stranger}");
+        assert!(ours.contains("Vapor is authorized"), "{ours}");
+    }
+
+    #[test]
+    fn a_refused_consent_ends_the_wait_and_a_deadline_that_passed_is_a_timeout() {
+        let (listener, address) = loopback();
+        let browser = std::thread::spawn(move || {
+            request(
+                address,
+                "GET /?error=access_denied&state=ours HTTP/1.1\r\n\r\n",
+            )
+        });
+        let denied = wait_for_redirect(
+            &listener,
+            "ours",
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        assert_eq!(
+            denied,
+            Err(RedirectError::Denied("access_denied".to_string()))
+        );
+        browser.join().expect("browser");
+
+        let timed_out = wait_for_redirect(&listener, "ours", std::time::Instant::now());
+        assert_eq!(timed_out, Err(RedirectError::TimedOut));
+        assert!(
+            RedirectError::TimedOut
+                .to_string()
+                .contains("run `vapor auth login` again")
+        );
+    }
+
+    #[test]
+    fn a_late_redirect_gets_the_page_of_an_expired_sign_in() {
+        let (listener, address) = loopback();
+        let server = std::thread::spawn(move || {
+            answer_with_expired_page(
+                &listener,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+        });
+        let late = request(address, "GET /?code=late&state=ours HTTP/1.1\r\n\r\n");
+        assert!(late.starts_with("HTTP/1.1 200 OK"), "{late}");
+        assert!(late.contains("vapor auth login"), "{late}");
+        drop(server);
+    }
 
     #[test]
     fn percent_decode_restores_reserved_characters_in_auth_codes() {

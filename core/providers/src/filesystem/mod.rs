@@ -543,6 +543,14 @@ impl Provider for FilesystemProvider {
     }
 
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
+        Ok(self.enumerate_with_unsyncable(directory)?.entries)
+    }
+
+    fn enumerate_with_unsyncable(
+        &self,
+        directory: &RemotePath,
+    ) -> Result<crate::RemoteListing, ProviderError> {
+        let mut unsyncable = Vec::new();
         let resolved = self.resolve_in_scope(directory)?;
         let reader = fs::read_dir(&resolved).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -577,6 +585,11 @@ impl Provider for FilesystemProvider {
                         &[("path", dir_entry.path().to_string_lossy().into_owned())],
                     );
                 }
+                unsyncable.push(crate::UnsyncableRemoteName {
+                    name: dir_entry.file_name().to_string_lossy().into_owned(),
+                    reason: "its name is not valid UTF-8, which the sync path model cannot carry"
+                        .to_string(),
+                });
                 continue;
             };
             if is_internal_file_name(name) {
@@ -601,6 +614,12 @@ impl Provider for FilesystemProvider {
                         &[("path", dir_entry.path().to_string_lossy().into_owned())],
                     );
                 }
+                unsyncable.push(crate::UnsyncableRemoteName {
+                    name: name.to_string(),
+                    reason:
+                        "its name has a backslash in it, which the sync path model cannot carry"
+                            .to_string(),
+                });
                 continue;
             };
             if let Some(entry) = self.remote_entry_for(&child, &dir_entry.path())? {
@@ -608,7 +627,11 @@ impl Provider for FilesystemProvider {
             }
         }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(entries)
+        unsyncable.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(crate::RemoteListing {
+            entries,
+            unsyncable,
+        })
     }
 
     fn stat(&self, path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
@@ -2509,6 +2532,39 @@ mod tests {
             .expect_err("a directory with user content stays");
         assert_eq!(error.kind, vapor_shared::ProviderErrorKind::Transient);
         assert!(cloud.join("kept/user.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_reports_the_names_that_cannot_be_a_sync_path() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        fs::create_dir_all(cloud.join("docs")).expect("dirs");
+        fs::write(cloud.join("docs/fine.txt"), b"a").expect("seed");
+        fs::write(cloud.join("docs/back\\slash.txt"), b"b").expect("seed");
+
+        let docs = RemotePath::new("docs").expect("path");
+        // It says so at every listing: the engine asks while the name
+        // is there and stops when it is gone.
+        for _ in 0..2 {
+            let listing = provider.enumerate_with_unsyncable(&docs).expect("listing");
+            let names: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
+            assert_eq!(names, vec!["docs/fine.txt"], "it is no entry");
+            assert_eq!(listing.unsyncable.len(), 1);
+            assert_eq!(listing.unsyncable[0].name, "back\\slash.txt");
+            assert!(listing.unsyncable[0].reason.contains("backslash"));
+        }
+        assert_eq!(provider.enumerate(&docs).expect("entries").len(), 1);
+
+        fs::rename(
+            cloud.join("docs/back\\slash.txt"),
+            cloud.join("docs/slash.txt"),
+        )
+        .expect("rename");
+        let listing = provider.enumerate_with_unsyncable(&docs).expect("listing");
+        assert!(listing.unsyncable.is_empty());
+        assert_eq!(listing.entries.len(), 2);
     }
 
     #[test]

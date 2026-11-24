@@ -1,7 +1,8 @@
 //! Property tests for the invariants a random input is likeliest to
 //! break (`docs/architecture/testing-strategy.md` §Property tests).
-//! Each runs a bounded number of cases so the Tier 1 budget holds;
-//! the case count is the `PROPTEST_CASES` environment variable.
+//! Each runs 256 cases so the Tier 1 budget holds. The release gate
+//! runs the same properties with `PROPTEST_CASES` set to thousands
+//! (`scripts/perf.sh`), which reaches the rare counterexample.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -35,8 +36,16 @@ fn event_path() -> impl Strategy<Value = PathBuf> {
     })
 }
 
+/// 256 cases for each property, or what `PROPTEST_CASES` says.
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(256)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
 
     /// The engine only ever admits event paths that resolve inside the
     /// watch root. Whatever the watcher spells (`..` hops, `.`
@@ -140,5 +149,85 @@ proptest! {
             }
             previous = Some(delay);
         }
+    }
+
+    /// The durable queue hands out the intents of one priority in the
+    /// order they were stored, whatever their paths, and each of them
+    /// one time.
+    #[test]
+    fn the_durable_queue_leases_in_the_order_of_arrival(
+        names in prop::collection::btree_set("[a-z0-9]{1,10}", 1..40),
+        batch in 1usize..9,
+    ) {
+        let mut state_db =
+            vapor_daemon::state_db::DurableStateDb::open_in_memory().expect("state db");
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // One extension, so one debounce class and one lease priority.
+        let stored: Vec<PathBuf> = names
+            .iter()
+            .map(|name| PathBuf::from(format!("/sync/{name}.txt")))
+            .collect();
+        for (index, path) in stored.iter().enumerate() {
+            state_db
+                .enqueue_intent(
+                    path,
+                    PendingIntentKind::Upload,
+                    start + Duration::from_millis(index as u64),
+                )
+                .expect("enqueue");
+        }
+        let now = start + Duration::from_secs(60);
+        let mut leased = Vec::new();
+        loop {
+            let slice = state_db.lease_ready_batch(now, batch).expect("lease");
+            if slice.is_empty() {
+                break;
+            }
+            prop_assert!(slice.len() <= batch);
+            leased.extend(slice.into_iter().map(|intent| intent.path));
+        }
+        prop_assert_eq!(leased, stored);
+    }
+
+    /// The name of a conflict copy says which file it is a copy of,
+    /// whose version it holds, and when: the parser gives back what the
+    /// name was made from, also for a name that was taken, and the copy
+    /// stays next to its original.
+    #[test]
+    fn a_conflict_copy_name_gives_back_what_it_was_made_from(
+        stem in "[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,20}",
+        extension in prop::option::of("[a-z0-9]{1,5}"),
+        device in "[a-z0-9][a-z0-9-]{0,14}[a-z0-9]",
+        timestamp_ms in 1_000_000_000_000u64..9_999_999_999_999,
+        taken in 0u64..4,
+    ) {
+        let file_name = match &extension {
+            Some(extension) => format!("{stem}.{extension}"),
+            None => stem.clone(),
+        };
+        // A name that the grammar of a copy would read apart is not a
+        // name this property is about.
+        prop_assume!(!file_name.contains("~conflict-") && !file_name.ends_with('.'));
+        let original = PathBuf::from("/sync/folder").join(&file_name);
+        let mut names_taken = std::collections::BTreeSet::new();
+        let mut copy = PathBuf::new();
+        for _ in 0..=taken {
+            copy = vapor_daemon::conflict::conflict_copy_path(
+                &original,
+                &device,
+                timestamp_ms,
+                |candidate| names_taken.contains(candidate),
+            );
+            prop_assert!(names_taken.insert(copy.clone()), "a name was given twice");
+        }
+        prop_assert_eq!(copy.parent(), original.parent());
+        let name = copy.file_name().and_then(|name| name.to_str()).expect("name");
+        let parsed = vapor_daemon::conflict::parse_conflict_copy_name(name);
+        prop_assert!(parsed.is_some(), "{name} is not read as a copy");
+        let parsed = parsed.expect("checked");
+        prop_assert_eq!(&parsed.canonical_file_name, &file_name, "copy name {}", name);
+        prop_assert_eq!(&parsed.device_id, &device);
+        prop_assert_eq!(parsed.timestamp_ms, timestamp_ms);
+        prop_assert_eq!(parsed.sequence, (taken > 0).then_some(taken + 1));
     }
 }

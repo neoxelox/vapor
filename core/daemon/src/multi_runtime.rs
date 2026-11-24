@@ -118,6 +118,24 @@ struct Relapse {
     forgiven_at: Instant,
 }
 
+/// What a change of the profile set came to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reshape {
+    /// The profiles that run are the ones the configuration names.
+    Applied,
+    /// A profile that runs has other folders, another provider, or
+    /// another mode in the file than the ones it was composed with.
+    NeedsRestart,
+}
+
+/// Whether `wanted` is the profile that `running` was composed from. A
+/// name decides nothing of a runtime.
+fn same_definition(running: &ResolvedProfile, wanted: &ResolvedProfile) -> bool {
+    running.provider_kind == wanted.provider_kind
+        && running.scope == wanted.scope
+        && running.invalid == wanted.invalid
+}
+
 /// The wait before the next attempt to compose a suspended profile.
 fn suspended_profile_retry_delay(attempts: usize) -> Duration {
     let waits = constants::engine::SUSPENDED_PROFILE_RETRY_SECONDS;
@@ -190,6 +208,18 @@ pub struct MultiProfileRuntime {
     /// What stops `vapor.json` from giving the profiles it means to,
     /// for the status of a daemon with no profile.
     config_problems: Vec<String>,
+    /// The runtimes of profiles that left the configuration while the
+    /// daemon ran, each ending on a thread of its own: the end of a
+    /// runtime waits for its provider calls in flight, and the tick
+    /// thread must not wait with it.
+    retiring: Vec<(String, std::thread::JoinHandle<()>)>,
+    /// Profiles that the configuration names while a runtime with
+    /// their id still ends. Two runtimes on one state database would
+    /// both lease its queue, so each is composed when that end is over.
+    awaiting_retirement: Vec<ResolvedProfile>,
+    /// The ids of the profiles in the order of the configuration, which
+    /// is the order status lists them in.
+    profile_order: Vec<String>,
 }
 
 /// The cheap observable state of one profile: enough to detect that a
@@ -370,7 +400,9 @@ impl MultiProfileRuntime {
             filters_by_root: BTreeMap::new(),
         };
         let mut slots = Vec::new();
+        let mut profile_order = Vec::new();
         for profile in profiles.into_iter().filter(|profile| profile.enabled) {
+            profile_order.push(profile.id.clone());
             slots.push(compose_slot(&mut composer, profile, now));
         }
 
@@ -407,6 +439,9 @@ impl MultiProfileRuntime {
             paused_by_user: false,
             paused_profiles: std::collections::BTreeSet::new(),
             config_problems: Vec::new(),
+            retiring: Vec::new(),
+            awaiting_retirement: Vec::new(),
+            profile_order,
         })
     }
 
@@ -614,6 +649,203 @@ impl MultiProfileRuntime {
         }
     }
 
+    /// Brings the profiles that run in step with the set the
+    /// configuration names now. A profile with the definition it was
+    /// composed from stays as it is, and takes a new name. One the set
+    /// no longer names, or names disabled, ends. One that is new is
+    /// composed. A profile that runs and whose definition changed keeps
+    /// running as it was composed: that change waits for a restart, and
+    /// the answer says so.
+    fn reshape_profiles(&mut self, set: crate::profiles::ProfileSet, now: SystemTime) -> Reshape {
+        self.config_problems = set.problems;
+        let wanted: Vec<ResolvedProfile> = set
+            .profiles
+            .into_iter()
+            .filter(|profile| profile.enabled)
+            .collect();
+        self.profile_order = wanted.iter().map(|profile| profile.id.clone()).collect();
+        // A profile that waited for the end of its old runtime is
+        // decided again from the set of now.
+        self.awaiting_retirement.clear();
+
+        let mut outcome = Reshape::Applied;
+        let mut changed = false;
+        let mut kept: Vec<ProfileSlot> = Vec::new();
+        for mut slot in std::mem::take(&mut self.slots) {
+            let target = wanted.iter().find(|profile| profile.id == slot.profile.id);
+            match target {
+                Some(profile) if same_definition(&slot.profile, profile) => {
+                    if slot.profile.name != profile.name {
+                        logging::info(
+                            "A profile has a new name",
+                            &[
+                                ("profile_id", profile.id.clone()),
+                                ("name", profile.name.clone()),
+                            ],
+                        );
+                        slot.profile.name = profile.name.clone();
+                        changed = true;
+                    }
+                    kept.push(slot);
+                }
+                // A stand-in for a profile that was never composed
+                // holds no state and no work: the profile is composed
+                // from what the file says now.
+                Some(_) if slot.failed_at_composition => {
+                    drop(slot);
+                    changed = true;
+                }
+                Some(_) => {
+                    outcome = Reshape::NeedsRestart;
+                    kept.push(slot);
+                }
+                None => {
+                    self.retire_slot(slot, now);
+                    changed = true;
+                }
+            }
+        }
+        self.slots = kept;
+        let mut composed = false;
+        for profile in wanted {
+            if self.slots.iter().any(|slot| slot.profile.id == profile.id) {
+                continue;
+            }
+            if self.retiring.iter().any(|(id, _)| *id == profile.id) {
+                self.awaiting_retirement.push(profile);
+                continue;
+            }
+            self.compose_late(profile, now);
+            composed = true;
+        }
+        if changed || composed {
+            self.after_reshape();
+        }
+        outcome
+    }
+
+    /// Composes a profile that joins while the daemon runs.
+    fn compose_late(&mut self, profile: ResolvedProfile, now: SystemTime) {
+        logging::info(
+            "Composing a profile from the new configuration",
+            &[("profile_id", profile.id.clone())],
+        );
+        self.timeline.push(
+            constants::timeline::KIND_PROFILE,
+            profile.id.clone(),
+            "profile composed from the new configuration",
+            now,
+        );
+        let mut slot = compose_slot(&mut self.composer, profile, now);
+        self.finish_late_slot(&mut slot);
+        self.slots.push(slot);
+    }
+
+    /// What every change of the set of slots needs: the order of the
+    /// configuration, watchers for the profiles of now, and a status
+    /// that is published again.
+    fn after_reshape(&mut self) {
+        let order = &self.profile_order;
+        self.slots.sort_by_key(|slot| {
+            order
+                .iter()
+                .position(|id| *id == slot.profile.id)
+                .unwrap_or(usize::MAX)
+        });
+        // The filter of a folder that no profile watches any more goes:
+        // a profile that comes back builds one from the rules of then.
+        let in_use: Vec<Arc<SharedEventPathFilter>> = self
+            .slots
+            .iter()
+            .filter_map(|slot| slot.runtime.shared_path_filter())
+            .collect();
+        self.composer
+            .filters_by_root
+            .retain(|_, filter| in_use.iter().any(|used| Arc::ptr_eq(used, filter)));
+        if self.watchers_enabled {
+            // New watchers before the old ones go, so no event falls in
+            // between; the overlap gives duplicates, which coalesce.
+            let watchers = start_deduplicated_watchers(&mut self.slots, &self.tick_waker);
+            self._watchers = watchers;
+        }
+        self.last_published_slot_states.clear();
+    }
+
+    /// Ends the runtime of a profile that left the configuration. What
+    /// its watcher reported goes to the durable queue first, as at a
+    /// shutdown, so a profile that is enabled again finds it there.
+    fn retire_slot(&mut self, mut slot: ProfileSlot, now: SystemTime) {
+        let profile_id = slot.profile.id.clone();
+        logging::info(
+            "A profile left the configuration or was disabled; ending its runtime",
+            &[("profile_id", profile_id.clone())],
+        );
+        self.timeline.push(
+            constants::timeline::KIND_PROFILE,
+            profile_id.clone(),
+            "profile stopped: it is disabled or no longer in the configuration",
+            now,
+        );
+        if slot.failed.is_none() {
+            match catch_unwind(AssertUnwindSafe(|| slot.runtime.flush_for_shutdown(now))) {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => logging::warning(
+                    "The last flush of a profile that ends failed; its pending changes wait for its next startup reconcile",
+                    &[
+                        ("profile_id", profile_id.clone()),
+                        ("error", format!("{error:?}")),
+                    ],
+                ),
+                Err(_) => logging::warning(
+                    "The last flush of a profile that ends panicked; its pending changes wait for its next startup reconcile",
+                    &[("profile_id", profile_id.clone())],
+                ),
+            }
+            let _ = catch_unwind(AssertUnwindSafe(|| slot.runtime.abort_and_release(now)));
+        }
+        if !self.transfer_workers {
+            // No worker thread holds a call of this runtime.
+            drop(slot);
+            return;
+        }
+        let waker = self.tick_waker.clone();
+        let ended = std::thread::Builder::new()
+            .name("vapor-profile-retire".to_string())
+            .spawn(move || {
+                drop(slot);
+                waker.notify();
+            });
+        match ended {
+            Ok(handle) => self.retiring.push((profile_id, handle)),
+            // The runtime ended on this thread, with the closure.
+            Err(error) => logging::warning(
+                "Could not start a thread to end a profile; it ended on the tick thread",
+                &[("profile_id", profile_id), ("error", error.to_string())],
+            ),
+        }
+    }
+
+    /// Composes each profile that waited for the end of the runtime
+    /// that held its id.
+    fn compose_after_retirements(&mut self, now: SystemTime) {
+        if self.retiring.is_empty() {
+            return;
+        }
+        self.retiring.retain(|(_, handle)| !handle.is_finished());
+        let retiring = &self.retiring;
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.awaiting_retirement)
+            .into_iter()
+            .partition(|profile| !retiring.iter().any(|(id, _)| *id == profile.id));
+        self.awaiting_retirement = waiting;
+        if ready.is_empty() {
+            return;
+        }
+        for profile in ready {
+            self.compose_late(profile, now);
+        }
+        self.after_reshape();
+    }
+
     /// Starts watching `path` for changes to the configuration the daemon
     /// was composed from. Live keys apply on the tick that notices the
     /// change; the rest are reported as restart-required in status.
@@ -681,16 +913,12 @@ impl MultiProfileRuntime {
         }) {
             let options = EventPathFilterOptions::from_config(&config);
             self.composer.filter_options = options.clone();
-            let mut seen: Vec<*const crate::fs_events::SharedEventPathFilter> = Vec::new();
-            for slot in &self.slots {
-                if let Some(filter) = slot.runtime.shared_path_filter() {
-                    let pointer = Arc::as_ptr(&filter);
-                    if seen.contains(&pointer) {
-                        continue;
-                    }
-                    seen.push(pointer);
-                    filter.replace_options(options.clone());
-                }
+            // Every filter a profile holds is in this map, and so is
+            // the filter of a profile that waits for its local root: it
+            // is composed again with the filter of its folder, which
+            // must hold the rules of now.
+            for filter in self.composer.filters_by_root.values() {
+                filter.replace_options(options.clone());
             }
         }
         if change.live.contains(&keys::KEY_TIMELINE_LIMIT) {
@@ -708,10 +936,11 @@ impl MultiProfileRuntime {
                 self.clock.now_system(),
             );
         }
-        // The first sync scope composes without a restart: no profile
-        // runs yet (there is none, or each one is waiting for the
-        // configuration to be completed), so there is nothing to
-        // reshape.
+        // A change of the profile set applies now: a profile that was
+        // added or enabled is composed, one that was removed or
+        // disabled ends, and a new name is taken. A profile that runs
+        // keeps the folders, the provider, and the mode it was composed
+        // with until a restart.
         let scope_keys = [
             keys::KEY_PROFILES,
             keys::KEY_LOCAL_ROOT,
@@ -720,33 +949,17 @@ impl MultiProfileRuntime {
             keys::KEY_SYNC_MODE,
         ];
         let mut restart = change.restart;
-        let nothing_runs = self.slots.iter().all(|slot| slot.profile.invalid.is_some());
-        if nothing_runs && restart.iter().any(|key| scope_keys.contains(key)) {
+        if restart.iter().any(|key| scope_keys.contains(key)) {
             let set = crate::profiles::resolve_profile_set_from(&config);
-            self.config_problems = set.problems;
-            self.slots.clear();
             let now = self.clock.now_system();
-            for profile in set.profiles.into_iter().filter(|profile| profile.enabled) {
-                logging::info(
-                    "Composing a profile from the new configuration",
-                    &[("profile_id", profile.id.clone())],
-                );
-                self.timeline.push(
-                    constants::timeline::KIND_PROFILE,
-                    profile.id.clone(),
-                    "profile composed from the new configuration",
-                    now,
-                );
-                let mut slot = compose_slot(&mut self.composer, profile, now);
-                self.finish_late_slot(&mut slot);
-                self.slots.push(slot);
+            if self.reshape_profiles(set, now) == Reshape::Applied {
+                restart.retain(|key| !scope_keys.contains(key));
+                // An earlier change that waited for a restart is
+                // applied now or was taken back: the profiles that run
+                // are the ones the file names.
+                self.restart_required
+                    .retain(|key| !scope_keys.contains(key));
             }
-            if self.watchers_enabled {
-                let watchers = start_deduplicated_watchers(&mut self.slots, &self.tick_waker);
-                self._watchers = watchers;
-            }
-            restart.retain(|key| !scope_keys.contains(key));
-            self.last_published_slot_states.clear();
         }
         for key in restart {
             if !self.restart_required.contains(&key) {
@@ -877,6 +1090,7 @@ impl MultiProfileRuntime {
     pub fn tick_all(&mut self, now: SystemTime) -> MultiTickReport {
         let control_forwarded = self.forward_external_control();
         self.apply_config_changes(self.clock.now());
+        self.compose_after_retirements(now);
         self.retry_missing_roots_if_due(now);
         self.retry_suspended_profiles(now);
         self.purge_other_trash_if_due(now);
@@ -986,8 +1200,20 @@ impl MultiProfileRuntime {
                         )
                 })
                 .unwrap_or(true);
-            let stale = report.any_pending_work
-                || self.last_any_pending_work
+            // Work in flight changes the counts at every tick. Those
+            // are published a few times a second; everything else that
+            // can change is published at once, and so is the tick
+            // after the work ended, where the final counts land.
+            let busy_due = self
+                .last_status_publish_inst
+                .map(|last| {
+                    now_inst.saturating_duration_since(last)
+                        >= Duration::from_millis(constants::engine::STATUS_BUSY_REPUBLISH_MILLIS)
+                })
+                .unwrap_or(true);
+            let work_ended = self.last_any_pending_work && !report.any_pending_work;
+            let stale = (report.any_pending_work && busy_due)
+                || work_ended
                 || control_forwarded
                 || heartbeat_due
                 || slot_states != self.last_published_slot_states
@@ -2924,6 +3150,215 @@ mod tests {
         );
     }
 
+    /// Ticks until `done` holds, with the clock moved between ticks.
+    fn tick_until(
+        multi: &mut MultiProfileRuntime,
+        clock: &Arc<ManualClock>,
+        mut done: impl FnMut() -> bool,
+    ) -> bool {
+        use crate::clock::Clock as _;
+        for _ in 0..40 {
+            if done() {
+                return true;
+            }
+            clock.advance(Duration::from_secs(6));
+            clock.advance_system(Duration::from_secs(6));
+            multi.tick_all(clock.now_system());
+        }
+        done()
+    }
+
+    #[test]
+    fn a_change_of_the_profile_set_applies_to_a_daemon_that_runs() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let config_path = temp.path().join("vapor.json");
+        let root = |name: &str| temp.path().join(name);
+        let profile = |id: &str, enabled: bool, name: Option<&str>| {
+            let mut entry = serde_json::json!({
+                "id": id,
+                "localRoot": root(&format!("{id}-local")),
+                "cloudRoot": root(&format!("{id}-cloud")),
+                "enabled": enabled,
+            });
+            if let Some(name) = name {
+                entry["name"] = serde_json::json!(name);
+            }
+            entry
+        };
+        let write = |profiles: Vec<serde_json::Value>, seconds_later: u64| {
+            rewrite_config(
+                &config_path,
+                &serde_json::json!({ "profiles": profiles }).to_string(),
+                seconds_later,
+            );
+        };
+        std::fs::write(
+            &config_path,
+            serde_json::json!({ "profiles": [profile("home", true, None)] }).to_string(),
+        )
+        .expect("seed config");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        // The test starts no watcher: a scan on request finds a change.
+        let control = Arc::new(RuntimeControl::new());
+        multi.attach_control(control.clone());
+        std::fs::create_dir_all(root("home-local")).expect("local root");
+        std::fs::write(root("home-local").join("a.txt"), b"a").expect("seed");
+        assert!(
+            tick_until(&mut multi, &clock, || root("home-cloud")
+                .join("a.txt")
+                .exists()),
+            "the first profile syncs"
+        );
+        let ids = |multi: &MultiProfileRuntime| -> Vec<String> {
+            multi
+                .profile_summaries()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect()
+        };
+
+        // A second profile, written before the first one: it starts
+        // with no restart, and status lists it where the file has it.
+        write(
+            vec![profile("work", true, None), profile("home", true, None)],
+            5,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(ids(&multi), ["work", "home"]);
+        assert!(multi.restart_required().is_empty());
+        std::fs::write(root("work-local").join("w.txt"), b"w").expect("seed");
+        assert!(
+            tick_until(&mut multi, &clock, || root("work-cloud")
+                .join("w.txt")
+                .exists()),
+            "the profile that joined syncs"
+        );
+
+        // Disabled: its runtime ends, and nothing of it syncs. The
+        // other profile goes on.
+        write(
+            vec![profile("work", false, None), profile("home", true, None)],
+            10,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(ids(&multi), ["home"]);
+        assert!(multi.restart_required().is_empty());
+        std::fs::write(root("work-local").join("while-off.txt"), b"x").expect("seed");
+        std::fs::write(root("home-local").join("b.txt"), b"b").expect("seed");
+        control.request_reconcile();
+        assert!(
+            tick_until(&mut multi, &clock, || root("home-cloud")
+                .join("b.txt")
+                .exists()),
+            "the profile that stays keeps syncing"
+        );
+        assert!(
+            !root("work-cloud").join("while-off.txt").exists(),
+            "a disabled profile syncs nothing"
+        );
+
+        // Enabled again, with a new name: it is composed on the state
+        // it left, and its scan finds what changed meanwhile.
+        write(
+            vec![
+                profile("work", true, Some("Work files")),
+                profile("home", true, None),
+            ],
+            15,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(ids(&multi), ["work", "home"]);
+        assert!(multi.restart_required().is_empty());
+        assert!(
+            tick_until(&mut multi, &clock, || root("work-cloud")
+                .join("while-off.txt")
+                .exists()),
+            "the profile that came back syncs what it missed"
+        );
+
+        // A new name alone: taken at once, and the runtime is the same
+        // one (a profile composed again would scan its folders again).
+        let scans_before = multi
+            .runtime_for("home")
+            .expect("home runs")
+            .reconcile_status();
+        write(
+            vec![
+                profile("work", true, Some("Work files")),
+                profile("home", true, Some("Home")),
+            ],
+            20,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        let names: Vec<String> = multi
+            .profile_summaries()
+            .into_iter()
+            .map(|profile| profile.name)
+            .collect();
+        assert_eq!(names, ["Work files", "Home"]);
+        assert!(multi.restart_required().is_empty());
+        assert_eq!(
+            multi
+                .runtime_for("home")
+                .expect("home runs")
+                .reconcile_status(),
+            scans_before,
+            "a new name starts no scan"
+        );
+
+        // Taken out of the file: the same as disabled.
+        write(vec![profile("home", true, Some("Home"))], 25);
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(ids(&multi), ["home"]);
+        assert!(multi.restart_required().is_empty());
+    }
+
+    #[test]
+    fn a_profile_that_runs_keeps_its_definition_until_a_restart_and_a_change_taken_back_clears_it()
+    {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let config_path = temp.path().join("vapor.json");
+        let local = temp.path().join("local");
+        let cloud = temp.path().join("cloud");
+        let with_cloud = |cloud: &Path| {
+            serde_json::json!({ "profiles": [
+                { "id": "home", "localRoot": local, "cloudRoot": cloud },
+            ] })
+            .to_string()
+        };
+        std::fs::write(&config_path, with_cloud(&cloud)).expect("seed config");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.failed_profile_count(), 0);
+
+        let other = temp.path().join("other");
+        rewrite_config(&config_path, &with_cloud(&other), 5);
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.restart_required(), &["profiles"]);
+        assert!(
+            !other.exists(),
+            "the profile still runs on the folder it was composed with"
+        );
+
+        rewrite_config(&config_path, &with_cloud(&cloud), 10);
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert!(
+            multi.restart_required().is_empty(),
+            "the file names what runs again: nothing waits for a restart"
+        );
+    }
+
     #[test]
     fn a_live_config_change_applies_mid_work_and_a_restart_key_is_reported() {
         let temp = TempDir::new().expect("temp dir");
@@ -2933,8 +3368,9 @@ mod tests {
         std::fs::create_dir_all(&local).expect("local");
         std::fs::create_dir_all(&cloud).expect("cloud");
         let config_path = temp.path().join("vapor.json");
-        std::fs::write(&config_path, "{}\n").expect("seed config");
         let local = vapor_shared::paths::canonicalize(&local).expect("canonical");
+        let roots = serde_json::json!({ "localRoot": local, "cloudRoot": cloud });
+        std::fs::write(&config_path, roots.to_string()).expect("seed config");
         // Work in flight across the reload: a durable upload queued
         // before the daemon starts.
         let keep = local.join("keep.txt");
@@ -2968,7 +3404,7 @@ mod tests {
             enabled: true,
             invalid: None,
         }];
-        let applied = vapor_shared::config::VaporConfig::default();
+        let applied = vapor_shared::config::load_from(&config_path).config;
         let mut multi = MultiProfileRuntime::start_with_state_root(
             profiles,
             EventPathFilterOptions::default(),
@@ -2986,12 +3422,11 @@ mod tests {
         multi.tick_all(clock.now_system());
 
         // A live key: the ceiling drops without touching the queue.
-        std::fs::write(
-            &config_path,
-            "{\"resourceLimits\": {\"cpuPercent\": 7, \"concurrentTransfers\": 3}, \
-             \"postIgnoreRules\": [\"*.late\"], \"provider\": \"gdrive\"}\n",
-        )
-        .expect("edit config");
+        let mut edited = roots.clone();
+        edited["resourceLimits"] = serde_json::json!({ "cpuPercent": 7, "concurrentTransfers": 3 });
+        edited["postIgnoreRules"] = serde_json::json!(["*.late"]);
+        edited["provider"] = serde_json::json!("gdrive");
+        std::fs::write(&config_path, edited.to_string()).expect("edit config");
         let later = std::fs::metadata(&config_path)
             .expect("metadata")
             .modified()

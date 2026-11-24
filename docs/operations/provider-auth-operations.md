@@ -12,14 +12,22 @@ are provider-neutral unless a section says otherwise.
   `vapor auth login` runs the whole flow: it starts a
   loopback listener on `127.0.0.1`, opens the consent page in the
   default browser, receives the redirect, and exchanges the code. It
-  waits up to five minutes for the consent. It runs the browser flow
+  waits up to 30 minutes for the consent. The consent page stays open
+  in the browser after that and looks alive, so a wait that timed out
+  leaves a small process on the redirect address for one day (`vapor
+  auth expired`, hidden): a sign-in that comes late gets a page that
+  says to sign in again, where the browser showed a refused connection
+  before. The process holds no secret and answers every request with
+  that one page. It runs the browser flow
   only from a terminal; `--browser` runs it without one (the app's
   Sign In button). A token made elsewhere goes in on stdin (`<command
   that prints the token> | vapor auth login --token -`); a token given
   as an argument is refused and not stored, because an argument shows
   in the process list and stays in the shell history.
 - `vapor init` signs in before the profile exists, so its folder step
-  can look into the account. The token is stored under the id that the
+  can look into the account. The look uses the sign-in of that run
+  from memory and reads no secret store: on a build with no Developer
+  ID the keychain gives the stored item to `vapord` only. The token is stored under the id that the
   first profile gets (`default`) and the provider. It stays when the
   user stops before the folders: the next `vapor init` uses it, and
   `vapor auth logout` removes it. When the profile is then written for
@@ -228,8 +236,17 @@ file, so it holds the profile instead of failing work
   tokens at two looks, 2 seconds apart, is a sign-out: the provider
   stops using the tokens it holds in memory, and the profile holds for
   a sign-in. One look is not enough, because the keychain replaces an
-  item by a delete and an add. A store that does not answer (a locked
-  keychain) is not a sign-out. A token refresh never writes into a
+  item by a delete and an add. A store that cannot be asked is not a
+  sign-out, and it is no reason to sign in again: a keychain that is
+  locked, a keyring that is locked, or a keyring service that gives no
+  answer. The provider keeps the tokens it holds in memory, also when
+  the cloud refuses the access token and a new one is needed. A daemon
+  that starts while the store is locked has no tokens: its profile
+  waits with the cloud folder shown as not reachable and the reason
+  from the store, and it reads the sign-in when the store opens. A
+  store that answers and refuses (an item that names another build) is
+  different: there a new sign-in is the way out. A token refresh never
+  writes into a
   store that holds no tokens or the tokens of another sign-in, and a
   sign-in with another account replaces the tokens in memory at the
   next look.

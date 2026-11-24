@@ -360,18 +360,64 @@ mod tests {
         assert_eq!(caps.case_sensitivity(), CaseSensitivity::Insensitive);
     }
 
-    #[test]
-    fn in_memory_tags_round_trip_and_remove() {
-        let caps = InMemoryFilesystemCapabilities::default();
-        let path = Path::new("/tmp/file.txt");
-        assert_eq!(caps.read_tag(path, "op-id").expect("read"), None);
-        caps.write_tag(path, "op-id", "abc123").expect("write");
+    /// What every implementation holds to for the tags of a file that
+    /// exists. A volume with no room for a tag refuses the first write
+    /// with `Unsupported` or `PermissionDenied`, and the caller then
+    /// keeps the tag in a side-file: nothing more is asked of it here.
+    fn exercise_tag_contract(caps: &dyn FilesystemCapabilities, file: &Path) {
+        let tag = "sh.arn.vapor.contract";
+        let other = "sh.arn.vapor.contract-other";
+        match caps.write_tag(file, tag, "op-1") {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return;
+            }
+            Err(error) => panic!("unexpected failure of a tag write: {error}"),
+        }
         assert_eq!(
-            caps.read_tag(path, "op-id").expect("read"),
-            Some("abc123".to_string())
+            caps.read_tag(file, tag).expect("read"),
+            Some("op-1".to_string())
         );
-        caps.remove_tag(path, "op-id").expect("remove");
-        assert_eq!(caps.read_tag(path, "op-id").expect("read"), None);
+        // A second write replaces the value, and a tag of another name
+        // is another tag.
+        caps.write_tag(file, tag, "op-2 \u{2713}")
+            .expect("overwrite");
+        assert_eq!(
+            caps.read_tag(file, tag).expect("read"),
+            Some("op-2 \u{2713}".to_string())
+        );
+        assert_eq!(caps.read_tag(file, other).expect("read"), None);
+        caps.write_tag(file, other, "kept").expect("write");
+        caps.remove_tag(file, tag).expect("remove");
+        assert_eq!(caps.read_tag(file, tag).expect("read"), None);
+        assert_eq!(
+            caps.read_tag(file, other).expect("read"),
+            Some("kept".to_string())
+        );
+        // Removing a tag that is not there is convergence.
+        caps.remove_tag(file, tag).expect("remove again");
+        caps.remove_tag(file, other).expect("cleanup");
+    }
+
+    #[test]
+    fn the_fake_tags_satisfy_the_contract() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let file = dir.path().join("tagged.txt");
+        std::fs::write(&file, b"payload").expect("seed file");
+        exercise_tag_contract(&InMemoryFilesystemCapabilities::default(), &file);
+    }
+
+    #[test]
+    fn the_native_tags_satisfy_the_contract() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let file = dir.path().join("tagged.txt");
+        std::fs::write(&file, b"payload").expect("seed file");
+        exercise_tag_contract(&NativeFilesystemCapabilities::for_current_host(), &file);
     }
 
     #[test]
@@ -390,51 +436,5 @@ mod tests {
         let caps = NativeFilesystemCapabilities::for_current_host();
         assert!(caps.supports_xattr());
         assert_eq!(caps.case_sensitivity(), CaseSensitivity::Insensitive);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn native_tags_round_trip_on_real_file() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let file = dir.path().join("tagged.txt");
-        std::fs::write(&file, b"payload").expect("seed file");
-
-        let caps = NativeFilesystemCapabilities::for_current_host();
-        // Some CI filesystems mount tmp without xattr support; treat an
-        // Unsupported write as an acceptable environment, not a failure.
-        match caps.write_tag(&file, "sh.arn.vapor.test", "op-42") {
-            Ok(()) => {
-                assert_eq!(
-                    caps.read_tag(&file, "sh.arn.vapor.test").expect("read"),
-                    Some("op-42".to_string())
-                );
-                caps.remove_tag(&file, "sh.arn.vapor.test").expect("remove");
-                assert_eq!(
-                    caps.read_tag(&file, "sh.arn.vapor.test").expect("read"),
-                    None
-                );
-            }
-            Err(error) => {
-                assert!(
-                    matches!(
-                        error.kind(),
-                        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
-                    ),
-                    "unexpected xattr failure: {error}"
-                );
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn native_remove_of_absent_tag_is_ok() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let file = dir.path().join("untouched.txt");
-        std::fs::write(&file, b"payload").expect("seed file");
-
-        let caps = NativeFilesystemCapabilities::for_current_host();
-        caps.remove_tag(&file, "sh.arn.vapor.absent")
-            .expect("absent tag removal is convergence");
     }
 }

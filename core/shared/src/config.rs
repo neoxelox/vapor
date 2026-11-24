@@ -546,6 +546,15 @@ impl VaporConfig {
 /// or inside a group, are surfaced the same way rather than silently
 /// dropped. Absent or `null` fields fill in defaults (partial files stay
 /// valid).
+/// The configuration a parsed `vapor.json` document gives, with the
+/// same checks as a load from disk. For a caller that edits the
+/// document and has to know what the edit gives before it writes it.
+pub fn load_from_document(
+    document: &serde_json::Map<String, serde_json::Value>,
+) -> VaporConfigLoadResult {
+    config_from_object(document)
+}
+
 fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> VaporConfigLoadResult {
     use constants::config as keys;
 

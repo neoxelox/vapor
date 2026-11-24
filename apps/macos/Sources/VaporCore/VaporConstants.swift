@@ -153,7 +153,7 @@ public enum VaporConstants {
     /// Mirrors `core/shared/src/constants.rs::provider::BROWSER_SIGN_IN_TIMEOUT_SECONDS`
     /// per AGENTS.md §8.6: how long `vapor auth login` waits for the
     /// browser consent.
-    public static let browserSignInTimeoutSeconds = 300
+    public static let browserSignInTimeoutSeconds = 30 * 60
 
     /// User-facing display name for a `provider` config value. Unknown
     /// values render verbatim so a misconfiguration stays visible.

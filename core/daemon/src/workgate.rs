@@ -10,6 +10,12 @@ pub enum WorkClass {
     Hash,
     Upload,
     Download,
+    /// A small upload in the lane of small transfers
+    /// ([`ThrottleWorkgate::set_small_transfers_per_slot`]). A deletion
+    /// in the cloud counts as one: it moves no bytes.
+    SmallUpload,
+    /// A small download in the lane of small transfers.
+    SmallDownload,
     Reconcile,
 }
 
@@ -33,6 +39,7 @@ pub enum WorkPermitDeniedReason {
     ReadTokensExhausted,
     UploadConcurrencyExhausted,
     DownloadConcurrencyExhausted,
+    SmallTransferLaneFull,
     HashingDisabled,
     UploadsDisabled,
     DownloadsDisabled,
@@ -56,6 +63,11 @@ pub struct WorkgateSnapshot {
     pub active_downloads: usize,
     pub active_reconciles: usize,
     pub active_read_tokens: usize,
+    pub active_small_uploads: usize,
+    pub active_small_downloads: usize,
+    /// Small transfers that may run for each transfer slot, in each
+    /// direction; 0 with no lane.
+    pub small_transfers_per_slot: usize,
 }
 
 impl WorkgateSnapshot {
@@ -100,6 +112,9 @@ pub struct ThrottleWorkgate {
     active_downloads: usize,
     active_reconciles: usize,
     active_read_tokens: usize,
+    active_small_uploads: usize,
+    active_small_downloads: usize,
+    small_transfers_per_slot: usize,
     next_permit_id: u64,
     active_permits: BTreeMap<u64, ActivePermit>,
 }
@@ -115,9 +130,22 @@ impl ThrottleWorkgate {
             active_downloads: 0,
             active_reconciles: 0,
             active_read_tokens: 0,
+            active_small_uploads: 0,
+            active_small_downloads: 0,
+            small_transfers_per_slot: 0,
             next_permit_id: 1,
             active_permits: BTreeMap::new(),
         }
+    }
+
+    /// Sets the width of the lane of small transfers: this many for
+    /// each transfer slot of the caps, in each direction. A small
+    /// transfer costs its commit and not its bytes, and the transfers
+    /// of one moment share that commit, so the lane is wider than the
+    /// slots. 0 closes the lane; a small transfer then takes a slot
+    /// like any other.
+    pub fn set_small_transfers_per_slot(&mut self, per_slot: usize) {
+        self.small_transfers_per_slot = per_slot;
     }
 
     pub fn reconfigure(&mut self, throttle_state: ThrottleState, caps: ThrottleCaps) {
@@ -135,6 +163,9 @@ impl ThrottleWorkgate {
             active_downloads: self.active_downloads,
             active_reconciles: self.active_reconciles,
             active_read_tokens: self.active_read_tokens,
+            active_small_uploads: self.active_small_uploads,
+            active_small_downloads: self.active_small_downloads,
+            small_transfers_per_slot: self.small_transfers_per_slot,
         }
     }
 
@@ -166,6 +197,36 @@ impl ThrottleWorkgate {
             }
             WorkClass::Download => {
                 self.ensure_download_capacity()?;
+                ActivePermit {
+                    class,
+                    uses_planner_slot: false,
+                    uses_read_token: false,
+                }
+            }
+            WorkClass::SmallUpload => {
+                if !self.caps.allow_uploads {
+                    return Err(self.denied(class, WorkPermitDeniedReason::UploadsDisabled));
+                }
+                self.ensure_small_lane_capacity(
+                    class,
+                    self.active_small_uploads,
+                    self.caps.upload_concurrency,
+                )?;
+                ActivePermit {
+                    class,
+                    uses_planner_slot: false,
+                    uses_read_token: false,
+                }
+            }
+            WorkClass::SmallDownload => {
+                if !self.caps.allow_downloads {
+                    return Err(self.denied(class, WorkPermitDeniedReason::DownloadsDisabled));
+                }
+                self.ensure_small_lane_capacity(
+                    class,
+                    self.active_small_downloads,
+                    self.caps.download_concurrency,
+                )?;
                 ActivePermit {
                     class,
                     uses_planner_slot: false,
@@ -282,6 +343,18 @@ impl ThrottleWorkgate {
         Ok(())
     }
 
+    fn ensure_small_lane_capacity(
+        &self,
+        class: WorkClass,
+        active: usize,
+        slots: usize,
+    ) -> Result<(), WorkPermitDenied> {
+        if active >= slots.saturating_mul(self.small_transfers_per_slot) {
+            return Err(self.denied(class, WorkPermitDeniedReason::SmallTransferLaneFull));
+        }
+        Ok(())
+    }
+
     fn ensure_reconcile_capacity(&self) -> Result<(), WorkPermitDenied> {
         if !self.caps.allow_reconcile {
             return Err(self.denied(
@@ -313,6 +386,12 @@ impl ThrottleWorkgate {
             WorkClass::Download => {
                 self.active_downloads += 1;
             }
+            WorkClass::SmallUpload => {
+                self.active_small_uploads += 1;
+            }
+            WorkClass::SmallDownload => {
+                self.active_small_downloads += 1;
+            }
             WorkClass::Reconcile => {
                 self.active_reconciles += 1;
             }
@@ -339,6 +418,12 @@ impl ThrottleWorkgate {
             }
             WorkClass::Download => {
                 self.active_downloads = self.active_downloads.saturating_sub(1);
+            }
+            WorkClass::SmallUpload => {
+                self.active_small_uploads = self.active_small_uploads.saturating_sub(1);
+            }
+            WorkClass::SmallDownload => {
+                self.active_small_downloads = self.active_small_downloads.saturating_sub(1);
             }
             WorkClass::Reconcile => {
                 self.active_reconciles = self.active_reconciles.saturating_sub(1);
@@ -576,6 +661,74 @@ mod tests {
             id: 999,
             class: WorkClass::Upload,
         }));
+    }
+
+    #[test]
+    fn small_transfers_have_a_lane_next_to_the_transfer_slots() {
+        let controller = ThrottleController::default();
+        for state in [
+            ThrottleState::Idle,
+            ThrottleState::Light,
+            ThrottleState::Throttled,
+        ] {
+            let caps = controller.caps_for(state);
+            let mut gate = ThrottleWorkgate::new(state, caps);
+            // No lane until one is set: a small transfer has no place.
+            assert_eq!(
+                gate.try_acquire(WorkClass::SmallUpload)
+                    .expect_err("no lane")
+                    .reason,
+                WorkPermitDeniedReason::SmallTransferLaneFull
+            );
+
+            gate.set_small_transfers_per_slot(5);
+            let lane = 5 * caps.upload_concurrency;
+            let small: Vec<WorkPermit> = (0..lane)
+                .map(|_| gate.try_acquire(WorkClass::SmallUpload).expect("a place"))
+                .collect();
+            assert_eq!(
+                gate.try_acquire(WorkClass::SmallUpload)
+                    .expect_err("the lane is full")
+                    .reason,
+                WorkPermitDeniedReason::SmallTransferLaneFull,
+                "{state:?}"
+            );
+            // The lane takes no transfer slot, and a slot takes no
+            // place in the lane. Each direction has its own.
+            let slots: Vec<WorkPermit> = (0..caps.upload_concurrency)
+                .map(|_| gate.try_acquire(WorkClass::Upload).expect("a slot"))
+                .collect();
+            assert!(gate.try_acquire(WorkClass::Upload).is_err());
+            gate.try_acquire(WorkClass::SmallDownload)
+                .expect("the other direction");
+            let snapshot = gate.snapshot();
+            assert_eq!(snapshot.active_small_uploads, lane);
+            assert_eq!(snapshot.active_uploads, slots.len());
+            assert_eq!(snapshot.active_small_downloads, 1);
+
+            assert!(gate.release(small[0]));
+            gate.try_acquire(WorkClass::SmallUpload)
+                .expect("a place is free again");
+        }
+
+        // `Suspended` stops every transfer, the small ones too.
+        let mut gate = ThrottleWorkgate::new(
+            ThrottleState::Suspended,
+            controller.caps_for(ThrottleState::Suspended),
+        );
+        gate.set_small_transfers_per_slot(5);
+        assert_eq!(
+            gate.try_acquire(WorkClass::SmallUpload)
+                .expect_err("suspended")
+                .reason,
+            WorkPermitDeniedReason::UploadsDisabled
+        );
+        assert_eq!(
+            gate.try_acquire(WorkClass::SmallDownload)
+                .expect_err("suspended")
+                .reason,
+            WorkPermitDeniedReason::DownloadsDisabled
+        );
     }
 
     fn idle_gate() -> ThrottleWorkgate {

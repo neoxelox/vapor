@@ -187,10 +187,12 @@ pub mod config {
         KEY_TRASH,
     ];
 
-    /// Keys that reshape the pipeline (roots, provider, direction,
-    /// profile set) and therefore take effect on the next daemon start;
-    /// a running daemon reports them as `restartRequired` in status
-    /// until it is restarted.
+    /// Keys that reshape the pipeline of a profile that runs (roots,
+    /// provider, direction, its entry in the profile set) and therefore
+    /// take effect on the next daemon start; a running daemon reports
+    /// them as `restartRequired` in status until it is restarted. A
+    /// change of these keys that only adds, removes, enables, disables,
+    /// or renames a profile applies at once.
     pub const RESTART_REQUIRED_KEYS: &[&str] = &[
         KEY_LOCAL_ROOT,
         KEY_CLOUD_ROOT,
@@ -294,14 +296,24 @@ pub mod provider {
     pub const HTTP_SOCKET_TIMEOUT_SECONDS: u64 = 120;
     /// Connect timeout for the native HTTP transport.
     pub const HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 30;
+    /// How long the HTTP transport goes on with the proxy it last read
+    /// before it reads the proxy settings again. A device that moves to
+    /// another network follows within this time.
+    pub const HTTP_PROXY_RECHECK_SECONDS: u64 = 30;
     /// Hard cap on a single HTTP response body. Reading one extra byte
     /// past this and erroring (rather than silently truncating) keeps a
     /// mis-ranged full-file download from completing as a corrupt file.
     pub const MAX_HTTP_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
     /// How long `vapor auth login` waits for the browser consent before
-    /// giving up. The app's Sign in button waits a little longer than
-    /// this for the CLI to answer.
-    pub const BROWSER_SIGN_IN_TIMEOUT_SECONDS: u64 = 300;
+    /// giving up: long enough for a person who was called away from
+    /// the consent page. The app's Sign in button waits a little longer
+    /// than this for the CLI to answer.
+    pub const BROWSER_SIGN_IN_TIMEOUT_SECONDS: u64 = 30 * 60;
+    /// How long the address of a sign-in that timed out still answers
+    /// the browser, with a page that says to sign in again. The consent
+    /// page of the provider stays open in the browser and looks alive
+    /// long after nobody waits for it.
+    pub const EXPIRED_SIGN_IN_PAGE_SECONDS: u64 = 24 * 60 * 60;
 }
 
 pub mod profile {
@@ -1093,19 +1105,33 @@ pub mod engine {
     pub const THROTTLED_READ_TOKENS: usize = 1;
     pub const THROTTLED_UPLOAD_CONCURRENCY: usize = 1;
     pub const THROTTLED_DOWNLOAD_CONCURRENCY: usize = 1;
+    /// A transfer of at most this many bytes is a small one. What a
+    /// small transfer costs is its commit, not its bytes: one flush of
+    /// the drive, which the transfers of the same moment share. So on a
+    /// provider whose commits are shared, small transfers have a lane
+    /// of their own next to the transfer slots of the throttle state.
+    pub const SMALL_TRANSFER_MAX_BYTES: u64 = 256 * 1024;
+    /// The width of that lane: this many small transfers for each
+    /// transfer slot of the throttle state, in each direction. Every
+    /// state keeps its ladder (the lane of `Throttled` is the narrowest
+    /// and `Suspended` has none), and a flush that carries more files
+    /// is fewer flushes for the same work.
+    pub const SMALL_TRANSFERS_PER_SLOT: usize = 5;
     /// Byte budget one hashing execution may consume per runtime tick.
     /// Bounds the per-tick CPU/read cost of the hash stage while still
     /// hashing large files at a useful rate (8 MiB * 4 Hz = 32 MiB/s).
     pub const HASH_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
     /// Bounds on worker threads running blocking provider I/O (probes,
     /// transfer sessions, remote deletes) off the runtime tick thread.
-    /// The effective cap is twice the Idle concurrency tier,
-    /// clamped into `[MIN, MAX]`, so upload + download can both run at
-    /// full width. Threads spawn lazily per in-flight job and sit
-    /// parked on a channel otherwise; the throttle workgate, not this
-    /// cap, bounds how much work is admitted.
+    /// The effective cap is twice the Idle concurrency tier with its
+    /// lane of small transfers, clamped into `[MIN, MAX]`, so uploads
+    /// and downloads can both run at full width. A small transfer holds
+    /// its worker while it waits for the flush it shares, so the lane
+    /// needs a thread for each. Threads spawn lazily per in-flight job
+    /// and sit parked on a channel otherwise; the throttle workgate,
+    /// not this cap, bounds how much work is admitted.
     pub const PROVIDER_JOB_WORKERS_MIN: usize = 8;
-    pub const PROVIDER_JOB_WORKERS_MAX: usize = 16;
+    pub const PROVIDER_JOB_WORKERS_MAX: usize = 96;
     /// Remote changes-feed poll cadence per throttle state, for a feed
     /// that is a network call. Suspended never polls.
     pub const REMOTE_POLL_IDLE_SECONDS: u64 = 5;
@@ -1169,6 +1195,13 @@ pub mod engine {
     /// wall-clock deadline caps the cost when the provider's enumerate is
     /// a slow network call.
     pub const RECONCILE_DIRS_PER_SLICE_IDLE: usize = 64;
+    /// Cloud folders a reconcile walk asks for at one time while the
+    /// device is idle; fewer in the other throttle states. A listing is
+    /// one request to the provider, and a walk that waits for each
+    /// answer before it asks for the next folder takes a second a
+    /// folder on a cloud API. The comparison still takes the folders
+    /// one by one.
+    pub const RECONCILE_LISTINGS_IN_FLIGHT: usize = 8;
     /// The link capacity the daemon uses under
     /// `VAPOR_THROTTLE_INPUTS=static`, where nothing is measured: the
     /// test harnesses need the same transfer rate on every host. A
@@ -1198,6 +1231,11 @@ pub mod engine {
     /// publish immediately; this heartbeat only bounds the staleness of
     /// anything those triggers miss, so a fully idle daemon runs the
     /// snapshot's per-profile SQL at this cadence instead of every tick.
+    /// The least time between two status snapshots while work is in
+    /// flight. A snapshot runs SQL for each profile, and under a burst
+    /// the tick loop turns over a thousand times a second. A state that
+    /// changes (a pause, an error, a question) is published at once.
+    pub const STATUS_BUSY_REPUBLISH_MILLIS: u64 = 250;
     pub const STATUS_REPUBLISH_HEARTBEAT_SECONDS: u64 = 10;
     /// After `vapor reconcile` the runtime releases deferred work
     /// eagerly for this long, so what the scan finds moves at once.

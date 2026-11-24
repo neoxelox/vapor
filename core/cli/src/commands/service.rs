@@ -159,6 +159,36 @@ pub enum ServiceCommandOutcome {
     Acknowledged,
 }
 
+/// How long `start` and `restart` wait for the daemon to answer on its
+/// socket: a daemon that was just started needs a moment to open it.
+pub const START_ANSWER_WAIT: Duration = Duration::from_secs(10);
+
+/// Ends a `start` or a `restart` whose daemon gives no answer with an
+/// error. A start is done when a daemon answers, not when the service
+/// manager took the request: a daemon that hangs keeps its job, and a
+/// start against it changes nothing. `answers_within` waits up to the
+/// given time for an answer on the socket.
+pub fn confirm_started(
+    command: ServiceCommand,
+    result: &DaemonLifecycleActionResult,
+    answers_within: &dyn Fn(Duration) -> bool,
+) -> Result<(), String> {
+    let started = matches!(command, ServiceCommand::Start | ServiceCommand::Restart)
+        && matches!(
+            result,
+            DaemonLifecycleActionResult::Started | DaemonLifecycleActionResult::Unchanged
+        );
+    if !started || answers_within(START_ANSWER_WAIT) {
+        return Ok(());
+    }
+    Err(
+        "the daemon's job runs, but the daemon gives no answer on its socket, so \
+         nothing syncs. `vapor service restart` ends it and starts a new one; \
+         `vapor logs` shows what it did last"
+            .to_string(),
+    )
+}
+
 /// What a daemon of this build says about itself in `vapor status`.
 pub fn this_build() -> String {
     format!("vapord/{}", vapor_daemon::build_info::VERSION)
@@ -1149,6 +1179,40 @@ mod tests {
             replaced(&installer),
             "a daemon that hangs is ended and a new one started: {:?}",
             installer.operations()
+        );
+    }
+
+    #[test]
+    fn a_start_whose_daemon_gives_no_answer_ends_with_an_error() {
+        use DaemonLifecycleActionResult::{Started, Stopped, Unchanged};
+        let silent = |wait: Duration| {
+            assert_eq!(wait, START_ANSWER_WAIT);
+            false
+        };
+        for command in [ServiceCommand::Start, ServiceCommand::Restart] {
+            // `Unchanged`: the job ran already, and a daemon that hangs
+            // keeps it.
+            for result in [Started, Unchanged] {
+                let error = confirm_started(command, &result, &silent)
+                    .expect_err("a daemon that gives no answer did not start");
+                assert!(error.contains("gives no answer"), "{error}");
+                assert!(error.contains("vapor service restart"), "{error}");
+                assert_eq!(confirm_started(command, &result, &|_| true), Ok(()));
+            }
+        }
+        // Nothing was started: nobody is asked, and nothing is wrong.
+        let never_asked = |_: Duration| -> bool { panic!("no daemon to wait for") };
+        assert_eq!(
+            confirm_started(ServiceCommand::Stop, &Stopped, &never_asked),
+            Ok(())
+        );
+        assert_eq!(
+            confirm_started(
+                ServiceCommand::Start,
+                &DaemonLifecycleActionResult::RelaunchDeferred(Duration::from_secs(2)),
+                &never_asked
+            ),
+            Ok(())
         );
     }
 

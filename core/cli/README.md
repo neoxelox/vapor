@@ -10,7 +10,7 @@ Tasks: `docs/tasks/cli.md`.
 ## Commands
 
 `init`, `status`, `pause`, `resume`, `reconcile`,
-`profiles list|add|remove`, `decisions list|show|resolve`, `ignored`,
+`profiles list|add|enable|disable|rename|remove`, `decisions list|show|resolve`, `ignored`,
 `trash list|restore|empty`, `config get|set`,
 `auth login|logout|status`, `service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`,
 `timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`.
@@ -18,6 +18,22 @@ Every command that reports state takes `--json`: keys are camelCase and
 values kebab-case, the same shape the daemon's IPC status uses. The
 shapes are locked by assertion tests in each command module. `vapor
 --help` is the reference.
+
+## Exit codes
+
+Three codes, the same for every command. A script and an app read the
+code first and the output second.
+
+| Code | Meaning | Output |
+|---|---|---|
+| `0` | The command did what it was asked. "Nothing to do" counts: an empty list, a profile that is enabled already. | The result on stdout. |
+| `1` | The command could not do it, or the answer is no. | For an error, one line on stderr that starts with `vapor: `, and nothing on stdout, also with `--json`. For an answer that is a no, the answer on stdout as for code 0: a request that the daemon refused (`pause`, `resume`, `reconcile`), an install that still waits for a person or has a failed step (`init`), a failed check (`doctor`). |
+| `2` | The command line is wrong: an unknown command, an unknown option, a missing value. | The usage message on stderr. |
+
+A command that needs the daemon exits with `1` within seconds when no
+daemon answers; it never waits for one. `core/cli/tests/binary.rs`
+asserts the code of each command, and `core/cli/tests/fake_daemon.rs`
+asserts the commands that talk to the daemon against a stand-in for it.
 
 ## Install from source
 

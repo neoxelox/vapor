@@ -20,9 +20,6 @@ stable and are never reused.
 
 ## Commands
 
-- [ ] L1-7 `vapor profiles enable|disable|rename`: the rest of what the
-      app's profile screens need (`macos.md` M4-1). `list`, `add`, and
-      `remove` ship.
 - [ ] L1-8 A menu of the cloud's folders in `vapor init`, in place of
       the typed folder: the user picks a folder that exists or makes a
       new one. The sign-in already comes before the folder step for
@@ -30,12 +27,6 @@ stable and are never reused.
       folders, shared drives, and two folders with one name, which
       Google Drive allows. The app onboarding gets the same menu
       (`macos.md` O-1), from the same listing.
-- [ ] L1-11 `vapor auth login` waits 5 minutes for the consent and
-      then gives up, while the Google page in the browser stays open
-      and looks alive. A person who signs in on it later lands on a
-      browser error, because nothing listens on the redirect port any
-      more. Wait longer, and answer a late redirect with a page that
-      says "run `vapor auth login` again".
 - [ ] L5-1 `--user-activity=always|never|auto` global flag that sets the
       interpretation for hosts without HID signal (default `auto`:
       always-idle on headless, event-driven on desktop).
@@ -79,16 +70,3 @@ Policy: `AGENTS.md §9`. Full taxonomy:
 - [ ] LT-1 `insta` snapshots for the `--json` shape locks, one per
       command with a fixed fixture (`core.md` CT-4). Explicit
       field-by-field tests lock the shapes today.
-- [ ] LT-2 Exit codes are documented and stable. A `--help`-style
-      snapshot or a direct exit-code assertion test per command.
-- [ ] LT-3 Binary size stays reasonable (single-digit MB stripped).
-      CI guard-rail, not a soft target.
-- [ ] LT-6 `vapor service start` and `restart` end with an error and a
-      non-zero exit when the daemon's job runs and the daemon gives no
-      answer within 10 seconds. No test covers that path: it needs a
-      daemon that holds its job and does not open its socket (the fake
-      daemon of LT-5).
-- [ ] LT-5 IPC client correctness tested against a fake daemon that
-      speaks the IPC protocol from `docs/architecture/ipc-contracts.md`.
-      Covers every IPC-backed command; tests the "no daemon running"
-      error path (non-zero exit within 1 s; never hang).

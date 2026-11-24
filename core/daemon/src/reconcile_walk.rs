@@ -85,11 +85,11 @@ struct LocalEntry {
     modified_at: Option<SystemTime>,
 }
 
-/// A remote listing requested on an earlier slice whose round trip is
-/// still in progress.
+/// A remote listing that was asked for and is not compared yet: its
+/// round trip is in progress, or its turn has not come.
 struct PendingEnumeration {
     directory: PathBuf,
-    call: ProviderCall<Result<Vec<RemoteEntry>, ProviderError>>,
+    call: ProviderCall<Result<vapor_providers::RemoteListing, ProviderError>>,
     /// When the listing was asked for. A sync index row written after
     /// this is newer than what the listing shows.
     requested_at: SystemTime,
@@ -100,7 +100,14 @@ pub struct ReconcileWalker {
     scope_root: PathBuf,
     /// The subtree being reconciled (== scope_root for whole-scope).
     subtree_root: PathBuf,
-    pending_enumeration: Option<PendingEnumeration>,
+    /// The listings asked for, in the order the folders are compared.
+    pending_enumerations: VecDeque<PendingEnumeration>,
+    /// How many listings the walk asks for at one time when a listing
+    /// runs on its own thread.
+    listings_in_flight: usize,
+    /// The last step ended because the listing of the next folder was
+    /// not in yet.
+    waits_for_a_listing: bool,
     /// Files the directory just compared holds under a set-aside name.
     set_aside_found: Vec<SetAsideFile>,
     /// The comparison of those files with their originals, on its own
@@ -156,7 +163,9 @@ impl ReconcileWalker {
             scope_root: scope_root.to_path_buf(),
             subtree_root: subtree_root.to_path_buf(),
             path_filter,
-            pending_enumeration: None,
+            pending_enumerations: VecDeque::new(),
+            listings_in_flight: 1,
+            waits_for_a_listing: false,
             set_aside_found: Vec::new(),
             pending_set_aside: None,
             type_mismatches: Vec::new(),
@@ -254,6 +263,21 @@ impl ReconcileWalker {
 
     pub fn take_unsyncable_names(&mut self) -> Vec<crate::unsyncable::UnsyncableName> {
         std::mem::take(&mut self.unsyncable_names)
+    }
+
+    /// How many cloud listings the walk asks for at one time. A listing
+    /// is one request, and a walk that waits for each answer before it
+    /// asks for the next folder spends its time waiting. The folders
+    /// are still compared one by one, in the order of the walk.
+    pub fn set_listings_in_flight(&mut self, listings: usize) {
+        self.listings_in_flight = listings.max(1);
+    }
+
+    /// Whether the last step ended because the listing of the next
+    /// folder was not in yet: the walk waits for the cloud, and has
+    /// nothing to do on the calling thread until the answer wakes it.
+    pub fn waits_for_a_listing(&self) -> bool {
+        self.waits_for_a_listing
     }
 
     /// Whether this walk covers the whole scope, so what it did not
@@ -546,8 +570,9 @@ impl ReconcileWalker {
     /// Each directory's remote listing is a provider call; in threaded
     /// mode it runs on its own thread and the walk resumes on the slice
     /// that finds the listing ready, so a slow `enumerate` never holds
-    /// the tick thread. `should_continue` is consulted after each
-    /// compared directory so the caller can bound the chunk by a
+    /// the tick thread. The listings of the next folders are asked for
+    /// while this one is compared. `should_continue` is consulted after
+    /// each compared directory so the caller can bound the chunk by a
     /// wall-clock slice as well as by the directory budget.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn process(
@@ -560,6 +585,7 @@ impl ReconcileWalker {
         now: SystemTime,
         should_continue: &dyn Fn() -> bool,
     ) -> Result<bool, WalkError> {
+        self.waits_for_a_listing = false;
         for _ in 0..max_directories {
             if let Some(call) = self.pending_set_aside.as_mut() {
                 let Some(result) = call.take() else {
@@ -573,50 +599,28 @@ impl ReconcileWalker {
                     self.recover_set_aside_file(state_db, &verdict, now)?;
                 }
             }
-            if self.pending_enumeration.is_none() {
-                let Some(directory) = self.pending_dirs.pop_front() else {
-                    return Ok(true);
-                };
-                let remote_dir = if directory == self.scope_root {
-                    RemotePath::root()
-                } else {
-                    match RemotePath::from_local(&self.scope_root, &directory) {
-                        Some(path) => path,
-                        None => {
-                            crate::logging::warning(
-                                "Reconcile walk skipped a directory outside the scope root",
-                                &[("directory", directory.display().to_string())],
-                            );
-                            continue;
-                        }
-                    }
-                };
-                let provider = provider.clone();
-                let call =
-                    ProviderCall::start(mode, "enumerate", move || provider.enumerate(&remote_dir));
-                self.pending_enumeration = Some(PendingEnumeration {
-                    directory,
-                    call,
-                    requested_at: now,
-                });
-            }
-            let pending = self
-                .pending_enumeration
-                .as_mut()
-                .expect("a listing was just requested");
+            self.request_listings(&provider, mode, now);
+            let Some(pending) = self.pending_enumerations.front_mut() else {
+                return Ok(true);
+            };
             let Some(result) = pending.call.take() else {
-                // Still listing on the provider thread; nothing else can
-                // progress until it lands.
+                // Still listing on the provider thread. The folders are
+                // compared in order, so nothing else can progress until
+                // it lands.
+                self.waits_for_a_listing = true;
                 return Ok(false);
             };
             let PendingEnumeration {
                 directory,
                 requested_at,
                 ..
-            } = self.pending_enumeration.take().expect("pending listing");
-            let remote_entries = match result {
-                Ok(Ok(entries)) => entries,
-                Ok(Err(error)) if error.kind == ProviderErrorKind::NotFound => Vec::new(),
+            } = self
+                .pending_enumerations
+                .pop_front()
+                .expect("pending listing");
+            let listing = match result {
+                Ok(Ok(listing)) => listing,
+                Ok(Err(error)) if error.kind == ProviderErrorKind::NotFound => Default::default(),
                 Ok(Err(error)) => return Err(WalkError::Provider(error)),
                 Err(panic) => {
                     return Err(WalkError::Provider(ProviderError::permanent(format!(
@@ -624,11 +628,20 @@ impl ReconcileWalker {
                     ))));
                 }
             };
+            // A name the cloud folder holds and no sync path can carry
+            // is no entry of the comparison. The user is asked about
+            // it, as about such a name on this device.
+            self.unsyncable_names.extend(
+                listing
+                    .unsyncable
+                    .iter()
+                    .map(|name| crate::unsyncable::UnsyncableName::in_the_cloud(&directory, name)),
+            );
             self.compare_directory(
                 sync_mode,
                 state_db,
                 &directory,
-                remote_entries,
+                listing.entries,
                 requested_at,
                 now,
             )?;
@@ -643,9 +656,56 @@ impl ReconcileWalker {
                 break;
             }
         }
+        // The folders the last comparison found are asked for now, so
+        // their listings travel while the walk waits for its next slice.
+        self.request_listings(&provider, mode, now);
         Ok(self.pending_dirs.is_empty()
-            && self.pending_enumeration.is_none()
+            && self.pending_enumerations.is_empty()
             && self.pending_set_aside.is_none())
+    }
+
+    /// Asks for the listings of the next folders of the walk, up to the
+    /// number the walk keeps in flight. A listing that runs on the
+    /// calling thread is asked for when its folder is next: it would
+    /// hold the tick for every folder asked ahead.
+    fn request_listings(
+        &mut self,
+        provider: &Arc<dyn Provider>,
+        mode: &ProviderCallMode,
+        now: SystemTime,
+    ) {
+        let wanted = match mode {
+            ProviderCallMode::Inline => 1,
+            ProviderCallMode::Threaded { .. } => self.listings_in_flight,
+        };
+        while self.pending_enumerations.len() < wanted {
+            let Some(directory) = self.pending_dirs.pop_front() else {
+                return;
+            };
+            let remote_dir = if directory == self.scope_root {
+                RemotePath::root()
+            } else {
+                match RemotePath::from_local(&self.scope_root, &directory) {
+                    Some(path) => path,
+                    None => {
+                        crate::logging::warning(
+                            "Reconcile walk skipped a directory outside the scope root",
+                            &[("directory", directory.display().to_string())],
+                        );
+                        continue;
+                    }
+                }
+            };
+            let provider = provider.clone();
+            let call = ProviderCall::start(mode, "enumerate", move || {
+                provider.enumerate_with_unsyncable(&remote_dir)
+            });
+            self.pending_enumerations.push_back(PendingEnumeration {
+                directory,
+                call,
+                requested_at: now,
+            });
+        }
     }
 
     fn compare_directory(
@@ -1858,6 +1918,153 @@ mod tests {
         ) -> Result<vapor_providers::ChangesPoll, ProviderError> {
             Err(ProviderError::not_found("listing provider has no feed"))
         }
+    }
+
+    /// A cloud whose root holds six folders. The listing of a folder
+    /// under the root waits until the test lets it go, so the test sees
+    /// how many listings the walk has in flight.
+    #[derive(Default)]
+    struct GatedListings {
+        started: std::sync::atomic::AtomicUsize,
+        waiting: std::sync::atomic::AtomicUsize,
+        open: std::sync::Mutex<bool>,
+        opened: std::sync::Condvar,
+    }
+
+    impl Provider for GatedListings {
+        fn name(&self) -> &'static str {
+            "gated"
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            vapor_providers::inert_stub_provider().capabilities()
+        }
+        fn ensure_cloud_root(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
+            use std::sync::atomic::Ordering;
+            self.started.fetch_add(1, Ordering::SeqCst);
+            if directory.is_root() {
+                return Ok((0..6)
+                    .map(|index| RemoteEntry {
+                        kind: RemoteEntryKind::Directory,
+                        ..remote_file(&format!("d{index}"), 0)
+                    })
+                    .collect());
+            }
+            self.waiting.fetch_add(1, Ordering::SeqCst);
+            let mut open = self.open.lock().expect("gate");
+            while !*open {
+                open = self.opened.wait(open).expect("gate");
+            }
+            Ok(Vec::new())
+        }
+        fn stat(&self, _: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
+            Ok(None)
+        }
+        fn content_hash(&self, _: &RemotePath) -> Result<String, ProviderError> {
+            Err(ProviderError::not_found("gated provider has no content"))
+        }
+        fn begin_upload(
+            &self,
+            _: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::not_found("gated provider cannot upload"))
+        }
+        fn begin_download(
+            &self,
+            _: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::not_found("gated provider cannot download"))
+        }
+        fn delete(&self, _: &RemotePath, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn poll_changes(
+            &self,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<vapor_providers::ChangesPoll, ProviderError> {
+            Err(ProviderError::not_found("gated provider has no feed"))
+        }
+    }
+
+    #[test]
+    fn the_walk_asks_for_the_listings_of_the_next_folders_while_it_waits_for_one() {
+        use std::sync::atomic::Ordering;
+        let mut fixture = Fixture::new();
+        for index in 0..6 {
+            let folder = fixture.local_root.join(format!("d{index}"));
+            std::fs::create_dir_all(&folder).expect("folder");
+            std::fs::write(folder.join("f.txt"), b"local only").expect("seed");
+        }
+        let gated = Arc::new(GatedListings::default());
+        let provider: Arc<dyn Provider> = gated.clone();
+        let mode = ProviderCallMode::Threaded { waker: None };
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None);
+        walker.set_listings_in_flight(4);
+        let step = |walker: &mut ReconcileWalker, fixture: &mut Fixture| {
+            walker
+                .process(
+                    provider.clone(),
+                    &mode,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step")
+        };
+
+        // The root is compared, and the walk waits for its first
+        // folder. Four listings are on their way, and no fifth one.
+        // Bounded by iteration count: the loop ends as soon as the
+        // threads are at the gate.
+        for _ in 0..1_000_000 {
+            assert!(!step(&mut walker, &mut fixture));
+            if gated.waiting.load(Ordering::SeqCst) == 4 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(gated.waiting.load(Ordering::SeqCst), 4);
+        assert!(walker.waits_for_a_listing());
+        for _ in 0..3 {
+            assert!(!step(&mut walker, &mut fixture));
+        }
+        assert_eq!(
+            gated.started.load(Ordering::SeqCst),
+            5,
+            "the root and four folders"
+        );
+
+        // The listings land: every folder is compared, in the order of
+        // the walk, as a walk that asks for one listing at a time does.
+        *gated.open.lock().expect("gate") = true;
+        gated.opened.notify_all();
+        let mut done = false;
+        for _ in 0..1_000_000 {
+            done = step(&mut walker, &mut fixture);
+            if done {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(done);
+        assert!(!walker.waits_for_a_listing());
+        assert_eq!(walker.stats().directories_compared, 7);
+        assert_eq!(gated.started.load(Ordering::SeqCst), 7);
+        let root = fixture.local_root.clone();
+        assert_eq!(
+            fixture.queued_kinds(),
+            (0..6)
+                .map(|index| (
+                    root.join(format!("d{index}")).join("f.txt"),
+                    PendingIntentKind::Upload
+                ))
+                .collect::<Vec<_>>()
+        );
     }
 
     fn remote_file(name: &str, size: u64) -> RemoteEntry {

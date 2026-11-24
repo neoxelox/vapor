@@ -408,6 +408,16 @@ fn two_files_with_one_name_give_one_entry_and_the_choice_never_depends_on_the_or
             Some("m-id-a"),
             "the file with the lowest id, whatever order Drive answers in"
         );
+        // The files that lost the name are no entries, and the listing
+        // says so: one name to ask about, however many files share it.
+        transport.push_response(200, listing(order[0], order[1], order[2]));
+        let listed = provider
+            .enumerate_with_unsyncable(&RemotePath::root())
+            .expect("listing");
+        assert_eq!(listed.entries.len(), 2);
+        assert_eq!(listed.unsyncable.len(), 1);
+        assert_eq!(listed.unsyncable[0].name, "report.txt");
+        assert!(listed.unsyncable[0].reason.contains("a second file"));
 
         // A lookup of the path, on a provider that has listed nothing,
         // finds the same file.
@@ -916,6 +926,35 @@ fn folder_entry(id: &str, name: &str, parent: &str) -> String {
     )
 }
 
+/// A folder entry of the feed with the time the folder was made.
+fn folder_entry_made(id: &str, name: &str, parent: &str, made: SystemTime) -> String {
+    let seconds = made
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    // Days since the epoch to a civil date (the algorithm of Howard
+    // Hinnant), so the test needs no date crate.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let stamp = format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    );
+    format!(
+        r#"{{"fileId":"{id}","file":{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["{parent}"],"createdTime":"{stamp}"}}}}"#
+    )
+}
+
 fn folder_listed(id: &str, name: &str, parent: &str) -> String {
     format!(
         r#"{{"files":[{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["{parent}"]}}]}}"#
@@ -976,14 +1015,15 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
         "the feed alone"
     );
 
-    // A folder that was never seen is a new one: its files come with
-    // entries of their own, and no request is made for it.
+    // A folder that was never seen, made a moment ago, is a new one:
+    // its files come with entries of their own, and no request is made
+    // for it.
     let before = transport.recorded_requests().len();
     assert!(
         poll_the_feed(
             &provider,
             &transport,
-            &folder_entry("d9", "New", "root-folder"),
+            &folder_entry_made("d9", "New", "root-folder", SystemTime::now()),
             &[]
         )
         .is_empty()
@@ -992,6 +1032,32 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
         transport.recorded_requests().len() - before,
         1,
         "the feed alone"
+    );
+
+    // A folder that was never seen and that is older moved in from
+    // outside the synced folder, or came back from the trash: Drive has
+    // this one entry for it and none for its files, so it is reported
+    // for a walk.
+    let last_year = SystemTime::now() - Duration::from_secs(365 * 24 * 3600);
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry_made("d8", "Moved in", "root-folder", last_year),
+            &[]
+        ),
+        vec![("Moved in".to_string(), moved)]
+    );
+    // And so is one with no date: a walk costs a request, a folder
+    // that is missed costs a day.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d7", "Undated", "root-folder"),
+            &[]
+        ),
+        vec![("Undated".to_string(), moved)]
     );
 
     // The folder moves into another folder of the sync root.
@@ -1021,6 +1087,59 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
             )]
         ),
         vec![("Archive/reports".to_string(), moved)]
+    );
+
+    // It comes back a moment later. The provider remembers that it was
+    // outside, for the folder it was in then: in another folder it is
+    // judged again, because the feed says this one time only.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "reports", "root-folder"),
+            &[]
+        ),
+        vec![("reports".to_string(), moved)]
+    );
+}
+
+#[test]
+fn a_file_judged_outside_is_judged_again_when_a_folder_comes_into_the_root() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_knows_two_folders(&transport);
+    let file = r#"{"fileId":"f1","file":{"id":"f1","name":"a.txt","mimeType":"text/plain","size":"3","md5Checksum":"h","parents":["d5"]}}"#;
+    let elsewhere =
+        r#"{"id":"d5","name":"Elsewhere","mimeType":"application/vnd.google-apps.folder"}"#;
+
+    // A file in a folder outside the sync root changes: not ours, and
+    // the next entry for it costs no request.
+    assert!(poll_the_feed(&provider, &transport, file, &[(200, elsewhere)]).is_empty());
+    let before = transport.recorded_requests().len();
+    assert!(poll_the_feed(&provider, &transport, file, &[]).is_empty());
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+
+    // Its folder comes into the sync root. The entry of the file names
+    // the same folder as before, and the file is ours now.
+    let last_year = SystemTime::now() - Duration::from_secs(365 * 24 * 3600);
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry_made("d5", "Elsewhere", "root-folder", last_year),
+            &[]
+        ),
+        vec![("Elsewhere".to_string(), RemoteChangeKind::FolderMoved)]
+    );
+    assert_eq!(
+        poll_the_feed(&provider, &transport, file, &[]),
+        vec![(
+            "Elsewhere/a.txt".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
     );
 }
 
@@ -1471,8 +1590,8 @@ impl SecretStore for StoreThatChanges {
         }
         *left = left.saturating_sub(1);
         if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(vapor_platform::SecretStoreError::Backend(
-                "the keychain is locked".into(),
+            return Err(vapor_platform::SecretStoreError::Unavailable(
+                "the keychain is locked".to_string(),
             ));
         }
         self.inner.get(name)
@@ -1578,6 +1697,62 @@ fn a_store_that_does_not_answer_does_not_sign_the_profile_out() {
 }
 
 #[test]
+fn a_store_that_cannot_be_asked_at_the_start_is_tried_again_and_asks_for_no_sign_in() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    // The keychain is locked when the daemon starts, before the user
+    // unlocks it.
+    let secrets = Arc::new(StoreThatChanges::new(u32::MAX, AtThatRead::StopAnswering));
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), u64::MAX / 2);
+    secrets
+        .stopped
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = provider
+        .ensure_cloud_root("/Vapor")
+        .expect_err("no tokens can be read");
+    assert_eq!(
+        error.kind,
+        ProviderErrorKind::Transient,
+        "a store that cannot be asked is no reason to sign in again: {error}"
+    );
+    assert!(error.message.contains("the keychain is locked"), "{error}");
+    assert!(
+        transport.recorded_requests().is_empty(),
+        "no request without a token"
+    );
+
+    // The keychain opens: the next call reads the sign-in.
+    secrets
+        .stopped
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("signed in");
+}
+
+#[test]
+fn a_401_while_the_store_cannot_be_asked_refreshes_with_the_tokens_in_memory() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    // The keychain locks after the first read.
+    let secrets = Arc::new(StoreThatChanges::new(1, AtThatRead::StopAnswering));
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), u64::MAX / 2);
+    transport.push_response(401, "");
+    transport.push_response(200, r#"{"access_token":"ya29.fresh","expires_in":3600}"#);
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("the refresh token in memory is still the sign-in");
+    let requests = transport.recorded_requests();
+    assert!(
+        requests
+            .last()
+            .expect("a request")
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer ya29.fresh"),
+        "the call goes again with the new token"
+    );
+}
+
+#[test]
 fn upload_precondition_absent_fails_when_the_target_exists() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());
@@ -1654,6 +1829,27 @@ fn multipart_boundary_never_collides_with_payload() {
         &payload,
         format!("--{boundary}").as_bytes()
     ));
+}
+
+#[test]
+fn a_drive_name_that_cannot_be_a_path_is_reported_with_the_listing() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let listing_of_the_root = r#"{"files":[
+        {"id":"f1","name":"notes.txt","mimeType":"text/plain","md5Checksum":"h1","size":"3"},
+        {"id":"f2","name":"2024/budget.txt","mimeType":"text/plain","md5Checksum":"h2","size":"3"}
+    ]}"#;
+    // It is reported at every listing, for as long as it is there.
+    for _ in 0..2 {
+        transport.push_response(200, listing_of_the_root);
+        let listing = provider
+            .enumerate_with_unsyncable(&RemotePath::root())
+            .expect("listing");
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(names, vec!["notes.txt"]);
+        assert_eq!(listing.unsyncable.len(), 1);
+        assert_eq!(listing.unsyncable[0].name, "2024/budget.txt");
+    }
 }
 
 #[test]
