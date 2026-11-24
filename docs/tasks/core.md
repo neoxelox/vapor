@@ -74,7 +74,12 @@ a task costs a user.
       question ("19 of the 70 files it syncs (27%)"), because a folder
       rename counts as deletions. Eight renames and removals of a
       folder of 10 files, on a Drive tree of 37 to 50 files, asked 8
-      times. The count of the question holds the folders and its total
+      times. The count of a device also holds the deletions that the
+      device applied from the cloud just before: a second device took
+      13 removals from the cloud, then its user removed one file and
+      renamed a folder of 10, and the question said "24 of the 86
+      files it syncs (27%) would be removed on the cloud" (test
+      account, 2026-11-24). The count of the question holds the folders and its total
       does not: `rm -rf` of 1 440 files in 360 folders asked about
       "1800 of the 1501 files it syncs (100%)". One removal can ask
       many times: 360 files removed one at a time in 32 s asked 8
@@ -141,23 +146,39 @@ a task costs a user.
 - [ ] P-3 Make the HTTP transport read the proxy settings and the
       system's root certificates. Today it uses neither, so a network
       that inspects TLS cannot sync.
-- [ ] P-4 Check against a real Drive account what was built from the
-      API documents: a resumable upload answers with the checksum, and
-      a folder rename that changes only the case keeps its children
-      reachable. Runs with the Drive leg of the release gate (TR-8).
-      The same run checks the copy of a version that an upload
-      replaced unseen: two profiles of one daemon on one Drive folder
-      change one file in the same second (the workload of the
-      heavy-user session), and the folder must end with the file and a
-      `~conflict-replaced` copy that holds the other edit. The code
-      reads `revisions.list` and the content of one revision
-      (`revisions.get` with `alt=media`); only the scripted transport
-      has answered it so far. The check takes the order of
-      `revisions.list` as the order in which the versions were stored;
-      confirm that, with one version written by a client that sets an
-      old modification time. See also whether the `version` field of
-      a file tells a second writer without the list, which costs one
-      request for each overwrite.
+- [ ] P-13 Decide whether a guarded overwrite on Google Drive goes
+      through version 2 of the API, which has a conditional write of
+      content. Version 3 has none, so the provider reads the versions
+      of the file after the upload and copies what was replaced
+      (`data-flow.md` §Conflict handling). With the test account, an
+      upload to `upload/drive/v2/files/<id>` with `If-Match` and a
+      stale etag was refused with 412, and of two such uploads at the
+      same moment exactly one landed in 10 of 10 rounds
+      (`tools/vm/workloads/drive_probe.py extra`). The second device
+      would then see an ordinary conflict. The check of the versions,
+      its copy work, its request for each overwrite, P-12, and the
+      limit below would all go. Not checked: a resumable session with
+      `If-Match` (whether the condition holds at the last chunk or only
+      when the session opens), and how long Google keeps version 2.
+      The choice of an API version is the owner's.
+      The limit of the check as built: a writer can set the time of
+      its version (Drive for desktop sets the time the file has on its
+      disk), and the check finds a write of the same moment only by a
+      time near that moment. A write that lands inside the one round
+      trip of an upload's commit with a time its writer set to another
+      day is not found; it stays in the version history of the file.
+      Also seen with the account: `files.version` grows by 2 or 3 for
+      one overwrite of content and by 5 to 7 for two, so it does not
+      tell a second writer.
+- [ ] P-14 A folder that is moved into the synced folder of Google
+      Drive from outside it reaches a device only at the next scan of
+      everything. Drive has one entry for the folder and none for the
+      files in it. The provider sends `FolderMoved` only for a folder
+      it knows (one it listed or resolved since the daemon started),
+      because the same entry stands for each new folder, whose files
+      come with entries of their own. A walk for each unknown folder
+      would close it, at the cost of one walk for each new folder of a
+      burst. Found with the test account, 2026-11-24.
 - [ ] P-12 Make the Drive check for a replaced version survive a stop
       of the daemon. An upload that lands leaves the check in memory
       for the next changes poll. A daemon that stops in between makes
@@ -169,7 +190,11 @@ a task costs a user.
       replaced version also moves its bytes inside the changes poll,
       one step for each poll, outside the transfer caps and the
       bandwidth ceiling: a durable record would let it run as a
-      transfer.
+      transfer. The copy is made by the device whose upload holds the
+      name, so the other device's edit is only in the version history
+      until that device polls: a device that goes to sleep right after
+      its upload keeps the copy waiting. P-13 would remove the check
+      and this task with it.
 - [ ] P-5 Decide the Google verification path. The `drive` scope is
       restricted: Google requires app verification and a yearly
       security assessment before more than 100 users can sign in, and a
@@ -192,11 +217,13 @@ a task costs a user.
       files with one of 20 MiB took 110 s. On `80c842a` the 400 files
       took 301 s (1.3 a second), their removal 286 s after the answer
       to the mass-delete question, and the 31 files 64 s. One save
-      takes 9 s to 12 s from device to device (P-11). Measure the
-      upload and
-      the download apart, then raise what runs in parallel within the
-      rate limits of the API. Found with the dedicated test account in
-      a Mac guest, 2026-11-22.
+      took 9 s to 12 s from device to device. On the build of
+      2026-11-24 the 400 files took 208 s (1.9 a second), their
+      removal 82 s after the answer, the 31 files 32 s, and one save
+      5 s to 11 s. Measure the upload and the download apart, then
+      raise what runs in parallel within the rate limits of the API.
+      Found with the dedicated test account in a Mac guest,
+      2026-11-22.
 ## Platform layer
 
 - [ ] C3-11 Remaining throttle inputs. macOS: a disk-pressure source
@@ -234,7 +261,12 @@ a task costs a user.
       A release signed with a Developer ID has one team for both and
       is not affected. A second item made by `vapor` itself, or the
       token handed to the look in memory, would close it. Found by the
-      review of the pull request, 2026-11-23; not seen in a guest.
+      review of the pull request, 2026-11-23. Seen in a guest with the
+      test account the same day: `vapor init --provider gdrive --token
+      -` stores the sign-in, the daemon reads it and syncs, and the
+      profile step of `init` says that the cloud folder "was not looked
+      up" with the raw keychain error ("The user name or passphrase you
+      entered is not correct"), which reads as a failed sign-in.
 - [ ] PL-1 Check in Finder that a file which Vapor moved to the macOS
       trash offers Put Back. The move goes through
       `NSFileManager.trashItem` now, and a contract test proves the

@@ -68,8 +68,9 @@ list of choices that wait for the owner.
 - Engine: `core.md` E-7, E-9, E-12, E-14. The owner put E-7 off: no
   shipping setup reaches it. E-12 needs a design, and E-14 needs the
   owner.
-- Providers: `core.md` P-1 … P-5, P-7. P-4 and P-5 need the owner: a
-  Drive test account, and the Google verification decision.
+- Providers: `core.md` P-1 … P-3, P-5, P-7, P-13. P-5 and P-13 need
+  the owner: the Google verification decision, and whether a guarded
+  overwrite goes through version 2 of the Drive API.
 - Platform: `core.md` PL-1, a check in Finder that needs the owner.
 - The open points of the spec: each one is a question with the choice
   the build made in the meantime.
@@ -87,8 +88,8 @@ decides the order; this is the order by what a user loses.
 - Speed: `core.md` E-31, P-9.
   `core.md` PT-3 measures each of them in the perf gate, so a
   slower build fails it.
-- The rest: `core.md` E-43, E-44, P-12, PL-8, `cli.md` L1-11, `macos.md`
-  O-5, MT-7, M3-20.
+- The rest: `core.md` E-43, E-44, P-12, P-14, PL-8, `cli.md` L1-11,
+  `macos.md` O-5, MT-7, M3-20.
 - A run that repeats the session: `core.md` TR-13. Real providers in a
   guest: `macos.md` MT-6.
 

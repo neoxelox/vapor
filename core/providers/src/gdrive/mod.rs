@@ -102,11 +102,20 @@ impl GdriveConfig {
     }
 }
 
+/// How long the tokens in memory stand with no look at the secret
+/// store. A sign-out removes the tokens from the store and a new
+/// sign-in replaces them; a daemon that runs follows both this soon.
+const TOKEN_STORE_CHECK: Duration = Duration::from_secs(30);
+
 struct TokenManager {
     config: GdriveConfig,
     secrets: Arc<dyn SecretStore>,
     transport: Arc<dyn HttpTransport>,
     cached: Mutex<Option<StoredTokens>>,
+    /// When the secret store last confirmed the tokens in memory.
+    confirmed_at: Mutex<Option<std::time::Instant>>,
+    /// [`TOKEN_STORE_CHECK`], which a test shortens.
+    store_check: Mutex<Duration>,
     /// The refresh token Google last refused. While the secret store
     /// still holds it, a call fails without another token request; a
     /// new sign-in stores a different one and the next call uses it.
@@ -123,26 +132,78 @@ impl TokenManager {
             .unwrap_or(0)
     }
 
-    fn load(&self) -> Result<StoredTokens, ProviderError> {
-        if let Some(tokens) = self
+    fn signed_out(&self) -> ProviderError {
+        ProviderError::authentication(format!(
+            "no Google Drive credentials for profile '{}'; {}",
+            self.config.profile_id,
+            self.sign_in_hint()
+        ))
+    }
+
+    fn note_confirmed(&self) {
+        *self
+            .confirmed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+    }
+
+    /// The tokens in memory, when the secret store still stands behind
+    /// them. The store is the record of the sign-in: tokens that left
+    /// it are not used again, and tokens of another sign-in take the
+    /// place of the ones in memory.
+    fn cached_and_still_stored(&self) -> Result<Option<StoredTokens>, ProviderError> {
+        let Some(tokens) = self
             .cached
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
-        {
+        else {
+            return Ok(None);
+        };
+        let check = *self
+            .store_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let confirmed = self
+            .confirmed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|at| at.elapsed() < check);
+        if confirmed {
+            return Ok(Some(tokens));
+        }
+        match self.secrets.get(&self.config.token_secret_name()) {
+            // The user signed this profile out.
+            Err(vapor_platform::SecretStoreError::NotFound(_)) => {
+                self.invalidate();
+                Err(self.signed_out())
+            }
+            Ok(raw) => {
+                self.note_confirmed();
+                match serde_json::from_str::<StoredTokens>(&raw) {
+                    // Another sign-in: the next read takes it.
+                    Ok(stored) if stored.refresh_token != tokens.refresh_token => {
+                        self.invalidate();
+                        Ok(None)
+                    }
+                    _ => Ok(Some(tokens)),
+                }
+            }
+            // The store did not answer (a locked keychain). It did not
+            // say that the sign-in is gone.
+            Err(_) => Ok(Some(tokens)),
+        }
+    }
+
+    fn load(&self) -> Result<StoredTokens, ProviderError> {
+        if let Some(tokens) = self.cached_and_still_stored()? {
             return Ok(tokens);
         }
         let raw = self
             .secrets
             .get(&self.config.token_secret_name())
             .map_err(|error| match error {
-                vapor_platform::SecretStoreError::NotFound(_) => {
-                    ProviderError::authentication(format!(
-                        "no Google Drive credentials for profile '{}'; {}",
-                        self.config.profile_id,
-                        self.sign_in_hint()
-                    ))
-                }
+                vapor_platform::SecretStoreError::NotFound(_) => self.signed_out(),
                 // The store holds something and did not give it: the
                 // keychain would have asked, or it failed. A new
                 // sign-in writes an item this build can read.
@@ -162,6 +223,7 @@ impl TokenManager {
             .cached
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tokens.clone());
+        self.note_confirmed();
         Ok(tokens)
     }
 
@@ -266,7 +328,17 @@ impl TokenManager {
                 return Err(error);
             }
         };
+        // A sign-out while the refresh ran removed the tokens from the
+        // store. To write the new ones would sign the profile in again.
+        if matches!(
+            self.secrets.get(&self.config.token_secret_name()),
+            Err(vapor_platform::SecretStoreError::NotFound(_))
+        ) {
+            self.invalidate();
+            return Err(self.signed_out());
+        }
         self.store(&refreshed);
+        self.note_confirmed();
         Ok(refreshed.access_token)
     }
 
@@ -392,6 +464,10 @@ enum ReplacedWork {
         file_name: String,
         base_md5: String,
         own_md5: String,
+        /// From the re-verification before the commit to the answer of
+        /// the commit: the time in which another write could land
+        /// unseen.
+        commit_took: Duration,
     },
     /// Copy one version into a file next to the one it belongs to.
     Copy(RevisionCopy),
@@ -422,45 +498,88 @@ const REPLACED_WORK_ATTEMPTS: u32 = 20;
 /// makes one step of one copy and no more.
 const REPLACED_WORK_PER_POLL: usize = 8;
 
-/// The versions between the one an upload meant to replace and the one
-/// it wrote: each is a write of another device that the upload never
-/// compared. Versions with the content of either end are not listed:
-/// nothing of them is missing.
-fn revisions_replaced_unseen(
+/// Room on top of what the time of a commit says about the versions
+/// another device wrote at the same moment. A version that the upload
+/// replaced was committed after the upload last looked at the file, and
+/// Drive gives a version its time when its bytes are in, some time
+/// before it commits the write: about a second for a small file.
+const REPLACED_VERSION_SLACK_BEFORE: Duration = Duration::from_secs(30);
+/// A version that carries a later time than the upload's own and was
+/// replaced by it got that time before the upload committed. This is
+/// room for the clocks of Drive only.
+const REPLACED_VERSION_SLACK_AFTER: Duration = Duration::from_secs(5);
+
+/// The versions of a file that another device wrote at the moment of a
+/// guarded upload of it: `base_md5` is what the upload meant to
+/// replace, `own_md5` what it wrote, and `commit_took` the time from
+/// its last look at the file to the answer of its write. One of them
+/// can hold the name; each of the others is on no device under the name
+/// any more. Versions with the content of the base or of the upload are
+/// not listed: nothing of them is missing.
+fn versions_of_the_same_moment(
     revisions: &[GdRevision],
     base_md5: &str,
     own_md5: &str,
+    commit_took: Duration,
 ) -> Vec<GdRevision> {
-    // Oldest first, as Drive lists them. The time of a version is not
-    // an order: a client may set it (Drive for desktop writes the time
-    // the file has on its disk), so a version that was stored later can
-    // carry an older time.
-    let ordered: Vec<&GdRevision> = revisions.iter().collect();
+    // Drive lists the versions by their times, oldest first. A version
+    // gets the time at which Drive had its bytes, or the time its
+    // writer set (Drive for desktop sets the time the file has on its
+    // disk).
     let md5 = |revision: &GdRevision| revision.md5_checksum.clone().unwrap_or_default();
-    let Some(own) = ordered
+    let time_ms = |revision: &GdRevision| {
+        revision
+            .modified_time
+            .as_deref()
+            .and_then(parse_rfc3339_millis)
+            .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|age| age.as_millis())
+    };
+    let Some(own) = revisions
         .iter()
         .rposition(|revision| md5(revision) == own_md5)
     else {
         return Vec::new();
     };
     // With no version of the base in the list (Drive dropped it), the
-    // list cannot say what came between.
-    let Some(base) = ordered[..own]
+    // list cannot say what came after it.
+    let Some(base) = revisions[..own]
         .iter()
         .rposition(|revision| md5(revision) == base_md5)
     else {
         return Vec::new();
     };
-    let mut replaced: Vec<GdRevision> = Vec::new();
-    for revision in &ordered[base + 1..own] {
+    // The place in the list is not enough. When the base carries a
+    // time its writer set, every version Drive stored before it is
+    // listed after it; and of two writes of one moment, the one that
+    // committed second can carry the older time. The times bound the
+    // moment: a write that the upload did not see was committed inside
+    // `commit_took`, so its time is at most that long after the time
+    // of the upload's own version, and not much longer before it.
+    let own_ms = time_ms(&revisions[own]);
+    let took = commit_took.as_millis();
+    let of_the_moment = |revision: &GdRevision| match (own_ms, time_ms(revision)) {
+        (Some(own), Some(at)) => {
+            at + 2 * took + REPLACED_VERSION_SLACK_BEFORE.as_millis() >= own
+                && at <= own + took + REPLACED_VERSION_SLACK_AFTER.as_millis()
+        }
+        _ => true,
+    };
+    let mut written_then: Vec<GdRevision> = Vec::new();
+    for (index, revision) in revisions.iter().enumerate().skip(base + 1) {
         let content = md5(revision);
-        if content.is_empty() || content == base_md5 || content == own_md5 {
+        if index == own
+            || content.is_empty()
+            || content == base_md5
+            || content == own_md5
+            || !of_the_moment(revision)
+        {
             continue;
         }
-        replaced.retain(|earlier| md5(earlier) != content);
-        replaced.push((*revision).clone());
+        written_then.retain(|earlier| md5(earlier) != content);
+        written_then.push(revision.clone());
     }
-    replaced
+    written_then
 }
 
 // ---------------------------------------------------------------------
@@ -528,6 +647,8 @@ impl GoogleDriveProvider {
                 secrets,
                 transport,
                 cached: Mutex::new(None),
+                confirmed_at: Mutex::new(None),
+                store_check: Mutex::new(TOKEN_STORE_CHECK),
                 rejected_refresh_token: Mutex::new(None),
                 refreshing: Mutex::new(()),
             }),
@@ -722,6 +843,7 @@ impl GoogleDriveProvider {
                 file_name,
                 base_md5,
                 own_md5,
+                commit_took,
             } => {
                 let revisions = match self.list_revisions(&file_id) {
                     Ok(revisions) => revisions,
@@ -731,8 +853,27 @@ impl GoogleDriveProvider {
                     }
                     Err(error) => return Err(error),
                 };
-                Ok(revisions_replaced_unseen(&revisions, &base_md5, &own_md5)
+                let written_then =
+                    versions_of_the_same_moment(&revisions, &base_md5, &own_md5, commit_took);
+                // The common answer, and it costs the one request.
+                if written_then.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // Which of the writes of that moment holds the name is
+                // not in the list: the one that committed last does,
+                // and it can carry the older time. That one is not
+                // lost. Every other one is, whichever device asks.
+                let url = format!("{API_BASE}/files/{file_id}?fields={FILE_FIELDS}");
+                let head: GdFile = match self.api_json("GET", url, None) {
+                    Ok(head) => head,
+                    Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                        return Ok(Vec::new());
+                    }
+                    Err(error) => return Err(error),
+                };
+                Ok(written_then
                     .into_iter()
+                    .filter(|revision| revision.md5_checksum != head.md5_checksum)
                     .map(|revision| {
                         ReplacedWork::Copy(RevisionCopy {
                             file_id: file_id.clone(),
@@ -1726,6 +1867,7 @@ impl Provider for GoogleDriveProvider {
             hasher: Md5::new(),
             hashed_bytes: 0,
             replaced_work: self.replaced_work.clone(),
+            reverified_at: None,
         }))
     }
 
@@ -1864,21 +2006,47 @@ impl Provider for GoogleDriveProvider {
             }
             let Some(file) = &change.file else { continue };
             if file.mime_type == FOLDER_MIME {
-                // A folder was renamed, moved, or trashed. No change is
-                // reported for a folder itself, but whatever the cache
-                // holds for it, and for everything under it, names the
-                // old place.
-                let cached_path = self
+                // Whatever the cache holds for a folder that changed,
+                // and for everything under it, names the old place.
+                let path_before = self
                     .path_by_id
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get(&file.id)
                     .cloned();
-                if let Some(cached_path) = cached_path {
-                    self.evict_path(&cached_path);
+                let Some(path_before) = path_before else {
+                    // A folder this provider did not know: a new one,
+                    // whose files come with entries of their own.
+                    continue;
+                };
+                self.evict_path(&path_before);
+                // Drive reports a folder that got another name or
+                // another place with this one entry, and nothing for
+                // the files in it. The engine walks the folder that
+                // held it and the one that holds it now.
+                let path_now = self
+                    .path_for_changed_file(file)
+                    .map(|resolved| resolved.new_path);
+                if path_now.as_deref() == Some(path_before.as_str()) {
+                    continue;
                 }
+                for path in [Some(path_before), path_now].into_iter().flatten() {
+                    let Ok(path) = RemotePath::new(path) else {
+                        continue;
+                    };
+                    changes.push(RemoteChange {
+                        path,
+                        kind: RemoteChangeKind::FolderMoved,
+                        observed_at: now,
+                        op_id: None,
+                        content_hash: None,
+                        size_bytes: None,
+                        modified_at: None,
+                    });
+                }
+                continue;
             }
-            if file.mime_type == FOLDER_MIME || is_google_native_non_folder(&file.mime_type) {
+            if is_google_native_non_folder(&file.mime_type) {
                 continue;
             }
             let Some(resolved) = self.path_for_changed_file(file) else {
@@ -2037,6 +2205,8 @@ struct GdriveUploadSession {
     /// Where a guarded overwrite that landed leaves the check for a
     /// version it replaced ([`ReplacedWork`]).
     replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
+    /// When the last re-verification before a commit began.
+    reverified_at: Option<std::time::Instant>,
     /// The folder and the name of the file that is overwritten, which
     /// a copy of a replaced version is placed and named by.
     overwritten: Option<(String, String)>,
@@ -2054,13 +2224,14 @@ impl GdriveUploadSession {
     /// whole (possibly hours-long, throttle-paused) transfer to one
     /// round-trip. A divergence surfaces as PreconditionFailed, which the
     /// engine resolves as keep-both instead of a silent overwrite.
-    fn reverify_precondition_before_commit(&self) -> Result<(), ProviderError> {
+    fn reverify_precondition_before_commit(&mut self) -> Result<(), ProviderError> {
         let RemotePrecondition::HashEquals(expected) = &self.precondition else {
             return Ok(());
         };
         let Some(file_id) = &self.file_id else {
             return Ok(());
         };
+        self.reverified_at = Some(std::time::Instant::now());
         let url = format!("{API_BASE}/files/{file_id}?fields={FILE_FIELDS}");
         let response = self
             .handle()
@@ -2110,6 +2281,10 @@ impl GdriveUploadSession {
                     file_name: file_name.clone(),
                     base_md5: base_md5.clone(),
                     own_md5: own_md5.to_string(),
+                    commit_took: self
+                        .reverified_at
+                        .map(|at| at.elapsed())
+                        .unwrap_or_default(),
                 },
                 0,
             ));

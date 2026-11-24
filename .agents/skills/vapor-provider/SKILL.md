@@ -27,7 +27,10 @@ Full checklist with acceptance criteria:
 - **Changes feed.** `poll_changes(cursor)` returns a page and the next
   cursor, or `CursorExpired`; the engine persists the cursor only after
   the page's intents are durable and re-baselines on expiry. Never
-  return an empty cursor as "no change".
+  return an empty cursor as "no change". A feed that reports a folder
+  which got another name or place with one entry, and nothing for the
+  files in it, sends `FolderMoved` for the folder's paths; the engine
+  walks the folder that holds them.
 - **Capabilities.** Two flags, both honest: `supports_remote_changes_feed`
   and `supports_server_side_move`. Write preconditions are not a flag:
   every backend honours them.

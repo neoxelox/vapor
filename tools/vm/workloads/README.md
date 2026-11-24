@@ -51,8 +51,11 @@ The guest image has Python 3, git, node, npm, and sqlite3.
 | `probe.py` | Saves one file every few seconds in each folder it is given and times its arrival on the other side. Run it next to a workload to see what a single save costs meanwhile. |
 | `answer_loop.py`, `resolve_all.py` | A user who answers `mass-delete` questions with `apply` a few seconds after they show; and one pass that answers every open question. |
 | `drive_tests.py`, `drive_conflict.py` | Two profiles on one Google Drive folder, as two devices: first files, the time of one save from device to device, names, operations both ways, a git repository, a burst and its removal, and a conflict in five variants. They need a guest with the Internet and the dedicated test account. |
+| `drive_race.py` | Both devices edit one file at the same moment through Google Drive, many times, and says for each file whether both edits are on both devices. With `--files 1` both uploads land inside one round trip, which is the case the `~conflict-replaced` copy is for; `--size` makes the versions large enough to go in chunks. |
+| `drive_probe.py` | Asks the Drive API of the test account the questions the provider answers from the API documents, with the requests the provider sends: one line for each fact, `HOLDS` or `BREAKS`. `race` and `extra` print what Drive does that no code depends on. `cloud` changes a file of the synced folder as another program does (a new time with no new bytes, a new name, new bytes with an old time). It reads the sign-in on stdin and works in a folder of its own, which it puts in the trash of the account. |
 | `presence.swift` | Posts a small pointer move every few seconds, so macOS counts a user at the device and the daemon runs `Throttled`. |
-| `in-guest.sh`, `monstat.py` | Host side: run a command in the manual guest, and summarize the sampler's CSV. |
+| `in-guest.sh`, `monstat.py` | Host side: run a command in the manual guest (with `STDIN=1`, on the host's stdin), and summarize the sampler's CSV. |
+| `sign_in.py` | Host side: prints the sign-in of the Drive test account from the gitignored `.env`, for a pipe into the guest. It refuses a terminal. |
 
 ## What they need that the repository does not hold
 
@@ -66,12 +69,26 @@ The guest image has Python 3, git, node, npm, and sqlite3.
 - **`presence`.** Build it on the host and copy it next to the tools:
   `swiftc -O -o presence presence.swift`.
 - **Google Drive.** A guest with `--internet` and a build that carries
-  the OAuth client (`.env`). The test account signs in with `<command
-  that prints the token> | vapor auth login --profile <id> --token -`.
-  `drive_tests.py` and `drive_conflict.py` expect two profiles, one
-  on `~/VaporDrive` and one on `~/VaporDrive2`, on one Drive folder.
-  The daemon's binary writes the sign-in to the keychain, so the
-  daemon reads it with no further step.
+  the OAuth client (`.env`). The sign-in of the test account is in the
+  same `.env` as `VAPOR_E2E_GDRIVE_TOKEN`, and it reaches a command of
+  the guest on stdin only:
+
+  ```sh
+  D=/VaporE2E-<run>/sync       # a folder of its own for each session
+  tools/vm/workloads/sign_in.py | STDIN=1 tools/vm/workloads/in-guest.sh "vapor init --provider gdrive --local ~/VaporDrive --cloud $D --token - --auto-launch on --json"
+  tools/vm/workloads/in-guest.sh "vapor profiles add --id second --provider gdrive --local ~/VaporDrive2 --cloud $D --json"
+  tools/vm/workloads/sign_in.py | STDIN=1 tools/vm/workloads/in-guest.sh 'vapor auth login --profile second --token -'
+  tools/vm/workloads/in-guest.sh 'vapor service restart'
+  tools/vm/workloads/sign_in.py probe | STDIN=1 tools/vm/workloads/in-guest.sh 'python3 "$R/tools/drive_probe.py"'
+  ```
+
+  The Drive workloads expect these two profiles, one on `~/VaporDrive`
+  and one on `~/VaporDrive2`, on one Drive folder: two devices, as far
+  as Drive can tell. The daemon's binary writes the sign-in to the
+  keychain, so the daemon reads it with no further step. Never the
+  owner's own account, and never the token in an argument or a file of
+  the shared folder. At the end of a session, `drive_probe.py cloud
+  trash /VaporE2E-<run>` puts its folder in the trash of the account.
 
 ## Limits
 

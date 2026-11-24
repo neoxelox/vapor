@@ -70,6 +70,22 @@ def wait_equal(sub, timeout=600, expect=None):
     return None
 
 
+def wait_settled(sub, quiet=30, timeout=900):
+    """Waits until both folders hold the same files under `sub` and
+    nothing changed for `quiet` seconds. Returns whether they did. Two
+    folders that are equal for a moment are not the end of a conflict:
+    the copy of the other version comes seconds after the file."""
+    t0, last, since = time.time(), None, time.time()
+    while time.time() - t0 < timeout:
+        ta, tb = tree(A, sub), tree(B, sub)
+        if (ta, tb) != last:
+            last, since = (ta, tb), time.time()
+        elif ta == tb and time.time() - since >= quiet:
+            return True
+        time.sleep(2)
+    return False
+
+
 def diff(sub):
     ta, tb = tree(A, sub), tree(B, sub)
     return {
@@ -186,11 +202,12 @@ def d_conflict(ctx):
     w(os.path.join(A, sub, "doc.txt"), la)
     w(os.path.join(B, sub, "doc.txt"), lb)
     vt.vapor("resume")
-    t = wait_equal(sub, 900)
+    t0 = time.time()
+    settled = wait_settled(sub)
     ta = {k: r(os.path.join(A, sub, k)) for k in tree(A, sub)}
-    ctx.expect(t is not None, f"both devices end with the same files ({diff(sub)})")
+    ctx.expect(settled, f"both devices end with the same files ({diff(sub)})")
     ctx.expect(la in ta.values() and lb in ta.values(), f"both edits survive ({sorted(ta)})")
-    ctx.info(f"files after a conflict: {sorted(ta)}; {t and round(t)} s")
+    ctx.info(f"files after a conflict: {sorted(ta)}; {round(time.time() - t0)} s with the wait for quiet")
 
 
 def d_burst(ctx):

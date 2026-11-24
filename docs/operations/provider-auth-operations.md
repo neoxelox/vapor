@@ -223,7 +223,12 @@ file, so it holds the profile instead of failing work
 - `vapor auth logout --profile <id>` removes every credential the
   profile holds; `vapor auth status` reports each profile as
   `signed-in`, `signed-out`, or `not-needed` without ever revealing
-  token values.
+  token values. A daemon that runs follows within 30 seconds: the
+  provider looks at the secret store that often, stops using the
+  tokens it holds in memory, and the profile holds for a sign-in. A
+  token refresh that ends after the sign-out does not write tokens
+  back into the store. A sign-in with another account replaces the
+  tokens in memory the same way.
 - `--profile` names the profile; its provider decides what signing in
   means. With one profile the flag is optional; with several, a command
   that acts on one profile refuses without it and lists the ids.

@@ -26,8 +26,10 @@ choice stands.
   stops it, and no migration of the state database before GA
   (`AGENTS.md` §3 to §5).
 - No test may use the network or a real cloud account. What was built
-  for Google Drive was checked against the scripted HTTP transport
-  only.
+  for Google Drive was first checked against the scripted HTTP
+  transport only. The owner then asked for a run with the dedicated
+  test account (owner, 2026-11-23); what it found is under
+  Verification.
 
 ## What was built
 
@@ -77,6 +79,30 @@ owns it.
     discard runs on a worker, and a profile whose state database
     cannot be opened is tried again.
 
+Found by the run with the Google Drive test account, and built after
+it:
+
+13. **Two same-moment uploads keep both versions on Google Drive
+    whichever of them Drive lists first**, and the history of a file
+    never becomes copies (`data-flow.md` §Conflict handling; open
+    point 17).
+14. **A folder that gets another name or another place in Google Drive
+    reaches the other devices in seconds.** Drive has one entry for
+    such a folder and none for its files; the provider now tells the
+    engine, which walks the folder that holds it (`data-flow.md`
+    §Remote to local). Before, the devices followed at the next change
+    of a file in the folder or at the next scan of everything.
+15. **Two profiles that reach one new cloud folder at the same moment
+    adopt one identity.** Before, one of them could end behind a
+    "folder was replaced" question (`data-flow.md` §Root identity).
+    Scenario S80 failed on this one time in a full run.
+16. **A sign-out stops a daemon that runs.** `vapor auth logout`
+    removed the tokens from the keychain, and the daemon went on with
+    the ones it held in memory, then wrote them back at its next
+    refresh. The provider now looks at the store each 30 seconds, and
+    a refresh never writes tokens back after a sign-out
+    (`operations/provider-auth-operations.md`).
+
 ## Verification
 
 - Tier 1: `./scripts/test.sh`, green on the contributor Mac.
@@ -84,9 +110,49 @@ owns it.
   the contributor Mac. S76 to S81 are new, and
   S70 has one more assertion. Each new assertion failed on the base
   build and passes on this one.
-- The tests of Google Drive use the scripted transport. No run used a
-  real account. The checks that need one are in `docs/tasks/core.md`
-  (P-4).
+- The tests of Google Drive in Tier 1 use the scripted transport.
+- Google Drive with the dedicated test account, in a manual guest with
+  a route to the Internet (owner, 2026-11-23), two profiles of one
+  daemon on one Drive folder as two devices. The tools are in
+  `tools/vm/workloads/` (`drive_probe.py`, `drive_race.py`,
+  `drive_tests.py`):
+  - The probe sends the requests of the provider and checks each
+    fact the provider takes from the API documents: 14 of 14 hold on
+    the final build. Two did not hold for the first build, and both
+    are fixed: Drive lists the versions of a file by their times and
+    not in the order of the writes, and of two writes of one moment
+    the one that holds the name was listed first in 2 of 10 rounds.
+  - Both devices edit one file at the same moment. On the base build
+    one edit was lost in 6 of 6 runs. On the first build of this pull
+    request one edit was lost in 1 of 9 rounds: the copy held the
+    version that also held the name. On the final rule no edit was
+    lost in 25 rounds, in one of which Drive listed the head first,
+    nor in 3 rounds with versions of 12 MiB, where the copy goes in
+    chunks.
+  - A version with a time of 2019 from another program, then an edit
+    on a device a minute later: no copy. The first build would have
+    made a copy of each earlier version.
+  - A new time with no new bytes in the cloud while a local edit
+    waits: the edit uploads, and no conflict copy is made.
+  - The Drive test set: 31 files with one of 20 MiB in 32 s, unusual
+    names, renames and removals both ways, a git repository whose
+    `git fsck` passes on the other device, 400 small files in 208 s
+    and their removal in 82 s after the answer to the mass-delete
+    question. One save takes 9 s from device to device, a deletion
+    8 s, a rename 11 s to 17 s.
+  - A folder that gets another name or another place. Before the
+    folder signal, a rename by capitals in the cloud did not reach a
+    device in 4 minutes, and one made on a device did not reach the
+    other device in 5. With it: a rename by capitals in the cloud
+    reaches both devices in 6 s, one made on a device reaches the
+    other in 9 s, another name in the cloud in 10 s, a move into
+    another folder in the cloud in 9 s, and a folder renamed on one
+    device leaves no empty folder on the other. The devices rename
+    their files; nothing is sent again.
+  - A sign-out: the profile of a daemon that runs holds for a sign-in
+    6 s after `vapor auth logout`, a file written meanwhile stays on
+    its device, and it reaches the other device 12 s after the next
+    sign-in. Before, the profile went on to sync.
 - Tier VM: `./scripts/vm.sh`, 14 scenarios pass, with the launchd
   round trip of the service in a fresh guest. In a manual guest with no
   route to the Internet, a made-up token given to `vapor auth login
@@ -96,9 +162,9 @@ owns it.
 - The soak: `./scripts/soak.sh --seed 4217 --duration 15m --faults all
   --throttle walk`. The first run stopped with 4 violations, all one
   defect: a rename by spelling that was tried while the cloud folder
-  could not be read was undone on this device. After the fix the same
-  seed finished 12 phases, 794 operations, and 23 faults with no
-  violation.
+  could not be read was undone on this device. After the fix, and
+  again on the final tree, the same seed finished 12 phases, 794
+  operations, and 23 faults with no violation.
 
 ## Open points
 
@@ -121,8 +187,10 @@ option of each is what is built.
    it at the cost of one more table.
 3. **Each overwrite on Google Drive costs one more request**, the list
    of the versions of the file, at the next poll and not inside the
-   upload. The `version` field of a file may tell a second writer
-   without the list; that needs a real account to check (P-4).
+   upload; and a second one, a read of the file, when the list holds a
+   version of the same moment. The `version` field of a file does not
+   tell a second writer: with the test account it grew by 2 or 3 for
+   one overwrite and by 5 to 7 for two.
 4. **The durability of a transferred file on macOS.** Built: the same
    guarantee as before (`F_FULLFSYNC` before the file gets its name),
    shared between the files written at the same moment. `fsync` alone
@@ -183,6 +251,27 @@ option of each is what is built.
     an install reads it. `vapor` itself then cannot: the look for the
     cloud folder in `vapor init` and a daemon started as `vapor run`
     hold for a sign-in on such a build (`docs/tasks/core.md` PL-8).
+17. **What "the same moment" is on Google Drive.** Built: a version
+    is a write of the moment of an upload when its time is no more
+    than the time the commit took plus 5 seconds after the time of the
+    upload's own version, and no more than twice that time plus 30
+    seconds before it. Of those, each one that does not hold the name
+    is kept as a copy. The run with the test account gave the facts:
+    Drive lists the versions of a file by their times, a writer can
+    set the time, Drive gives a version its time when its bytes are
+    in, and of two writes of one moment the one that holds the name
+    was listed first in 2 of 10 rounds. Wider bounds turn more of the
+    history of a file into copies when a version carries a time its
+    writer set; narrower ones can miss a write.
+18. **Version 2 of the Drive API has the conditional write that
+    version 3 lacks.** Not built. With the test account, of two
+    uploads with one `If-Match` at the same moment exactly one landed
+    in 10 of 10 rounds. A guarded overwrite through it would make the
+    second device see an ordinary conflict, and the check of the
+    versions, points 2, 3, and 17, and the copy named
+    `~conflict-replaced` on Google Drive would go
+    (`docs/tasks/core.md` P-13). Whether Vapor depends on an older API
+    version is the owner's choice.
 
 ## Not done
 

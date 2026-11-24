@@ -255,6 +255,13 @@ pub trait TransferSession: Send {
 pub enum RemoteChangeKind {
     CreatedOrModified,
     Removed,
+    /// A folder got another name or another place, and the feed says so
+    /// with one entry for the folder and none for the files in it
+    /// (Google Drive). `path` is a path of the folder: the one it has
+    /// now, or the one it had. The engine walks the folder that holds
+    /// that path, and the walk finds what the change did. A feed that
+    /// reports each file under such a folder never sends this.
+    FolderMoved,
 }
 
 /// One entry of the remote changes feed.

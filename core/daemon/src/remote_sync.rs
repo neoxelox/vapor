@@ -584,6 +584,21 @@ impl RemotePoller {
                             }
                             batch.push((local_target, PendingIntentKind::Download, event_time));
                         }
+                        RemoteChangeKind::FolderMoved => {
+                            // One entry stands for every file under the
+                            // folder, and none of them has an entry of
+                            // its own. The walk of the folder that holds
+                            // this path finds what the change did: a
+                            // name with another spelling, files under a
+                            // new path, files that left.
+                            if let Some(parent) = local_target.parent() {
+                                batch.push((
+                                    parent.to_path_buf(),
+                                    PendingIntentKind::ReconcileSubtree,
+                                    event_time,
+                                ));
+                            }
+                        }
                         RemoteChangeKind::Removed => {
                             if remote_echoes.matches_delete(change.path.as_str(), now) {
                                 crate::logging::debug(
@@ -1026,6 +1041,148 @@ mod tests {
         // The cloud object changes again. Its copy on this device only
         // follows through another walk of the folder.
         assert_eq!(change(&mut fixture, 200), 0, "reported one time");
+    }
+
+    /// A feed that answers with the changes a test hands it, as a
+    /// provider whose feed has one entry for a folder does.
+    struct ScriptedFeed {
+        pages: std::sync::Mutex<Vec<Vec<vapor_providers::RemoteChange>>>,
+    }
+
+    impl vapor_providers::Provider for ScriptedFeed {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            vapor_providers::ProviderCapabilities::FILESYSTEM
+        }
+        fn ensure_cloud_root(&self, _dir: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn enumerate(
+            &self,
+            _dir: &vapor_providers::RemotePath,
+        ) -> Result<Vec<vapor_providers::RemoteEntry>, ProviderError> {
+            Ok(Vec::new())
+        }
+        fn stat(
+            &self,
+            _path: &vapor_providers::RemotePath,
+        ) -> Result<Option<vapor_providers::RemoteEntry>, ProviderError> {
+            Ok(None)
+        }
+        fn content_hash(
+            &self,
+            _path: &vapor_providers::RemotePath,
+        ) -> Result<String, ProviderError> {
+            Ok(String::new())
+        }
+        fn begin_upload(
+            &self,
+            _request: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::permanent("no transfers"))
+        }
+        fn begin_download(
+            &self,
+            _request: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::permanent("no transfers"))
+        }
+        fn delete(
+            &self,
+            _path: &vapor_providers::RemotePath,
+            _op_id: &str,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn poll_changes(
+            &self,
+            cursor: Option<&str>,
+            _max: usize,
+        ) -> Result<ChangesPoll, ProviderError> {
+            let mut pages = self.pages.lock().expect("pages");
+            let changes = if cursor.is_none() || pages.is_empty() {
+                Vec::new()
+            } else {
+                pages.remove(0)
+            };
+            Ok(ChangesPoll::Page(vapor_providers::RemoteChangesPage {
+                changes,
+                next_cursor: format!("left-{}", pages.len()),
+            }))
+        }
+    }
+
+    #[test]
+    fn a_folder_that_moved_in_the_cloud_asks_for_a_walk_of_the_folder_that_holds_it() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let local_root = temp.path().join("local");
+        std::fs::create_dir_all(local_root.join("work/Reports")).expect("local tree");
+        let moved = |path: &str| vapor_providers::RemoteChange {
+            path: vapor_providers::RemotePath::new(path).expect("path"),
+            kind: RemoteChangeKind::FolderMoved,
+            observed_at: ts(10),
+            op_id: None,
+            content_hash: None,
+            size_bytes: None,
+            modified_at: None,
+        };
+        // The folder got another spelling, then moved to the top.
+        let provider = ScriptedFeed {
+            pages: std::sync::Mutex::new(vec![
+                vec![moved("work/Reports"), moved("work/reports")],
+                vec![moved("work/reports"), moved("reports")],
+            ]),
+        };
+        let clock = Arc::new(ManualClock::at_now());
+        let mut app = DaemonApp::new_with_clock(Box::new(provider), clock.clone());
+        let mut state_db =
+            DurableStateDb::open(temp.path().join("state/vapor.sqlite")).expect("open state db");
+        let mut poller = RemotePoller::new("default");
+        let mut echoes = SelfWriteCache::new();
+        let mut poll = |state_db: &mut DurableStateDb, now: SystemTime| {
+            clock.advance(Duration::from_secs(61));
+            let shared: SharedClock = clock.clone();
+            poller
+                .poll_if_due(
+                    &mut app,
+                    state_db,
+                    &mut echoes,
+                    Some(&local_root),
+                    None,
+                    SyncMode::TwoWay,
+                    &shared,
+                    now,
+                    &ProviderCallMode::Inline,
+                )
+                .expect("poll")
+        };
+        poll(&mut state_db, ts(0)); // baseline
+
+        // Two entries for one folder, one walk: the folder that holds
+        // both spellings.
+        let report = poll(&mut state_db, ts(20));
+        assert_eq!(report.observed_changes, 2);
+        let mut walks = Vec::new();
+        while let Some(intent) = state_db.lease_next_ready(ts(30)).expect("lease") {
+            assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+            walks.push(intent.path.clone());
+            state_db.complete_leased(intent.id).expect("the walk ran");
+        }
+        assert_eq!(walks, vec![local_root.join("work")]);
+
+        // A move to another folder walks the folder it left and the one
+        // it is in now.
+        poll(&mut state_db, ts(40));
+        let mut walks = Vec::new();
+        while let Some(intent) = state_db.lease_next_ready(ts(50)).expect("lease") {
+            assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+            walks.push(intent.path.clone());
+            state_db.complete_leased(intent.id).expect("the walk ran");
+        }
+        walks.sort();
+        assert_eq!(walks, vec![local_root.clone(), local_root.join("work")]);
     }
 
     #[test]

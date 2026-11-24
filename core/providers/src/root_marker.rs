@@ -38,33 +38,85 @@ pub fn read_marker(root: &Path) -> io::Result<Option<RootMarker>> {
     }
 }
 
-/// Writes a fresh marker into `root` (which must exist) and returns it.
-/// Atomic: staged under the internal temp prefix, then renamed.
-pub fn write_marker(root: &Path, created_by: &str, now: SystemTime) -> io::Result<RootMarker> {
-    let marker = RootMarker {
+fn fresh_marker(created_by: &str, now: SystemTime) -> RootMarker {
+    RootMarker {
         root_id: new_root_id(now),
         created_at_ms: now
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         created_by: created_by.to_string(),
-    };
-    let bytes = serde_json::to_vec_pretty(&marker).map_err(io::Error::other)?;
+    }
+}
+
+/// Writes the whole marker to a file of its own under the internal
+/// temp prefix. The name holds the id of the marker: two adopters of
+/// one root, in one process or on two devices, never share it.
+fn stage_marker(root: &Path, marker: &RootMarker) -> io::Result<PathBuf> {
+    let bytes = serde_json::to_vec_pretty(marker).map_err(io::Error::other)?;
     let staging = root.join(format!(
         "{}root-{}",
         constants::provider::TEMP_FILE_PREFIX,
-        std::process::id()
+        marker.root_id
     ));
     std::fs::write(&staging, bytes)?;
+    Ok(staging)
+}
+
+/// Writes a fresh marker into `root` (which must exist) and returns it.
+/// It takes the place of a marker that is there. Atomic: staged under
+/// the internal temp prefix, then renamed.
+pub fn write_marker(root: &Path, created_by: &str, now: SystemTime) -> io::Result<RootMarker> {
+    let marker = fresh_marker(created_by, now);
+    let staging = stage_marker(root, &marker)?;
     std::fs::rename(&staging, marker_path(root))?;
     Ok(marker)
 }
 
 /// Reads the marker or writes one: the adoption step.
+///
+/// Two adopters can find no marker at the same moment: two profiles of
+/// one daemon on one cloud folder, or two devices on a shared one. The
+/// first marker stays and both get its id. With a marker for each, the
+/// one whose marker was replaced would find another identity at its
+/// next check and take the root for a folder that was replaced.
 pub fn adopt(root: &Path, created_by: &str, now: SystemTime) -> io::Result<RootMarker> {
-    match read_marker(root)? {
-        Some(marker) => Ok(marker),
-        None => write_marker(root, created_by, now),
+    if let Some(marker) = read_marker(root)? {
+        return Ok(marker);
+    }
+    let marker = fresh_marker(created_by, now);
+    let staging = stage_marker(root, &marker)?;
+    // A hard link fails when the name is taken, and what it publishes
+    // is the whole file.
+    match std::fs::hard_link(&staging, marker_path(root)) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&staging);
+            Ok(marker)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            match read_marker(root) {
+                Ok(Some(first)) => {
+                    let _ = std::fs::remove_file(&staging);
+                    Ok(first)
+                }
+                // A foreign file of that name is not an identity: the
+                // marker takes its place.
+                Ok(None) => {
+                    std::fs::rename(&staging, marker_path(root))?;
+                    Ok(marker)
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&staging);
+                    Err(error)
+                }
+            }
+        }
+        // A volume with no hard links: the rename, where the last of
+        // two adopters wins.
+        Err(_) => {
+            std::fs::rename(&staging, marker_path(root))?;
+            Ok(marker)
+        }
     }
 }
 
@@ -109,6 +161,51 @@ mod tests {
                 .starts_with(constants::provider::TEMP_FILE_PREFIX)),
             "no staging file is left behind"
         );
+    }
+
+    #[test]
+    fn adopters_of_one_root_at_the_same_moment_get_one_identity() {
+        // Two profiles of one daemon on one cloud folder reach it in
+        // the same tick. Each must end with the id the marker holds, or
+        // one of them finds "another folder" at its next check.
+        for _ in 0..50 {
+            let temp = tempfile::TempDir::new().expect("temp");
+            let root = temp.path().to_path_buf();
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let adopters: Vec<_> = (0..4)
+                .map(|n| {
+                    let (root, gate) = (root.clone(), gate.clone());
+                    std::thread::spawn(move || {
+                        gate.wait();
+                        adopt(&root, &format!("dev-{n}"), SystemTime::UNIX_EPOCH)
+                            .expect("adopt")
+                            .root_id
+                    })
+                })
+                .collect();
+            let ids: Vec<String> = adopters
+                .into_iter()
+                .map(|adopter| adopter.join().expect("thread"))
+                .collect();
+            let on_disk = read_marker(&root).expect("read").expect("a marker").root_id;
+            assert!(
+                ids.iter().all(|id| id == &on_disk),
+                "every adopter holds the id of the marker: {ids:?} against {on_disk}"
+            );
+            assert_eq!(
+                root.read_dir().expect("list").count(),
+                1,
+                "no staging file is left behind"
+            );
+        }
+    }
+
+    #[test]
+    fn adoption_takes_the_place_of_a_foreign_file_under_the_marker_name() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        std::fs::write(marker_path(temp.path()), b"not json").expect("seed");
+        let marker = adopt(temp.path(), "dev", SystemTime::UNIX_EPOCH).expect("adopt");
+        assert_eq!(read_marker(temp.path()).expect("read"), Some(marker));
     }
 
     #[test]
