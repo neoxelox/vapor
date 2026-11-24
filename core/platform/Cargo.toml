@@ -6,8 +6,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-notify = { workspace = true }
 vapor-shared = { path = "../shared" }
+
+# The watcher backend is built for the two OSes that have one. On
+# Windows nothing uses the crate, and cargo warns about a dependency
+# that no code names.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+notify = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.183"

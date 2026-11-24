@@ -121,6 +121,19 @@ fn connect() -> Result<Client, IpcCliError> {
     Client::connect(&path, &client_id).map_err(IpcCliError::from)
 }
 
+/// Whether a daemon answers on the socket: a connection and the
+/// handshake, with a short wait. A daemon whose process is there and
+/// which holds no socket (it hangs in its shutdown) does not answer.
+pub fn daemon_answers() -> bool {
+    let client_id = format!("vapor-cli/{}", vapor_daemon::build_info::VERSION);
+    Client::connect_with_timeout(
+        &socket_path(),
+        &client_id,
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok()
+}
+
 pub fn status() -> Result<StatusResponse, IpcCliError> {
     let mut client = connect()?;
     client.status().map_err(IpcCliError::from)
@@ -177,6 +190,24 @@ pub fn render_status(status: &StatusResponse) -> String {
         status.queued,
         status.failed,
     );
+    if status.blocked > 0 {
+        rendered.push_str(&format!(
+            "\nBlocked: {} file(s) cannot sync for now; each one is tried again later",
+            status.blocked
+        ));
+        let now_ms = super::when::now_ms();
+        for file in &status.blocked_files {
+            rendered.push_str(&format!(
+                "\n  {}: {} (next try {})",
+                file.path,
+                file.reason,
+                super::when::until(file.next_attempt_ms, now_ms)
+            ));
+        }
+        if status.blocked as usize > status.blocked_files.len() {
+            rendered.push_str("\n  (vapor diagnostics lists the rest)");
+        }
+    }
     if status.mirror.reverts > 0 || status.mirror.deletes > 0 {
         rendered.push_str(&format!(
             "\nStrict mirror: {} reverts, {} deletes",
@@ -289,10 +320,15 @@ pub fn tail_logs(tail: Option<usize>) -> io::Result<String> {
     if !path.exists() {
         return Ok(String::new());
     }
-    match tail {
-        None => std::fs::read_to_string(&path),
-        Some(line_count) => read_last_lines(&path, line_count),
-    }
+    let raw = match tail {
+        None => std::fs::read_to_string(&path)?,
+        Some(line_count) => read_last_lines(&path, line_count)?,
+    };
+    Ok(raw
+        .lines()
+        .map(super::when::log_line)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Streams the whole daemon log to `out` without buffering it in memory,
@@ -307,9 +343,15 @@ pub fn stream_full_log(out: &mut impl io::Write) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    let mut reader = io::BufReader::new(file);
-    let copied = io::copy(&mut reader, out)?;
-    Ok(copied > 0)
+    // Line by line: each line's time becomes one a person can read,
+    // and the file is never held in memory.
+    use io::BufRead;
+    let mut wrote = false;
+    for line in io::BufReader::new(file).lines() {
+        writeln!(out, "{}", super::when::log_line(&line?))?;
+        wrote = true;
+    }
+    Ok(wrote)
 }
 
 /// Reads the final `line_count` lines of `path` by scanning backwards in
@@ -605,6 +647,8 @@ mod tests {
   },
   "queued": 0,
   "failed": 0,
+  "blocked": 0,
+  "blockedFiles": [],
   "decisions": 0,
   "mirror": {
     "reverts": 0,
@@ -632,6 +676,56 @@ mod tests {
   },
   "profiles": []
 }"#
+        );
+    }
+
+    #[test]
+    fn the_json_shape_of_a_blocked_file_is_stable() {
+        let file = vapor_ipc::BlockedFile {
+            profile_id: "default".to_string(),
+            path: "/Users/sam/Sync/locked.txt".to_string(),
+            action: "upload".to_string(),
+            reason: "cannot stat local file: Permission denied".to_string(),
+            attempts: 7,
+            next_attempt_ms: 1_750_000_000_000,
+        };
+        assert_eq!(
+            serde_json::to_value(&file).expect("json"),
+            serde_json::json!({
+                "profileId": "default",
+                "path": "/Users/sam/Sync/locked.txt",
+                "action": "upload",
+                "reason": "cannot stat local file: Permission denied",
+                "attempts": 7,
+                "nextAttemptMs": 1_750_000_000_000_u64,
+            })
+        );
+    }
+
+    #[test]
+    fn status_names_the_files_that_cannot_sync_with_their_reason() {
+        let status = StatusResponse {
+            schema_version: 5,
+            queued: 3,
+            blocked: 2,
+            blocked_files: vec![vapor_ipc::BlockedFile {
+                profile_id: "default".to_string(),
+                path: "/Users/sam/Sync/locked.txt".to_string(),
+                action: "upload".to_string(),
+                reason: "cannot stat local file: Permission denied".to_string(),
+                attempts: 7,
+                // Long past: the next try is due.
+                next_attempt_ms: 1,
+            }],
+            ..StatusResponse::default()
+        };
+        let rendered = render_status(&status);
+        assert!(rendered.contains("Queue: 3 queued"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "Blocked: 2 file(s) cannot sync for now; each one is tried again later\n  /Users/sam/Sync/locked.txt: cannot stat local file: Permission denied (next try now)\n  (vapor diagnostics lists the rest)"
+            ),
+            "{rendered}"
         );
     }
 
@@ -666,6 +760,7 @@ mod tests {
   },
   "queued": 0,
   "failed": 0,
+  "blocked": 0,
   "decisions": 0,
   "mirror": {
     "reverts": 0,

@@ -885,6 +885,235 @@ fn a_busy_out_of_scope_file_is_walked_once_then_served_from_the_negative_cache()
     );
 }
 
+/// One poll of the feed: its answer, then the answers to what the
+/// provider asks about an entry. Gives the changes as path and kind.
+fn poll_the_feed(
+    provider: &GoogleDriveProvider,
+    transport: &ScriptedHttpTransport,
+    changes: &str,
+    lookups: &[(u16, &str)],
+) -> Vec<(String, RemoteChangeKind)> {
+    transport.push_response(
+        200,
+        format!(r#"{{"newStartPageToken":"next","changes":[{changes}]}}"#),
+    );
+    for (status, lookup) in lookups {
+        transport.push_response(*status, lookup.to_string());
+    }
+    match provider.poll_changes(Some("token"), 100).expect("poll") {
+        ChangesPoll::Page(page) => page
+            .changes
+            .into_iter()
+            .map(|change| (change.path.as_str().to_string(), change.kind))
+            .collect(),
+        other => panic!("expected a page, got {other:?}"),
+    }
+}
+
+fn folder_entry(id: &str, name: &str, parent: &str) -> String {
+    format!(
+        r#"{{"fileId":"{id}","file":{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["{parent}"]}}}}"#
+    )
+}
+
+fn folder_listed(id: &str, name: &str, parent: &str) -> String {
+    format!(
+        r#"{{"files":[{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["{parent}"]}}]}}"#
+    )
+}
+
+/// A provider that listed the root and found the folders `Reports`
+/// (`d1`) and `Archive` (`d2`) in it.
+fn provider_that_knows_two_folders(transport: &Arc<ScriptedHttpTransport>) -> GoogleDriveProvider {
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"d1","name":"Reports","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]},
+            {"id":"d2","name":"Archive","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}
+        ]}"#,
+    );
+    provider.enumerate(&RemotePath::root()).expect("enumerate");
+    provider
+}
+
+#[test]
+fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_knows_two_folders(&transport);
+    let moved = RemoteChangeKind::FolderMoved;
+
+    // Drive has one entry for a folder that got another name, and none
+    // for the files in it.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "reports", "root-folder"),
+            &[(200, &folder_listed("d1", "reports", "root-folder"))]
+        ),
+        vec![
+            ("Reports".to_string(), moved),
+            ("reports".to_string(), moved)
+        ]
+    );
+
+    // An entry for the folder where it is says nothing new, and costs
+    // no request: the echo of each folder this device makes is one.
+    let before = transport.recorded_requests().len();
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "reports", "root-folder"),
+            &[]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+
+    // A folder that was never seen is a new one: its files come with
+    // entries of their own, and no request is made for it.
+    let before = transport.recorded_requests().len();
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d9", "New", "root-folder"),
+            &[]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+
+    // The folder moves into another folder of the sync root.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "reports", "d2"),
+            &[(200, &folder_listed("d1", "reports", "d2"))]
+        ),
+        vec![
+            ("reports".to_string(), moved),
+            ("Archive/reports".to_string(), moved)
+        ]
+    );
+
+    // It moves out of the synced folder: the place it had is all there
+    // is to walk.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "reports", "elsewhere"),
+            &[(
+                200,
+                r#"{"id":"elsewhere","name":"Other","mimeType":"application/vnd.google-apps.folder"}"#
+            )]
+        ),
+        vec![("Archive/reports".to_string(), moved)]
+    );
+}
+
+#[test]
+fn a_folder_whose_new_place_cannot_be_read_asks_for_a_walk_of_everything() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_knows_two_folders(&transport);
+    // The folder moved under a folder this provider does not know, and
+    // the cloud does not answer the question about that folder. The
+    // feed will not say it again.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "Reports", "made-a-moment-ago"),
+            &[(503, "")]
+        ),
+        vec![
+            ("Reports".to_string(), RemoteChangeKind::FolderMoved),
+            (String::new(), RemoteChangeKind::FolderMoved),
+        ],
+        "the folder that held it, and the root for the place that is not known"
+    );
+
+    // The same for a file whose folder cannot be read.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f1","file":{"id":"f1","name":"a.txt","mimeType":"text/plain","md5Checksum":"h","parents":["made-a-moment-ago"]}}"#,
+            &[(503, "")]
+        ),
+        vec![(String::new(), RemoteChangeKind::FolderMoved)]
+    );
+}
+
+#[test]
+fn a_file_under_a_folder_that_moved_is_still_known_when_it_is_removed() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_knows_two_folders(&transport);
+    let file = |parent: &str| {
+        format!(
+            r#"{{"id":"fx","name":"x.txt","mimeType":"text/plain","md5Checksum":"h","size":"1","parents":["{parent}"]}}"#
+        )
+    };
+    let folder = |name: &str| {
+        format!(
+            r#"{{"id":"d1","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}}"#
+        )
+    };
+    // The file is known under the old name of its folder.
+    transport.push_response(200, folder("Reports")); // the folder is still there
+    transport.push_response(200, format!(r#"{{"files":[{}]}}"#, file("d1")));
+    provider
+        .enumerate(&RemotePath::new("Reports").expect("path"))
+        .expect("list the folder");
+
+    // The folder gets another name. The walk that follows lists it
+    // under the new one.
+    poll_the_feed(
+        &provider,
+        &transport,
+        &folder_entry("d1", "Plans", "root-folder"),
+        &[(200, &folder_listed("d1", "Plans", "root-folder"))],
+    );
+    transport.push_response(200, folder("Plans"));
+    transport.push_response(200, format!(r#"{{"files":[{}]}}"#, file("d1")));
+    provider
+        .enumerate(&RemotePath::new("Plans").expect("path"))
+        .expect("list the folder under its new name");
+
+    // The engine asks about the path the file had: nothing is there.
+    transport.push_response(200, r#"{"files":[]}"#);
+    assert!(
+        provider
+            .stat(&RemotePath::new("Reports/x.txt").expect("path"))
+            .expect("stat")
+            .is_none()
+    );
+
+    // The file is removed in the cloud: the feed names it by its id,
+    // and the provider must still know where it is.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"fx","removed":true}"#,
+            &[]
+        ),
+        vec![("Plans/x.txt".to_string(), RemoteChangeKind::Removed)]
+    );
+}
+
 #[test]
 fn a_changes_response_that_advances_no_cursor_is_a_transient_error_not_progress() {
     // A parsable 200 with neither nextPageToken nor newStartPageToken must
@@ -1076,6 +1305,278 @@ fn a_refused_sign_in_stops_token_requests_until_a_new_sign_in_lands() {
     );
 }
 
+/// A provider over a store the test keeps a hand on, with tokens that
+/// expire at `expires_at_ms`.
+fn provider_signed_in_until(
+    transport: Arc<ScriptedHttpTransport>,
+    secrets: Arc<dyn SecretStore>,
+    expires_at_ms: u64,
+) -> GoogleDriveProvider {
+    secrets
+        .set(
+            "auth.default.gdrive.token",
+            &format!(
+                r#"{{"accessToken":"ya29.test","refreshToken":"1//rt","expiresAtMs":{expires_at_ms}}}"#
+            ),
+        )
+        .expect("seed tokens");
+    GoogleDriveProvider::new(
+        GdriveConfig {
+            client_id: "client".to_string(),
+            client_secret: None,
+            profile_id: "default".to_string(),
+        },
+        secrets,
+        transport,
+    )
+}
+
+const ROOT_LISTING: &str = r#"{"files":[{"id":"root-folder","name":"Vapor","mimeType":"application/vnd.google-apps.folder"}]}"#;
+
+/// The next call looks at the secret store, and a store with no tokens
+/// counts as a sign-out after `confirm`.
+fn look_at_the_store_now(provider: &GoogleDriveProvider, confirm: Duration) {
+    let mut look = provider.tokens.look.lock().expect("look");
+    look.check = Duration::ZERO;
+    look.confirm = confirm;
+    look.due = None;
+}
+
+#[test]
+fn a_sign_out_stops_a_provider_that_holds_the_tokens_in_memory() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let secrets = Arc::new(InMemorySecretStore::new());
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), u64::MAX / 2);
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("signed in");
+
+    // `vapor auth logout` removes the tokens from the store. The
+    // provider of a daemon that runs still has them in memory.
+    secrets
+        .delete("auth.default.gdrive.token")
+        .expect("sign out");
+    // Inside the time the tokens in memory stand, a call still goes.
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("the store is not read at each call");
+    // The first look that finds no tokens is not yet a sign-out: the
+    // keychain replaces an item by a delete and an add.
+    look_at_the_store_now(&provider, Duration::ZERO);
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("one look that finds nothing is not a sign-out");
+    // The next look finds none again: the profile is signed out, and
+    // the call fails with no request.
+    let before = transport.recorded_requests().len();
+    let error = provider
+        .ensure_cloud_root("/Vapor")
+        .expect_err("signed out");
+    assert_eq!(error.kind, ProviderErrorKind::Authentication);
+    assert!(error.message.contains("vapor auth login --profile default"));
+    assert_eq!(transport.recorded_requests().len(), before);
+
+    // Another sign-in takes the place of the tokens in memory.
+    secrets
+        .set(
+            "auth.default.gdrive.token",
+            &format!(
+                r#"{{"accessToken":"ya29.other","refreshToken":"1//other","expiresAtMs":{}}}"#,
+                u64::MAX / 2
+            ),
+        )
+        .expect("sign in again");
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("signed in again");
+    assert!(
+        transport
+            .recorded_requests()
+            .last()
+            .expect("a request")
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer ya29.other")
+    );
+}
+
+#[test]
+fn a_store_that_is_empty_for_one_look_does_not_sign_the_profile_out() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let secrets = Arc::new(InMemorySecretStore::new());
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), u64::MAX / 2);
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("signed in");
+
+    // Another process writes the tokens again: the item is gone for a
+    // moment between its delete and its add.
+    let stored = secrets.get("auth.default.gdrive.token").expect("tokens");
+    secrets.delete("auth.default.gdrive.token").expect("delete");
+    look_at_the_store_now(&provider, Duration::ZERO);
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("the look in between");
+    secrets
+        .set("auth.default.gdrive.token", &stored)
+        .expect("add");
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("the tokens are back: no sign-out");
+}
+
+/// What a store does at a chosen read, as another process that acts at
+/// that moment makes it.
+enum AtThatRead {
+    /// `vapor auth logout`.
+    SignOut,
+    /// `vapor auth login` with another account.
+    SignIn(String),
+    /// A keychain that is locked from then on.
+    StopAnswering,
+}
+
+struct StoreThatChanges {
+    inner: InMemorySecretStore,
+    reads_before: std::sync::Mutex<u32>,
+    at_that_read: AtThatRead,
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+impl StoreThatChanges {
+    fn new(reads_before: u32, at_that_read: AtThatRead) -> Self {
+        Self {
+            inner: InMemorySecretStore::new(),
+            reads_before: std::sync::Mutex::new(reads_before),
+            at_that_read,
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl SecretStore for StoreThatChanges {
+    fn get(&self, name: &str) -> Result<String, vapor_platform::SecretStoreError> {
+        let mut left = self.reads_before.lock().expect("reads");
+        if *left == 0 {
+            match &self.at_that_read {
+                AtThatRead::SignOut => self.inner.delete(name)?,
+                AtThatRead::SignIn(tokens) => self.inner.set(name, tokens)?,
+                AtThatRead::StopAnswering => self
+                    .stopped
+                    .store(true, std::sync::atomic::Ordering::SeqCst),
+            }
+        }
+        *left = left.saturating_sub(1);
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(vapor_platform::SecretStoreError::Backend(
+                "the keychain is locked".into(),
+            ));
+        }
+        self.inner.get(name)
+    }
+    fn set(&self, name: &str, value: &str) -> Result<(), vapor_platform::SecretStoreError> {
+        self.inner.set(name, value)
+    }
+    fn delete(&self, name: &str) -> Result<(), vapor_platform::SecretStoreError> {
+        self.inner.delete(name)
+    }
+    fn list(&self) -> Result<Vec<String>, vapor_platform::SecretStoreError> {
+        self.inner.list()
+    }
+}
+
+#[test]
+fn a_refresh_that_ends_after_a_sign_out_does_not_write_the_tokens_back() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    // The first read gives the tokens, which are at their end. The
+    // user signs out while the refresh runs.
+    let secrets = Arc::new(StoreThatChanges::new(1, AtThatRead::SignOut));
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), 0);
+    transport.push_response(200, r#"{"access_token":"ya29.fresh","expires_in":3600}"#);
+    // The call that asked for the refresh still goes: one empty look
+    // is not yet a sign-out.
+    transport.push_response(200, ROOT_LISTING);
+    provider
+        .ensure_cloud_root("/Vapor")
+        .expect("the call of the refresh");
+    assert_eq!(
+        secrets.inner.list().expect("list"),
+        Vec::<String>::new(),
+        "the new tokens are not written into a store the user emptied"
+    );
+
+    // The next look confirms the sign-out.
+    look_at_the_store_now(&provider, Duration::ZERO);
+    let before = transport.recorded_requests().len();
+    let error = provider
+        .ensure_cloud_root("/Vapor")
+        .expect_err("signed out");
+    assert_eq!(error.kind, ProviderErrorKind::Authentication);
+    assert_eq!(transport.recorded_requests().len(), before);
+    assert_eq!(secrets.inner.list().expect("list"), Vec::<String>::new());
+}
+
+#[test]
+fn a_refresh_does_not_write_an_old_sign_in_over_a_new_one() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    // The user signs in with another account while the refresh of the
+    // first one runs.
+    let other = format!(
+        r#"{{"accessToken":"ya29.other","refreshToken":"1//other","expiresAtMs":{}}}"#,
+        u64::MAX / 2
+    );
+    let secrets = Arc::new(StoreThatChanges::new(1, AtThatRead::SignIn(other.clone())));
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), 0);
+    transport.push_response(200, r#"{"access_token":"ya29.fresh","expires_in":3600}"#);
+
+    let error = provider
+        .ensure_cloud_root("/Vapor")
+        .expect_err("the tokens of the refresh belong to the sign-in that was replaced");
+    assert_eq!(error.kind, ProviderErrorKind::Transient);
+    assert_eq!(
+        secrets
+            .inner
+            .get("auth.default.gdrive.token")
+            .expect("tokens"),
+        other,
+        "the store keeps the new sign-in"
+    );
+
+    // The next call uses the new sign-in.
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("signed in");
+    assert!(
+        transport
+            .recorded_requests()
+            .last()
+            .expect("a request")
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer ya29.other")
+    );
+}
+
+#[test]
+fn a_store_that_does_not_answer_does_not_sign_the_profile_out() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    // The keychain locks after the first read.
+    let secrets = Arc::new(StoreThatChanges::new(1, AtThatRead::StopAnswering));
+    let provider = provider_signed_in_until(transport.clone(), secrets.clone(), u64::MAX / 2);
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("signed in");
+
+    for _ in 0..3 {
+        look_at_the_store_now(&provider, Duration::ZERO);
+        transport.push_response(200, ROOT_LISTING);
+        provider
+            .ensure_cloud_root("/Vapor")
+            .expect("the tokens in memory are still the sign-in");
+    }
+}
+
 #[test]
 fn upload_precondition_absent_fails_when_the_target_exists() {
     let transport = Arc::new(ScriptedHttpTransport::new());
@@ -1166,4 +1667,896 @@ fn google_native_types_are_excluded_but_folders_and_files_are_not() {
     assert!(!is_google_native_non_folder(FOLDER_MIME));
     assert!(!is_google_native_non_folder("application/pdf"));
     assert!(!is_google_native_non_folder("text/plain"));
+}
+
+fn revision(id: &str, md5: &str, modified: &str) -> GdRevision {
+    GdRevision {
+        id: id.to_string(),
+        md5_checksum: Some(md5.to_string()),
+        modified_time: Some(modified.to_string()),
+        size: Some("10".to_string()),
+    }
+}
+
+/// What the check keeps for an upload of `ours` over `base` that took
+/// one second to commit, when the file holds `head` at the time of the
+/// check and another device's upload put its tag on the file.
+fn replaced(revisions: &[GdRevision], head: &str) -> Vec<GdRevision> {
+    versions_of_the_same_moment(revisions, "base", "ours", Duration::from_secs(1), &[])
+        .into_kept(Some(head), false)
+}
+
+#[test]
+fn a_version_written_at_the_moment_of_an_upload_was_replaced_unseen() {
+    let base = revision("r0", "base", "2026-11-23T10:00:00.000Z");
+    let theirs = revision("r1", "theirs", "2026-11-23T10:00:05.100Z");
+    let ours = revision("r2", "ours", "2026-11-23T10:00:05.300Z");
+
+    // Nobody came in between: the list says so with no look at the head.
+    assert!(
+        versions_of_the_same_moment(
+            &[base.clone(), ours.clone()],
+            "base",
+            "ours",
+            Duration::from_secs(1),
+            &[]
+        )
+        .others
+        .is_empty()
+    );
+    // Another device's upload landed between the check and the commit.
+    assert_eq!(
+        replaced(&[base.clone(), theirs.clone(), ours.clone()], "ours"),
+        vec![theirs.clone()]
+    );
+    // An older version that the base itself replaced is history.
+    let older = revision("r-1", "older", "2026-11-22T09:00:00.000Z");
+    assert!(replaced(&[older, base.clone(), ours.clone()], "ours").is_empty());
+    // With no version of the base in the list, nothing can be said.
+    assert!(replaced(&[theirs.clone(), ours.clone()], "ours").is_empty());
+    // Two devices came in between, one of them twice with one content.
+    let third = revision("r1b", "third", "2026-11-23T10:00:05.200Z");
+    let theirs_again = revision("r1c", "theirs", "2026-11-23T10:00:05.250Z");
+    assert_eq!(
+        replaced(
+            &[
+                base.clone(),
+                theirs,
+                third.clone(),
+                theirs_again.clone(),
+                ours.clone()
+            ],
+            "ours"
+        ),
+        vec![third, theirs_again]
+    );
+    // An edit that another device made later, on top of this upload, is
+    // the next change of the feed.
+    let later = revision("r3", "later", "2026-11-23T10:02:00.000Z");
+    assert!(replaced(&[base, ours, later], "later").is_empty());
+}
+
+#[test]
+fn the_head_of_the_file_says_which_of_two_writes_was_replaced() {
+    // Drive gives a version its time before it commits the write. Of
+    // two writes of one moment, the one that holds the name can carry
+    // the older time and be listed first.
+    let base = revision("r0", "base", "2026-11-23T10:00:00.000Z");
+    let ours_first = revision("r1", "ours", "2026-11-23T10:00:05.100Z");
+    let theirs_last = revision("r2", "theirs", "2026-11-23T10:00:05.150Z");
+    let listed = [base.clone(), ours_first, theirs_last.clone()];
+    // This upload holds the name: the other write is the one to keep.
+    assert_eq!(replaced(&listed, "ours"), vec![theirs_last]);
+    // The other write holds the name: nothing of it is lost.
+    assert!(replaced(&listed, "theirs").is_empty());
+
+    let theirs_first = revision("r1", "theirs", "2026-11-23T10:00:05.100Z");
+    let ours_last = revision("r2", "ours", "2026-11-23T10:00:05.150Z");
+    let listed = [base.clone(), theirs_first.clone(), ours_last.clone()];
+    // Listed last, and the name holds the other write all the same:
+    // that write is not lost, and a copy of it would be a second copy
+    // of the file. The device that wrote the head keeps this upload.
+    assert!(replaced(&listed, "theirs").is_empty());
+    assert_eq!(replaced(&listed, "ours"), vec![theirs_first.clone()]);
+
+    // The check came late, and a later edit holds the name by then.
+    // What was written at the moment of this upload is still kept,
+    // on whichever side of it Drive lists it.
+    let later = revision("r3", "later", "2026-11-23T10:04:00.000Z");
+    assert_eq!(
+        replaced(
+            &[base.clone(), theirs_first.clone(), ours_last, later.clone()],
+            "later"
+        ),
+        vec![theirs_first]
+    );
+    let ours_first = revision("r1", "ours", "2026-11-23T10:00:05.100Z");
+    let theirs_last = revision("r2", "theirs", "2026-11-23T10:00:05.150Z");
+    assert_eq!(
+        replaced(&[base, ours_first, theirs_last.clone(), later], "later"),
+        vec![theirs_last]
+    );
+}
+
+#[test]
+fn an_upload_that_a_program_other_than_vapor_replaced_keeps_its_own_version() {
+    // The other write of that moment holds the name. A device that
+    // runs Vapor would keep this upload's version from its own check.
+    // The file still has the tag of this upload, so the writer was
+    // another program, and nobody else keeps the version.
+    let base = revision("r0", "base", "2026-11-23T10:00:00.000Z");
+    let ours = revision("r1", "ours", "2026-11-23T10:00:05.100Z");
+    let theirs = revision("r2", "theirs", "2026-11-23T10:00:05.400Z");
+    let listed = [base.clone(), ours.clone(), theirs.clone()];
+    let keep = |head: &str, own_tag: bool| {
+        versions_of_the_same_moment(&listed, "base", "ours", Duration::from_secs(1), &[])
+            .into_kept(Some(head), own_tag)
+    };
+    assert_eq!(keep("theirs", true), vec![ours.clone()]);
+    // The tag of another device: its check keeps this version.
+    assert!(keep("theirs", false).is_empty());
+    // This upload holds the name: its own version needs no copy.
+    assert_eq!(keep("ours", true), vec![theirs.clone()]);
+
+    // An edit that such a program made a minute later, on top of this
+    // upload, replaced nothing unseen, whatever the tag says.
+    let later = revision("r3", "later", "2026-11-23T10:01:05.100Z");
+    assert!(
+        versions_of_the_same_moment(
+            &[base, ours, later],
+            "base",
+            "ours",
+            Duration::from_secs(1),
+            &[]
+        )
+        .into_kept(Some("later"), true)
+        .is_empty()
+    );
+}
+
+#[test]
+fn the_next_saves_of_this_device_are_not_writes_of_another_one() {
+    // An editor saves a file each two seconds, and the check of the
+    // first save runs after the third landed. The saves in between are
+    // this device's own, and each replaced the one before it knowingly.
+    let base = revision("r0", "base", "2026-11-23T10:00:00.000Z");
+    let first = revision("r1", "ours", "2026-11-23T10:00:05.000Z");
+    let second = revision("r2", "second save", "2026-11-23T10:00:05.900Z");
+    let third = revision("r3", "third save", "2026-11-23T10:00:07.800Z");
+    let listed = [base, first, second.clone(), third];
+    let own_writes = ["second save".to_string(), "third save".to_string()];
+    assert!(
+        versions_of_the_same_moment(&listed, "base", "ours", Duration::from_secs(1), &own_writes)
+            .into_kept(Some("third save"), false)
+            .is_empty(),
+        "a save of this device is not kept as a replaced version"
+    );
+    // The same list from a provider that did not write those versions:
+    // the one inside the moment of the upload is another device's.
+    assert_eq!(
+        versions_of_the_same_moment(&listed, "base", "ours", Duration::from_secs(1), &[])
+            .into_kept(Some("third save"), false),
+        vec![second]
+    );
+}
+
+#[test]
+fn a_version_of_another_moment_is_history_wherever_drive_lists_it() {
+    // The version the upload replaced carries a time its writer set
+    // (Drive for desktop puts the time the file has on its disk), so
+    // every version Drive stored before it is listed after it.
+    let base = revision("r9", "base", "2019-03-01T08:00:00.000Z");
+    let last_week = revision("r1", "last week", "2026-11-16T09:00:00.000Z");
+    let yesterday = revision("r2", "yesterday", "2026-11-22T18:30:00.000Z");
+    let ours = revision("r10", "ours", "2026-11-23T10:00:05.300Z");
+    let listed = [base.clone(), last_week, yesterday, ours.clone()];
+    assert!(
+        replaced(&listed, "ours").is_empty(),
+        "the history of a file is not a set of replaced versions"
+    );
+
+    // A write that landed while this upload committed is still found
+    // among them.
+    let theirs = revision("r3", "theirs", "2026-11-23T10:00:04.900Z");
+    let mut with_a_race = listed.to_vec();
+    with_a_race.insert(3, theirs.clone());
+    assert_eq!(replaced(&with_a_race, "ours"), vec![theirs]);
+
+    // A commit that took long leaves that much room for another write.
+    let minutes_before = revision("r4", "slow", "2026-11-23T09:57:00.000Z");
+    let slow = [base.clone(), minutes_before.clone(), ours.clone()];
+    assert!(replaced(&slow, "ours").is_empty());
+    assert_eq!(
+        versions_of_the_same_moment(&slow, "base", "ours", Duration::from_secs(300), &[])
+            .into_kept(Some("ours"), false),
+        vec![minutes_before]
+    );
+
+    // A version with a time after the commit of this upload was not
+    // replaced by it: a save that came three seconds later, or a
+    // version its writer dated in the future.
+    let soon_after = revision("r5", "next", "2026-11-23T10:00:08.300Z");
+    let future = revision("r6", "future", "2031-01-01T00:00:00.000Z");
+    assert!(replaced(&[base, ours, soon_after, future], "ours").is_empty());
+}
+
+/// A guarded overwrite of `doc.txt` (file `doc-id` in the root) that
+/// lands, with the base `base-md5`.
+fn landed_overwrite(provider: &GoogleDriveProvider, transport: &ScriptedHttpTransport) -> String {
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}]}"#,
+    );
+    // The re-verification before the commit still sees the base.
+    transport.push_response(
+        200,
+        r#"{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}"#,
+    );
+    let ours = md5_hex_of_bytes(b"our edit");
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, b"our edit").expect("seed");
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: "dev-op-doc".to_string(),
+            precondition: RemotePrecondition::HashEquals("base-md5".to_string()),
+        })
+        .expect("session");
+    assert!(matches!(
+        session.step(u64::MAX).expect("the upload lands"),
+        TransferStep::Completed(_)
+    ));
+    ours
+}
+
+#[test]
+fn a_version_that_an_upload_replaced_unseen_is_kept_as_a_copy_at_the_next_poll() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    // The versions of the file: another device wrote between the
+    // re-verification and the commit.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    // The file holds this upload: the other version is the replaced one.
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#); // no copy of that name yet
+    transport.push_response(200, "their edit"); // the content of r1
+    transport.push_response(200, r#"{"id":"copy-id"}"#); // the copy is created
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[uploads_before..];
+    assert_eq!(
+        work.len(),
+        6,
+        "{:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(work[0].url.contains("/files/doc-id/revisions?"));
+    assert!(work[1].url.contains("/files/doc-id?fields="));
+    assert!(work[3].url.contains("/files/doc-id/revisions/r1?alt=media"));
+    assert_eq!(work[4].method, "POST");
+    let created = String::from_utf8_lossy(&work[4].body);
+    // 2026-11-23T10:00:05.100Z in epoch milliseconds.
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005100.txt""#),
+        "{created}"
+    );
+    assert!(
+        created.contains(r#""parents":["root-folder"]"#),
+        "{created}"
+    );
+    assert!(created.contains("their edit"));
+    assert!(work[5].url.contains("/changes?"));
+
+    // The work is done: the next poll reads the feed and nothing else.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
+    assert_eq!(transport.recorded_requests().len(), requests.len() + 1);
+}
+
+#[test]
+fn an_upload_that_replaced_only_its_base_makes_no_copy() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    assert_eq!(
+        requests.len() - uploads_before,
+        2,
+        "one check, one read of the feed"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.contains("alt=media"))
+    );
+}
+
+#[test]
+fn an_upload_that_holds_the_name_keeps_a_version_that_drive_lists_after_it() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    // Both writes landed, and this one committed second: it holds the
+    // name. Drive gave the other version the later time all the same,
+    // so nothing is listed between the base and this upload.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"8"}},
+                {{"id":"r2","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.122Z","size":"10"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[uploads_before..];
+    assert!(
+        work.iter()
+            .any(|request| request.url.contains("/files/doc-id/revisions/r2?alt=media")),
+        "the other version is read: {:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    let created = work
+        .iter()
+        .find(|request| request.method == "POST")
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .expect("the other version is kept as a copy");
+    // 2026-11-23T10:00:05.122Z in epoch milliseconds.
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005122.txt""#),
+        "{created}"
+    );
+    assert!(created.contains("their edit"));
+}
+
+/// One more guarded overwrite of `doc.txt` by the same provider:
+/// `content` over the version with the checksum `base`. `commit` is
+/// the answer of the request that writes.
+fn overwrite_again(
+    provider: &GoogleDriveProvider,
+    transport: &ScriptedHttpTransport,
+    base: &str,
+    content: &[u8],
+    op_id: &str,
+    commit: (u16, String),
+) -> Result<TransferStep, ProviderError> {
+    let current = format!(
+        r#"{{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"{base}","size":"4","parents":["root-folder"]}}"#
+    );
+    transport.push_response(200, current.clone()); // the file the path names
+    transport.push_response(200, current); // the re-verification
+    transport.push_response(commit.0, commit.1);
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, content).expect("seed");
+    provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: op_id.to_string(),
+            precondition: RemotePrecondition::HashEquals(base.to_string()),
+        })
+        .expect("session")
+        .step(u64::MAX)
+}
+
+#[test]
+fn the_next_saves_of_this_device_make_no_copies() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // An editor saves three times inside one poll of the feed.
+    let first = landed_overwrite(&provider, &transport);
+    let second = md5_hex_of_bytes(b"second save");
+    let third = md5_hex_of_bytes(b"third save");
+    for (base, content, md5) in [
+        (&first, &b"second save"[..], &second),
+        (&second, &b"third save"[..], &third),
+    ] {
+        let step = overwrite_again(
+            &provider,
+            &transport,
+            base,
+            content,
+            "dev-op-next",
+            (200, format!(r#"{{"id":"doc-id","md5Checksum":"{md5}"}}"#)),
+        );
+        assert!(matches!(step, Ok(TransferStep::Completed(_))));
+    }
+    let uploads_before = transport.recorded_requests().len();
+
+    // Each of the three checks reads the same list. The versions after
+    // an upload are this device's own.
+    let versions = format!(
+        r#"{{"revisions":[
+            {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+            {{"id":"r1","md5Checksum":"{first}","modifiedTime":"2026-11-23T10:00:05.000Z","size":"8"}},
+            {{"id":"r2","md5Checksum":"{second}","modifiedTime":"2026-11-23T10:00:05.900Z","size":"11"}},
+            {{"id":"r3","md5Checksum":"{third}","modifiedTime":"2026-11-23T10:00:06.700Z","size":"10"}}
+        ]}}"#
+    );
+    for _ in 0..3 {
+        transport.push_response(200, versions.clone());
+    }
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[uploads_before..];
+    assert_eq!(
+        work.len(),
+        4,
+        "three lists and the feed: {:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(
+        !work
+            .iter()
+            .any(|request| request.method == "POST" || request.url.contains("alt=media")),
+        "a save of this device is not kept as a replaced version"
+    );
+}
+
+#[test]
+fn an_upload_that_another_program_replaced_keeps_its_own_version() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    // A program that is not Vapor wrote at the same moment and its
+    // write committed second. It does not look at what it replaces,
+    // and it leaves the tag of this upload on the file.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"8"}},
+                {{"id":"r2","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.400Z","size":"10"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"id":"doc-id","md5Checksum":"{theirs}","appProperties":{{"vaporOpId":"dev-op-doc"}}}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "our edit"); // the content of r1
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[uploads_before..];
+    assert!(
+        work.iter()
+            .any(|request| request.url.contains("/files/doc-id/revisions/r1?alt=media")),
+        "the version of this upload is read: {:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    let created = work
+        .iter()
+        .find(|request| request.method == "POST")
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .expect("the version of this upload is kept as a copy");
+    // 2026-11-23T10:00:05.100Z in epoch milliseconds.
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005100.txt""#),
+        "{created}"
+    );
+    assert!(created.contains("our edit"));
+}
+
+#[test]
+fn a_device_that_runs_vapor_and_holds_the_name_is_left_to_keep_the_other_version() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    // The same versions, and the file carries the tag of another
+    // upload: a device that runs Vapor wrote the head, and its check
+    // keeps the version of this one.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"8"}},
+                {{"id":"r2","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.400Z","size":"10"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"id":"doc-id","md5Checksum":"{theirs}","appProperties":{{"vaporOpId":"other-device-op"}}}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    let requests = transport.recorded_requests();
+    assert_eq!(
+        requests.len() - uploads_before,
+        3,
+        "the versions, the head, the feed"
+    );
+}
+
+#[test]
+fn a_commit_whose_answer_is_lost_still_gets_its_check() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // The write lands, and its answer does not come.
+    let ours = md5_hex_of_bytes(b"our edit");
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}]}"#,
+    );
+    transport.push_response(
+        200,
+        r#"{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}"#,
+    );
+    transport.push_response(503, "");
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, b"our edit").expect("seed");
+    let error = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: "dev-op-doc".to_string(),
+            precondition: RemotePrecondition::HashEquals("base-md5".to_string()),
+        })
+        .expect("session")
+        .step(u64::MAX)
+        .expect_err("no answer");
+    assert_eq!(error.kind, ProviderErrorKind::Transient);
+
+    // The retry of the engine finds its own bytes in the cloud and
+    // sends nothing, so this check is the only one. Another device
+    // wrote between the look and the write.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert!(
+        transport.recorded_requests().iter().any(|request| {
+            request.method == "POST"
+                && String::from_utf8_lossy(&request.body).contains("their edit")
+        }),
+        "the version that the lost commit replaced is kept"
+    );
+
+    // A commit that did not land leaves a check that finds no version
+    // of it and ends: one request.
+    let unsent = overwrite_again(
+        &provider,
+        &transport,
+        &ours,
+        b"never stored",
+        "dev-op-later",
+        (503, String::new()),
+    );
+    assert!(unsent.is_err());
+    let before = transport.recorded_requests().len();
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(transport.recorded_requests().len() - before, 2);
+}
+
+#[test]
+fn a_head_that_cannot_be_read_is_asked_again_and_a_file_that_is_gone_ends_the_check() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let theirs = md5_hex_of_bytes(b"their edit");
+    let versions = format!(
+        r#"{{"revisions":[
+            {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+            {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+            {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+        ]}}"#
+    );
+
+    // The cloud does not answer the question about the head: the check
+    // stays, and the feed is read all the same.
+    transport.push_response(200, versions.clone());
+    transport.push_response(503, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    // At the next poll the file is gone: nothing is left to keep, and
+    // the check ends.
+    transport.push_response(200, versions);
+    transport.push_response(404, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t4"}"#);
+    provider.poll_changes(Some("t3"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+    assert!(
+        !transport
+            .recorded_requests()
+            .iter()
+            .any(|request| request.method == "POST" && request.url.contains("uploadType=multipart")),
+        "no copy was made"
+    );
+}
+
+#[test]
+fn an_upload_that_another_write_replaced_makes_no_copy_of_the_file() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    // Both writes landed. Drive lists this upload last, and the name
+    // holds the other write: its commit came second.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.150Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(
+        200,
+        format!(r#"{{"id":"doc-id","md5Checksum":"{theirs}"}}"#),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    assert_eq!(
+        requests.len() - uploads_before,
+        3,
+        "the versions, the head, the feed"
+    );
+    assert!(
+        !requests[uploads_before..]
+            .iter()
+            .any(|request| request.method == "POST" || request.url.contains("alt=media")),
+        "the head of the file is not a replaced version"
+    );
+}
+
+#[test]
+fn a_check_that_fails_is_tried_again_and_a_copy_that_is_there_is_not_made_twice() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+
+    // The first poll cannot read the versions.
+    transport.push_response(503, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider
+        .poll_changes(Some("t1"), 100)
+        .expect("the feed is read all the same");
+
+    // The second can, and another device kept the version already.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain","md5Checksum":"{theirs}"}}]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    let before = transport.recorded_requests().len();
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    assert_eq!(
+        requests.len() - before,
+        4,
+        "the versions, the head, the name, the feed"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.contains("alt=media"))
+    );
+    assert!(
+        !requests[before..]
+            .iter()
+            .any(|request| request.method == "POST")
+    );
+}
+
+#[test]
+fn a_check_waits_through_an_outage_of_any_length() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+
+    // The cloud cannot be reached for far more polls than the check
+    // has tries: an outage spends none of them.
+    for _ in 0..(REPLACED_WORK_ATTEMPTS * 3) {
+        transport.push_response(503, "");
+        transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+        provider
+            .poll_changes(Some("t1"), 100)
+            .expect("the feed is read");
+    }
+
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+
+    assert!(
+        transport.recorded_requests().iter().any(|request| {
+            request.method == "POST"
+                && request.url.contains("uploadType=multipart")
+                && String::from_utf8_lossy(&request.body).contains("their edit")
+        }),
+        "the replaced version is kept when the cloud is back"
+    );
+}
+
+#[test]
+fn a_large_replaced_version_is_copied_one_chunk_for_each_poll() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let size = CHUNK_START + 1000;
+
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"big-md5","modifiedTime":"2026-11-23T10:00:05.100Z","size":"{size}"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/copy-session".to_string(),
+        )],
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("first poll");
+
+    // One step of the copy for each poll: the bytes are outside the
+    // budgets of the engine, and the feed must not wait for them.
+    transport.push_response(206, vec![1_u8; CHUNK_START as usize]); // the first range
+    transport.push_response(308, ""); // accepted, not the end
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
+
+    transport.push_response(206, vec![1_u8; 1000]); // the rest
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("third poll");
+
+    let requests = transport.recorded_requests();
+    let ranges: Vec<&str> = requests
+        .iter()
+        .flat_map(|request| request.headers.iter())
+        .filter(|(name, _)| name == "Content-Range")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(
+        ranges,
+        vec![
+            format!("bytes 0-{}/{size}", CHUNK_START - 1).as_str(),
+            format!("bytes {CHUNK_START}-{}/{size}", size - 1).as_str(),
+        ]
+    );
+    // Nothing is left to do.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t4"}"#);
+    let before = transport.recorded_requests().len();
+    provider.poll_changes(Some("t3"), 100).expect("third poll");
+    assert_eq!(transport.recorded_requests().len(), before + 1);
 }

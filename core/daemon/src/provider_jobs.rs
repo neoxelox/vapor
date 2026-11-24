@@ -74,6 +74,59 @@ pub(crate) struct JobContext {
     pub provider: Arc<dyn Provider>,
     pub bandwidth: Arc<crate::bandwidth::TransferBandwidth>,
     pub clock: Arc<dyn Clock>,
+    pub root_identity: Arc<RootIdentityReads>,
+}
+
+/// The reads of the cloud root's identity that the workers of one pool
+/// make, shared. Each deletion from the cloud needs the identity read
+/// after the call that found its object gone. A burst of a thousand
+/// deletions does not need a thousand reads for that: one read that
+/// started after a worker's own call returned says the same thing to
+/// that worker. On Google Drive a read is one request for each part of
+/// the cloud root's path.
+#[derive(Default)]
+pub(crate) struct RootIdentityReads {
+    last: Mutex<Option<SharedIdentityRead>>,
+}
+
+struct SharedIdentityRead {
+    cloud_root: String,
+    started: std::time::Instant,
+    answer: CloudRootIdentity,
+}
+
+impl RootIdentityReads {
+    /// The identity of `cloud_root`, read no earlier than `not_before`
+    /// (the moment the caller learned that its object is gone). A read
+    /// that another worker started after that moment is reused; else
+    /// this worker reads, while the others that need one wait for it.
+    /// A read that failed is never reused.
+    pub fn read_after(
+        &self,
+        provider: &dyn Provider,
+        cloud_root: &str,
+        not_before: std::time::Instant,
+    ) -> CloudRootIdentity {
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(read) = last.as_ref()
+            && read.cloud_root == cloud_root
+            && read.started >= not_before
+            && read.answer.is_ok()
+        {
+            return read.answer.clone();
+        }
+        let started = std::time::Instant::now();
+        let answer = provider.root_identity(cloud_root);
+        *last = Some(SharedIdentityRead {
+            cloud_root: cloud_root.to_string(),
+            started,
+            answer: answer.clone(),
+        });
+        answer
+    }
 }
 
 pub(crate) use crate::bandwidth::TransferDirection;
@@ -116,6 +169,10 @@ pub(crate) struct ProbeRequest {
     /// deletion applies to a local file only while the file holds the
     /// bytes last synced, and the tick thread reads no file.
     pub local_hashes_if_absent: Option<crate::local_hash::TouchedFileCheck>,
+    /// A second object to stat: the name a cloud-side move would have
+    /// left. A new object that has a synced twin is a move only when
+    /// the twin's own object is gone; with both there, it is a copy.
+    pub stat_also: Option<RemotePath>,
     /// The cloud root to read the identity of, after the stat and only
     /// when the stat found no object (or none was asked for): "no
     /// object" is a deletion only in the folder the profile adopted. A
@@ -131,6 +188,8 @@ pub(crate) struct ProbeResult {
     pub stat: Option<Result<Option<RemoteEntry>, ProviderError>>,
     /// `Some` only when a hash fetch was attempted.
     pub content_hash: Option<Result<String, ProviderError>>,
+    /// The stat of `stat_also`, when the request named one.
+    pub also_stat: Option<Result<Option<RemoteEntry>, ProviderError>>,
     /// `Some` only when a subtree listing was requested and the stat
     /// reported a directory. Entries are ordered parents before
     /// children; the listing is capped at [`SUBTREE_LISTING_CAP`].
@@ -168,6 +227,11 @@ pub(crate) enum ProviderJobKind {
         from: RemotePath,
         to: RemotePath,
         op_id: String,
+        /// `Some` when the caller acts on a source that is not there:
+        /// the worker then reads the identity of this cloud root, so
+        /// that "no such object" from a root that was swapped or
+        /// unmounted is not taken for the word of the adopted one.
+        cloud_root_if_missing: Option<String>,
     },
     /// `begin_upload` + step loop.
     Upload(UploadRequest),
@@ -191,10 +255,14 @@ pub(crate) enum ProviderJobKind {
     /// The content hash of a local file before its upload: disk reads
     /// and digest work that must not run on the tick thread.
     Hash(crate::executor::StreamingFileHash),
+    /// Local disk work that reads file content and belongs on no tick:
+    /// the copy of a discarded file to a trash on another volume.
+    LocalWork(Box<dyn FnOnce() -> Result<(), String> + Send>),
 }
 
 pub(crate) enum ProviderJobOutcome {
-    Probe(ProbeResult),
+    /// Boxed: by far the largest outcome.
+    Probe(Box<ProbeResult>),
     RemoteDelete(Result<(), ProviderError>),
     Move(Result<(), ProviderError>),
     /// Session held at its checkpoint: a gate closed or the bandwidth
@@ -215,12 +283,20 @@ pub(crate) enum ProviderJobOutcome {
     },
     /// The local file is hashed (or could not be read).
     Hashed(std::io::Result<String>),
+    /// What a [`ProviderJobKind::LocalWork`] job answered.
+    LocalWork(Result<(), String>),
     /// Hashing stopped at a step boundary because the throttle no
     /// longer allows it; the executor dispatches it again when it does.
     HashHeld(crate::executor::StreamingFileHash),
     /// A download found no object to fetch, and its job asked for the
     /// identity of the cloud root in that case.
     DownloadSourceMissing {
+        cloud_root_identity: CloudRootIdentity,
+    },
+    /// A move found no object under its old name, and its job asked
+    /// for the identity of the cloud root in that case.
+    MoveSourceMissing {
+        error: ProviderError,
         cloud_root_identity: CloudRootIdentity,
     },
     /// The session (or its begin call) failed; any session was already
@@ -584,14 +660,34 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
                 gates.generation.load(Ordering::SeqCst) == generation
                     && gates.allow_hashing.load(Ordering::Relaxed)
             };
-            ProviderJobOutcome::Probe(run_probe(&context, request, &may_hash))
+            ProviderJobOutcome::Probe(Box::new(run_probe(&context, request, &may_hash)))
         }
         ProviderJobKind::RemoteDelete { remote_path, op_id } => {
             ProviderJobOutcome::RemoteDelete(context.provider.delete(&remote_path, &op_id))
         }
-        ProviderJobKind::Move { from, to, op_id } => {
-            ProviderJobOutcome::Move(context.provider.move_object(&from, &to, &op_id))
-        }
+        ProviderJobKind::Move {
+            from,
+            to,
+            op_id,
+            cloud_root_if_missing,
+        } => match (
+            context.provider.move_object(&from, &to, &op_id),
+            cloud_root_if_missing,
+        ) {
+            (Err(error), Some(cloud_root))
+                if error.kind == vapor_shared::ProviderErrorKind::NotFound =>
+            {
+                ProviderJobOutcome::MoveSourceMissing {
+                    error,
+                    cloud_root_identity: context.root_identity.read_after(
+                        context.provider.as_ref(),
+                        &cloud_root,
+                        std::time::Instant::now(),
+                    ),
+                }
+            }
+            (result, _) => ProviderJobOutcome::Move(result),
+        },
         ProviderJobKind::Hash(mut hasher) => loop {
             if gates.generation.load(Ordering::SeqCst) != generation {
                 break ProviderJobOutcome::Cancelled;
@@ -605,6 +701,7 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
                 Err(error) => break ProviderJobOutcome::Hashed(Err(error)),
             }
         },
+        ProviderJobKind::LocalWork(work) => ProviderJobOutcome::LocalWork(work()),
         ProviderJobKind::Upload(request) => match context.provider.begin_upload(request) {
             Ok(session) => run_transfer(
                 &context,
@@ -636,7 +733,11 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
             Err(error) => match cloud_root_if_missing {
                 Some(cloud_root) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
                     ProviderJobOutcome::DownloadSourceMissing {
-                        cloud_root_identity: context.provider.root_identity(&cloud_root),
+                        cloud_root_identity: context.root_identity.read_after(
+                            context.provider.as_ref(),
+                            &cloud_root,
+                            std::time::Instant::now(),
+                        ),
                     }
                 }
                 _ => ProviderJobOutcome::TransferFailed {
@@ -684,6 +785,7 @@ fn run_probe(
     let stat = request
         .want_stat
         .then(|| context.provider.stat(&request.remote_path));
+    let stat_done = std::time::Instant::now();
     let fetch_hash = match &request.hash {
         ProbeHash::Never => false,
         ProbeHash::Always => true,
@@ -695,6 +797,10 @@ fn run_probe(
         },
     };
     let content_hash = fetch_hash.then(|| context.provider.content_hash(&request.remote_path));
+    let also_stat = request
+        .stat_also
+        .as_ref()
+        .map(|path| context.provider.stat(path));
     let subtree = match (&stat, request.want_subtree_listing) {
         (Some(Ok(Some(entry))), true)
             if entry.kind == vapor_providers::RemoteEntryKind::Directory =>
@@ -706,21 +812,31 @@ fn run_probe(
         }
         _ => None,
     };
-    let local_hashes = match (&stat, &request.local_hashes_if_absent) {
-        (Some(Ok(None)), Some(check)) => check.run(may_hash),
+    // A folder under the name is "no object" too for a caller that
+    // asks about a file it synced: the file is gone, and a folder has
+    // its name.
+    let file_is_gone = matches!(&stat, Some(Ok(None)))
+        || (request.local_hashes_if_absent.is_some()
+            && matches!(&stat, Some(Ok(Some(entry)))
+                if entry.kind == vapor_providers::RemoteEntryKind::Directory));
+    let local_hashes = match &request.local_hashes_if_absent {
+        Some(check) if file_is_gone => check.run(may_hash),
         _ => crate::local_hash::LocalHashes::default(),
     };
     // After the stat: a root swapped between the two calls is caught,
     // which the other order would miss.
-    let cloud_root_identity = match (&stat, &request.cloud_root_identity_of) {
-        (None | Some(Ok(None)), Some(cloud_root)) => {
-            Some(context.provider.root_identity(cloud_root))
-        }
+    let cloud_root_identity = match &request.cloud_root_identity_of {
+        Some(cloud_root) if stat.is_none() || file_is_gone => Some(
+            context
+                .root_identity
+                .read_after(context.provider.as_ref(), cloud_root, stat_done),
+        ),
         _ => None,
     };
     ProbeResult {
         stat,
         content_hash,
+        also_stat,
         subtree,
         local_hashes,
         cloud_root_identity,
@@ -991,11 +1107,63 @@ mod tests {
         }
     }
 
+    /// Counts the identity reads a provider serves.
+    struct CountingIdentity {
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[test]
+    fn one_identity_read_serves_every_worker_whose_call_returned_before_it_started() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = temp.path().join("cloud");
+        std::fs::create_dir_all(&root).expect("root");
+        let provider = vapor_providers::FilesystemProvider::with_root(&root).expect("provider");
+        let text = root.to_string_lossy().into_owned();
+        provider.adopt_root(&text, "testdev").expect("adopt");
+        let counted = CountingIdentity {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let reads = RootIdentityReads::default();
+        let read = |not_before: std::time::Instant| {
+            let before = reads
+                .last
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .map(|last| last.started);
+            let answer = reads.read_after(&provider, &text, not_before);
+            let after = reads
+                .last
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .map(|last| last.started);
+            if before != after {
+                counted.reads.fetch_add(1, Ordering::SeqCst);
+            }
+            answer
+        };
+
+        // Two workers learned "gone" before any read started: one read.
+        let learned = std::time::Instant::now();
+        let first = read(learned).expect("identity");
+        let second = read(learned).expect("identity");
+        assert_eq!(first, second);
+        assert_eq!(counted.reads.load(Ordering::SeqCst), 1);
+
+        // A worker that learned it after that read needs a newer one: a
+        // root swapped in between must not be vouched for by the old
+        // answer.
+        read(std::time::Instant::now()).expect("identity");
+        assert_eq!(counted.reads.load(Ordering::SeqCst), 2);
+    }
+
     fn context(provider: Arc<dyn Provider>) -> JobContext {
         JobContext {
             provider,
             bandwidth: Arc::default(),
             clock: Arc::new(SystemClock),
+            root_identity: Arc::default(),
         }
     }
 
@@ -1235,6 +1403,7 @@ mod tests {
                 want_stat: true,
                 hash: ProbeHash::Never,
                 want_subtree_listing: false,
+                stat_also: None,
                 local_hashes_if_absent: None,
                 cloud_root_identity_of: None,
             }),

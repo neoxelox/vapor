@@ -38,6 +38,11 @@ impl ServiceInstaller for NativeServiceInstaller {
             "Windows ServiceInstaller is not implemented yet",
         ))
     }
+    fn kill_daemon(&self) -> Result<(), ServiceInstallError> {
+        Err(ServiceInstallError::Unsupported(
+            "Windows ServiceInstaller is not implemented yet",
+        ))
+    }
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {
         Ok(ServiceStatus::NotInstalled)
     }

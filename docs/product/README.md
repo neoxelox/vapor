@@ -27,6 +27,9 @@ status.
 - `configuration.md`: every `vapor.json` key in detail: when a change
   applies, the edge cases and floors, and how profiles merge. The root
   `README.md` keeps the one-table summary.
+- `what-syncs.md`: what arrives on the other side and what does not
+  (symbolic links, empty folders, the holes of a sparse file), with
+  what a user sees and the reason for each.
 - `ignore-rules.md`: which files stay out of sync: the four sources of
   rules and their precedence, how a rule is read, the built-in list,
   what no rule can change, and `vapor ignored`. The root `README.md`

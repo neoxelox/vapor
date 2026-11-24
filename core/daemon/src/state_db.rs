@@ -11,7 +11,7 @@ use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 
 /// Before GA there is no migration: a database of any other version is
 /// set aside by the daemon and rebuilt from a whole-scope reconcile.
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 /// How long a database that was set aside (corrupt, or of another
 /// schema version) stays on disk for inspection.
 const QUARANTINE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -374,7 +374,10 @@ impl DurableStateDb {
         kind: PendingIntentKind,
     ) -> Result<Vec<PathBuf>, StateDbError> {
         let mut statement = self.connection.prepare(
-            "SELECT path_text FROM queue_intents WHERE kind = ? AND state IN (?, ?) LIMIT 256",
+            // The newest rows: the create half of a rename is queued
+            // within moments of the deletion that asks.
+            "SELECT path_text FROM queue_intents WHERE kind = ? AND state IN (?, ?)
+             ORDER BY id DESC LIMIT 256",
         )?;
         let rows = statement.query_map(
             params![intent_kind_label(kind), STATE_PENDING, STATE_LEASED],
@@ -663,6 +666,75 @@ impl DurableStateDb {
         Ok(changed > 0)
     }
 
+    /// Makes every retry at `path` or under it due now: the user gave
+    /// an answer about that path, and the work it stopped goes on.
+    pub fn wake_retries_under(
+        &mut self,
+        path: &Path,
+        now: SystemTime,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(path)?;
+        Ok(self.connection.execute(
+            &format!(
+                "UPDATE queue_intents SET available_at_ms = ?1
+                 WHERE (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4)) AND {}",
+                waiting_retry_predicate()
+            ),
+            params![
+                system_time_to_millis(now)?,
+                path_to_text(path)?,
+                lower,
+                upper
+            ],
+        )?)
+    }
+
+    /// Makes every retry due now: the user asked for a sync.
+    pub fn wake_all_retries(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
+        Ok(self.connection.execute(
+            &format!(
+                "UPDATE queue_intents SET available_at_ms = ?1 WHERE {}",
+                waiting_retry_predicate()
+            ),
+            params![system_time_to_millis(now)?],
+        )?)
+    }
+
+    /// Queued intents that keep failing: at least
+    /// `BLOCKED_AFTER_ATTEMPTS` tries, with the reason of the last one.
+    /// They are not work in progress, and the status counts them apart.
+    pub fn blocked_depth(&self) -> Result<usize, StateDbError> {
+        let count: i64 = self.connection.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM queue_intents WHERE {}",
+                blocked_predicate()
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// The first `limit` blocked intents, oldest first.
+    pub fn blocked_intents(&self, limit: usize) -> Result<Vec<DurableIntentRecord>, StateDbError> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT id FROM queue_intents WHERE {} ORDER BY id LIMIT ?",
+            blocked_predicate()
+        ))?;
+        let ids: Vec<i64> = statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(record) = self.intent_record(id)? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
     /// Ends the wait of every upload that waits for room in the cloud:
     /// each one that is due later than `now` is due now. Returns how
     /// many were waiting. The stored error is what marks such a row,
@@ -780,12 +852,14 @@ impl DurableStateDb {
                  available_at_ms = ?,
                  leased_at_ms = NULL,
                  last_error = ?,
-                 attempt_count = attempt_count + 1
+                 attempt_count = attempt_count + 1,
+                 last_attempt_at_ms = ?
              WHERE id = ? AND state = ?",
             params![
                 STATE_PENDING,
                 available_at_ms,
                 Some(sanitize_persisted_error(last_error)),
+                system_time_to_millis(now)?,
                 id,
                 STATE_LEASED
             ],
@@ -1089,6 +1163,9 @@ impl DurableStateDb {
     /// promotes that row out of the backlog class instead of inheriting
     /// its starvation.
     ///
+    /// A row that is held behind a decision coalesces too: nothing is
+    /// inserted next to it.
+    ///
     /// Returns the number of rows actually inserted.
     pub fn enqueue_intents_coalesced(
         &mut self,
@@ -1119,6 +1196,25 @@ impl DurableStateDb {
         let mut inserted = 0usize;
         for (path, kind, observed_at) in intents {
             let path_text = path_to_text(path)?;
+            // A row held behind a decision stands for every later
+            // intent of its path and kind: the question that holds it
+            // covers them, and a scan that finds the same deletion
+            // again adds nothing. An intent that carries the user's
+            // own answer is not covered by an older question.
+            if approval == Approval::None
+                && transaction
+                    .query_row(
+                        "SELECT 1 FROM queue_intents
+                         WHERE path_text = ? AND kind = ? AND state = ?
+                         LIMIT 1",
+                        params![path_text, intent_kind_label(*kind), STATE_HELD],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some()
+            {
+                continue;
+            }
             let existing_pending = transaction
                 .query_row(
                     "SELECT id, priority_rank FROM queue_intents
@@ -1129,6 +1225,9 @@ impl DurableStateDb {
                 )
                 .optional()?;
             if let Some((existing_id, existing_rank)) = existing_pending {
+                if source == crate::safeguards::IntentSource::Fresh {
+                    wake_retries_of(&transaction, &path_text, *observed_at)?;
+                }
                 let new_rank = i64::from(crate::safeguards::durable_intent_priority_rank(
                     path, *kind, source,
                 ));
@@ -1139,6 +1238,9 @@ impl DurableStateDb {
                     )?;
                 }
                 continue;
+            }
+            if source == crate::safeguards::IntentSource::Fresh {
+                wake_retries_of(&transaction, &path_text, *observed_at)?;
             }
             let id = insert_intent(
                 &transaction,
@@ -1242,26 +1344,50 @@ impl DurableStateDb {
     ) -> Result<(), StateDbError> {
         let local_modified_at_ms = local_modified_at.map(system_time_to_millis).transpose()?;
         let remote_modified_at_ms = remote_modified_at.map(system_time_to_millis).transpose()?;
+        let path_text = path_to_text(path)?;
         self.connection.execute(
             "INSERT INTO sync_index
-                 (path_text, content_hash, size_bytes, local_modified_at_ms,
+                 (path_text, fold_key, content_hash, size_bytes, local_modified_at_ms,
                   remote_modified_at_ms, last_op_id, updated_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(path_text) DO UPDATE SET
                  content_hash = excluded.content_hash,
                  size_bytes = excluded.size_bytes,
                  local_modified_at_ms = excluded.local_modified_at_ms,
                  remote_modified_at_ms = excluded.remote_modified_at_ms,
                  last_op_id = excluded.last_op_id,
-                 updated_at_ms = excluded.updated_at_ms",
+                 updated_at_ms = excluded.updated_at_ms,
+                 hidden_since_ms = NULL",
             params![
-                path_to_text(path)?,
+                path_text,
+                vapor_shared::paths::fold_name(&path_text),
                 content_hash,
                 i64::try_from(size_bytes).unwrap_or(i64::MAX),
                 local_modified_at_ms,
                 remote_modified_at_ms,
                 last_op_id,
                 system_time_to_millis(now)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Records what the cloud object of `path` looks like now, for a row
+    /// whose content did not change: the object was touched, or written
+    /// again with the same bytes. The content, the local side, and the
+    /// time of the last sync stay as they are.
+    pub fn set_sync_index_remote_state(
+        &mut self,
+        path: &Path,
+        remote_modified_at: SystemTime,
+        last_op_id: &str,
+    ) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "UPDATE sync_index SET remote_modified_at_ms = ?, last_op_id = ? WHERE path_text = ?",
+            params![
+                system_time_to_millis(remote_modified_at)?,
+                last_op_id,
+                path_to_text(path)?
             ],
         )?;
         Ok(())
@@ -1389,8 +1515,8 @@ impl DurableStateDb {
         if moved {
             transaction.execute("DELETE FROM sync_index WHERE path_text = ?", params![to])?;
             transaction.execute(
-                "UPDATE sync_index SET path_text = ? WHERE path_text = ?",
-                params![to, from],
+                "UPDATE sync_index SET path_text = ?, fold_key = ? WHERE path_text = ?",
+                params![to, vapor_shared::paths::fold_name(&to), from],
             )?;
         }
         transaction.commit()?;
@@ -1411,13 +1537,146 @@ impl DurableStateDb {
                  WHERE path_text >= ?3 AND path_text < ?4)",
             params![to, lower.chars().count() as i64 + 1, lower, upper],
         )?;
+        // A path separator composes with nothing, so the folded key of
+        // a path is the folded prefix followed by the folded rest.
+        let folded_to = vapor_shared::paths::fold_name(&to);
+        let folded_from_chars = vapor_shared::paths::fold_name(&lower).chars().count() as i64;
         transaction.execute(
-            "UPDATE sync_index SET path_text = ?1 || substr(path_text, ?2)
+            "UPDATE sync_index SET path_text = ?1 || substr(path_text, ?2),
+                                   fold_key = ?5 || substr(fold_key, ?6)
              WHERE path_text >= ?3 AND path_text < ?4",
-            params![to, lower.chars().count() as i64 + 1, lower, upper],
+            params![
+                to,
+                lower.chars().count() as i64 + 1,
+                lower,
+                upper,
+                folded_to,
+                folded_from_chars + 1
+            ],
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// A synced path that is another spelling of `path`, or lies under
+    /// another spelling of it: the names fold together and the text
+    /// differs. `None` when every row at and under `path` is spelled as
+    /// `path` is, and when there is none.
+    pub fn sync_index_row_spelled_otherwise(
+        &self,
+        path: &Path,
+    ) -> Result<Option<PathBuf>, StateDbError> {
+        let path_text = path_to_text(path)?;
+        let folded = vapor_shared::paths::fold_name(&path_text);
+        let twin: Option<String> = self
+            .connection
+            .prepare_cached(
+                "SELECT path_text FROM sync_index WHERE fold_key = ?1 AND path_text <> ?2 LIMIT 1",
+            )?
+            .query_row(params![folded, path_text], |row| row.get(0))
+            .optional()?;
+        if let Some(twin) = twin {
+            return Ok(Some(path_from_text(twin)));
+        }
+        let (lower, upper) = rows_under_bounds(path)?;
+        let (folded_lower, folded_upper) = rows_under_bounds(Path::new(&folded))?;
+        let below: Option<String> = self
+            .connection
+            .prepare_cached(
+                "SELECT path_text FROM sync_index
+                 WHERE fold_key >= ?1 AND fold_key < ?2
+                   AND NOT (path_text >= ?3 AND path_text < ?4)
+                 LIMIT 1",
+            )?
+            .query_row(params![folded_lower, folded_upper, lower, upper], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(below.map(path_from_text))
+    }
+
+    /// Marks the row of `path`, and every row under it, as hidden by an
+    /// ignore rule since `at`. While a rule hides a path nothing watches
+    /// it, so the row no longer says what this device did to the file:
+    /// a file that is gone when the rule goes was removed in that time,
+    /// and that is not a deletion to carry to the cloud. The mark goes
+    /// when a transfer writes the row again, or when a walk finds the
+    /// file here with no rule on it.
+    pub fn mark_sync_index_hidden(
+        &mut self,
+        path: &Path,
+        at: SystemTime,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(path)?;
+        Ok(self.connection.execute(
+            "UPDATE sync_index SET hidden_since_ms = ?1
+             WHERE hidden_since_ms IS NULL
+               AND (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4))",
+            params![
+                system_time_to_millis(at)?,
+                path_to_text(path)?,
+                lower,
+                upper
+            ],
+        )?)
+    }
+
+    /// Whether the row of `path` carries the mark of
+    /// [`Self::mark_sync_index_hidden`].
+    pub fn sync_index_was_hidden(&self, path: &Path) -> Result<bool, StateDbError> {
+        Ok(self
+            .connection
+            .prepare_cached(
+                "SELECT 1 FROM sync_index WHERE path_text = ? AND hidden_since_ms IS NOT NULL",
+            )?
+            .query_row(params![path_to_text(path)?], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// The files directly in `directory` whose rows carry that mark.
+    pub fn sync_index_hidden_files_in(
+        &self,
+        directory: &Path,
+    ) -> Result<Vec<String>, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT substr(path_text, ?3) FROM sync_index
+             WHERE hidden_since_ms IS NOT NULL
+               AND path_text >= ?1 AND path_text < ?2
+               AND instr(substr(path_text, ?3), ?4) = 0",
+        )?;
+        let names = statement
+            .query_map(
+                params![
+                    lower,
+                    upper,
+                    i64::try_from(lower.chars().count() + 1).unwrap_or(i64::MAX),
+                    std::path::MAIN_SEPARATOR.to_string()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
+    /// Takes that mark off the row of `path`.
+    pub fn clear_sync_index_hidden(&mut self, path: &Path) -> Result<usize, StateDbError> {
+        Ok(self.connection.execute(
+            "UPDATE sync_index SET hidden_since_ms = NULL
+             WHERE path_text = ? AND hidden_since_ms IS NOT NULL",
+            params![path_to_text(path)?],
+        )?)
+    }
+
+    /// Removes the row of `path` and every row under it.
+    pub fn remove_sync_index_tree(&mut self, path: &Path) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(path)?;
+        Ok(self.connection.execute(
+            "DELETE FROM sync_index
+             WHERE path_text = ?1 OR (path_text >= ?2 AND path_text < ?3)",
+            params![path_to_text(path)?, lower, upper],
+        )?)
     }
 
     /// Whether any synced file lies under the folder `directory`.
@@ -1593,6 +1852,55 @@ impl DurableStateDb {
     }
 }
 
+/// Rows that are blocked, as SQL: pending, failed at least
+/// `BLOCKED_AFTER_ATTEMPTS` times, with a reason, and not an upload
+/// that waits for room in the cloud (the status says that on its own).
+fn blocked_predicate() -> String {
+    format!(
+        "state = '{STATE_PENDING}' AND attempt_count >= {} AND last_error IS NOT NULL
+         AND substr(last_error, 1, {}) <> '{}'",
+        constants::state::BLOCKED_AFTER_ATTEMPTS,
+        constants::engine::CLOUD_FULL_WAIT_PREFIX.len(),
+        constants::engine::CLOUD_FULL_WAIT_PREFIX.replace('\'', "''")
+    )
+}
+
+/// Rows that wait in a retry backoff, as SQL: pending, not due, failed
+/// before, and not an upload that waits for room in the cloud (that
+/// wait has its own end).
+fn waiting_retry_predicate() -> String {
+    format!(
+        "state = '{STATE_PENDING}' AND attempt_count > 0 AND available_at_ms > ?1
+         AND (last_error IS NULL OR substr(last_error, 1, {}) <> '{}')",
+        constants::engine::CLOUD_FULL_WAIT_PREFIX.len(),
+        constants::engine::CLOUD_FULL_WAIT_PREFIX.replace('\'', "''")
+    )
+}
+
+/// A new event for `path_text` at `observed_at`: the retries of that
+/// path are due now. What stopped them (a file that could not be read,
+/// a target that was locked) may be gone, and the event is the only
+/// sign of that the daemon gets. A row whose last try is younger than
+/// the grace is left alone: the event is most likely the trace of that
+/// try, and waking on it would retry in a loop with no backoff.
+fn wake_retries_of(
+    connection: &Connection,
+    path_text: &str,
+    observed_at: SystemTime,
+) -> Result<usize, StateDbError> {
+    let now_ms = system_time_to_millis(observed_at)?;
+    let grace_ms = i64::try_from(constants::state::RETRY_WAKE_GRACE_MILLIS).unwrap_or(i64::MAX);
+    Ok(connection.execute(
+        &format!(
+            "UPDATE queue_intents SET available_at_ms = ?1
+             WHERE path_text = ?2 AND {}
+               AND last_attempt_at_ms IS NOT NULL AND last_attempt_at_ms <= ?3",
+            waiting_retry_predicate()
+        ),
+        params![now_ms, path_text, now_ms.saturating_sub(grace_ms)],
+    )?)
+}
+
 fn insert_intent(
     connection: &Connection,
     path: &Path,
@@ -1751,6 +2059,20 @@ impl DurableStateDb {
             Some(id) => self.decision(id),
             None => Ok(None),
         }
+    }
+
+    /// The id of the open decision of `kind` that has no path of its
+    /// own (a batch or a profile question), when there is one.
+    pub fn open_decision_id(&self, kind: &str) -> Result<Option<i64>, StateDbError> {
+        Ok(self
+            .connection
+            .prepare_cached(
+                "SELECT id FROM pending_decisions
+                 WHERE kind = ? AND resolved_at_ms IS NULL AND path_text IS NULL
+                 ORDER BY id LIMIT 1",
+            )?
+            .query_row(params![kind], |row| row.get::<_, i64>(0))
+            .optional()?)
     }
 
     pub fn decision(&self, id: i64) -> Result<Option<DecisionRecord>, StateDbError> {
@@ -2008,10 +2330,18 @@ impl DurableStateDb {
         path: &Path,
         cap: usize,
     ) -> Result<(), StateDbError> {
-        let Some(record) = self.decision(id)? else {
+        // Only the evidence: the full record counts the held intents,
+        // and a burst appends once for each of them.
+        let stored: Option<String> = self
+            .connection
+            .prepare_cached("SELECT evidence_json FROM pending_decisions WHERE id = ?")?
+            .query_row(params![id], |row| row.get(0))
+            .optional()?;
+        let Some(mut evidence) =
+            stored.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        else {
             return Ok(());
         };
-        let mut evidence = record.evidence;
         let paths = evidence
             .as_object_mut()
             .and_then(|object| object.get_mut("paths"))
@@ -2315,6 +2645,41 @@ impl DurableStateDb {
         Ok(found)
     }
 
+    /// Moves the aliases of the files under the folder `from` to the
+    /// folder `to`, on both sides: the local folder changed its
+    /// spelling, and its cloud folder moved from `remote_from` to
+    /// `remote_to` with it. An alias that kept the old spelling would
+    /// not be found for its file any more, and the file would be
+    /// compared with a cloud name that holds nothing.
+    pub fn rekey_name_aliases_under(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        remote_from: &str,
+        remote_to: &str,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(from)?;
+        let to_prefix = format!("{}{}", path_to_text(to)?, std::path::MAIN_SEPARATOR);
+        let (remote_from, remote_to) = (format!("{remote_from}/"), format!("{remote_to}/"));
+        Ok(self.connection.execute(
+            "UPDATE name_aliases
+             SET local_path_text = ?1 || substr(local_path_text, ?2),
+                 remote_path_text = ?3 || substr(remote_path_text, ?4)
+             WHERE local_path_text >= ?5 AND local_path_text < ?6
+               AND substr(remote_path_text, 1, ?7) = ?8",
+            params![
+                to_prefix,
+                lower.chars().count() as i64 + 1,
+                remote_to,
+                remote_from.chars().count() as i64 + 1,
+                lower,
+                upper,
+                remote_from.chars().count() as i64,
+                remote_from,
+            ],
+        )?)
+    }
+
     pub fn remove_name_alias_for_local(&mut self, local_path: &Path) -> Result<(), StateDbError> {
         self.connection.execute(
             "DELETE FROM name_aliases WHERE local_path_text = ?",
@@ -2402,7 +2767,8 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              last_error TEXT,
              decision_id INTEGER,
              remote_path_text TEXT,
-             approved INTEGER NOT NULL DEFAULT 0
+             approved INTEGER NOT NULL DEFAULT 0,
+             last_attempt_at_ms INTEGER
          );
          -- A durable question for the user: an irreversible action whose
          -- evidence is ambiguous. Held intents reference it; the CLI
@@ -2461,15 +2827,25 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          );
          CREATE TABLE IF NOT EXISTS sync_index (
              path_text TEXT PRIMARY KEY,
+             fold_key TEXT NOT NULL,
              content_hash TEXT NOT NULL,
              size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
              local_modified_at_ms INTEGER,
              remote_modified_at_ms INTEGER,
              last_op_id TEXT NOT NULL,
-             updated_at_ms INTEGER NOT NULL
+             updated_at_ms INTEGER NOT NULL,
+             -- Set while an ignore rule hides the path: what happened
+             -- to the file in that time was not watched.
+             hidden_since_ms INTEGER
          );
+         CREATE INDEX IF NOT EXISTS idx_sync_index_hidden
+             ON sync_index(path_text) WHERE hidden_since_ms IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_sync_index_content
              ON sync_index(content_hash, size_bytes);
+         -- The path with every name folded: one seek finds the rows a
+         -- path has under another spelling of its name.
+         CREATE INDEX IF NOT EXISTS idx_sync_index_fold
+             ON sync_index(fold_key, path_text);
          CREATE INDEX IF NOT EXISTS idx_sync_index_remote_state
              ON sync_index(size_bytes, remote_modified_at_ms);
          -- Partial indexes holding only the rows whose name carries the
@@ -3210,6 +3586,149 @@ mod tests {
         assert_eq!(retried.attempt_count, 1);
     }
 
+    /// Fails the one queued intent `attempts` times in a row, each try
+    /// a minute after the one before. Returns the time of the last try.
+    fn fail_repeatedly(database: &mut DurableStateDb, attempts: u64) -> u64 {
+        let mut now_ms = 0;
+        for attempt in 0..attempts {
+            now_ms = (attempt + 1) * 3_600_000;
+            let leased = database
+                .lease_next_ready(timestamp_ms(now_ms))
+                .expect("lease")
+                .expect("the retry is due an hour later");
+            database
+                .schedule_retry(
+                    leased.id,
+                    RetryFailureKind::Transient,
+                    "cannot stat local file: Permission denied",
+                    timestamp_ms(now_ms),
+                )
+                .expect("schedule retry");
+        }
+        now_ms
+    }
+
+    #[test]
+    fn an_intent_that_keeps_failing_is_blocked_and_not_queued_work() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut database =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let path = PathBuf::from("/tmp/vapor-root/locked.txt");
+        database
+            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(0))
+            .expect("enqueue");
+
+        fail_repeatedly(
+            &mut database,
+            u64::from(constants::state::BLOCKED_AFTER_ATTEMPTS) - 1,
+        );
+        assert_eq!(database.blocked_depth().expect("blocked"), 0);
+
+        // One more failed try: the file is blocked, and named.
+        let leased = database
+            .lease_next_ready(timestamp_ms(100 * 3_600_000))
+            .expect("lease")
+            .expect("due");
+        database
+            .schedule_retry(
+                leased.id,
+                RetryFailureKind::Transient,
+                "cannot stat local file: Permission denied",
+                timestamp_ms(100 * 3_600_000),
+            )
+            .expect("schedule retry");
+        assert_eq!(database.blocked_depth().expect("blocked"), 1);
+        let blocked = database.blocked_intents(10).expect("list");
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].path, path);
+        assert_eq!(
+            blocked[0].last_error.as_deref(),
+            Some("cannot stat local file: Permission denied")
+        );
+    }
+
+    #[test]
+    fn a_new_event_for_a_path_makes_its_retry_due_unless_the_try_just_failed() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut database =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let path = PathBuf::from("/tmp/vapor-root/locked.txt");
+        database
+            .enqueue_intent(&path, PendingIntentKind::Download, timestamp_ms(0))
+            .expect("enqueue");
+        let failed_at = fail_repeatedly(&mut database, 8);
+        let event = |database: &mut DurableStateDb, at_ms: u64| {
+            database
+                .enqueue_intents_coalesced(
+                    &[(path.clone(), PendingIntentKind::Upload, timestamp_ms(at_ms))],
+                    crate::safeguards::IntentSource::Fresh,
+                )
+                .expect("event")
+        };
+        let download_is_due = |database: &DurableStateDb, at_ms: u64| {
+            database
+                .list_queue_intents(10)
+                .expect("list")
+                .into_iter()
+                .any(|intent| {
+                    intent.kind == PendingIntentKind::Download
+                        && intent.available_at <= timestamp_ms(at_ms)
+                })
+        };
+
+        // An event two seconds after the try is most likely its own
+        // trace: the backoff stands.
+        event(&mut database, failed_at + 2_000);
+        assert!(!download_is_due(&database, failed_at + 2_000));
+
+        // An event a minute later is the user: the lock is gone, maybe.
+        event(&mut database, failed_at + 60_000);
+        assert!(download_is_due(&database, failed_at + 60_000));
+    }
+
+    #[test]
+    fn a_sync_on_request_makes_every_retry_due_but_not_an_upload_that_waits_for_room() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut database =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let retried = PathBuf::from("/tmp/vapor-root/retried.txt");
+        let waiting = PathBuf::from("/tmp/vapor-root/waits-for-room.txt");
+        database
+            .enqueue_intent(&retried, PendingIntentKind::Upload, timestamp_ms(0))
+            .expect("enqueue");
+        let failed_at = fail_repeatedly(&mut database, 3);
+        database
+            .enqueue_intent(&waiting, PendingIntentKind::Upload, timestamp_ms(failed_at))
+            .expect("enqueue");
+        let leased = database
+            .lease_next_ready(timestamp_ms(failed_at))
+            .expect("lease")
+            .expect("the new upload is due");
+        assert_eq!(leased.path, waiting);
+        database
+            .requeue_leased(
+                leased.id,
+                timestamp_ms(failed_at + 900_000),
+                Some(&format!(
+                    "{}the cloud is full",
+                    constants::engine::CLOUD_FULL_WAIT_PREFIX
+                )),
+            )
+            .expect("wait for room");
+
+        assert_eq!(
+            database
+                .wake_all_retries(timestamp_ms(failed_at + 1_000))
+                .expect("wake"),
+            1
+        );
+        let due = database
+            .lease_next_ready(timestamp_ms(failed_at + 1_000))
+            .expect("lease")
+            .expect("the retry is due");
+        assert_eq!(due.path, retried);
+    }
+
     #[test]
     fn schedule_retry_uses_slower_rate_limit_backoff() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -3852,6 +4371,33 @@ mod tests {
         assert_eq!(leased.remote_path.as_deref(), Some("readme.md"));
         db.remove_name_alias("readme.md").expect("remove");
         assert_eq!(db.name_alias("readme.md").expect("alias"), None);
+
+        // A folder that changes its spelling takes the aliases of its
+        // files with it, on both sides.
+        let inside = PathBuf::from("/tmp/vapor-root/Folder/readme~conflict-x.md");
+        db.record_name_alias("Folder/Readme.md", &inside, "hash-2", timestamp_ms(3))
+            .expect("alias");
+        let other = PathBuf::from("/tmp/vapor-root/Folders/a~conflict-x.md");
+        db.record_name_alias("Folders/A.md", &other, "hash-3", timestamp_ms(3))
+            .expect("alias");
+        let moved = db
+            .rekey_name_aliases_under(
+                Path::new("/tmp/vapor-root/Folder"),
+                Path::new("/tmp/vapor-root/FOLDER"),
+                "Folder",
+                "FOLDER",
+            )
+            .expect("rekey");
+        assert_eq!(moved, 1, "only the aliases under the folder move");
+        assert_eq!(
+            db.alias_remote_for_local(Path::new("/tmp/vapor-root/FOLDER/readme~conflict-x.md"))
+                .expect("alias"),
+            Some("FOLDER/Readme.md".to_string())
+        );
+        assert_eq!(
+            db.alias_remote_for_local(&other).expect("alias"),
+            Some("Folders/A.md".to_string())
+        );
     }
 
     #[test]

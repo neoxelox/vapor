@@ -8,9 +8,12 @@
 //! Keychain items carry an access list naming the applications allowed
 //! to read them without a prompt. A new item is created with the calling
 //! binary plus its companions (`vapor` and `vapord`, in the bundled
-//! layout or side by side in a build directory) so the daemon never
-//! blocks on a "vapord wants to use your keychain" dialog for a token the
-//! CLI stored. The access list uses `SecAccessCreate`, which Apple has
+//! layout or side by side in a build directory). The list is not
+//! enough for a build with no team signature, so a process that a
+//! person runs hands the write to the daemon binary
+//! ([`NativeSecretStore::writing_through_the_daemon`]) and the daemon
+//! never waits on a "vapord wants to use your keychain" dialog for a
+//! token the CLI stored. The access list uses `SecAccessCreate`, which Apple has
 //! deprecated in favour of the data-protection keychain; that keychain
 //! needs a signed access-group entitlement on both binaries and rejects
 //! unsigned development builds outright, so the legacy list stays the
@@ -56,6 +59,7 @@ unsafe extern "C" {
         access: *mut CFTypeRef,
     ) -> OSStatus;
     fn SecTrustedApplicationCreateFromPath(path: *const c_char, app: *mut CFTypeRef) -> OSStatus;
+    fn SecKeychainSetUserInteractionAllowed(state: u8) -> OSStatus;
 }
 
 /// Keychain-backed store. Cheap to construct; every call goes straight
@@ -65,6 +69,9 @@ pub struct NativeSecretStore {
     namespace: String,
     /// Whether a read may open a keychain dialog.
     prompts: bool,
+    /// The daemon binary that writes and removes items for this
+    /// process, when it does (see [`Self::writing_through_the_daemon`]).
+    writer: Option<PathBuf>,
 }
 
 impl NativeSecretStore {
@@ -78,7 +85,75 @@ impl NativeSecretStore {
         Self {
             namespace: namespace.to_string(),
             prompts: true,
+            writer: None,
         }
+    }
+
+    /// The store a helper request names by its namespace.
+    pub fn helper_store(namespace: &str) -> Result<Self, SecretStoreError> {
+        Ok(Self::with_namespace(namespace))
+    }
+
+    /// For a process a person runs (`vapor auth login`): an item is
+    /// written and removed by the daemon binary next to this one, when
+    /// there is one, and not by this process.
+    ///
+    /// The keychain lets a process read an item with no dialog when the
+    /// process is on the item's access list and in its partition list.
+    /// The partition list is set from the code signature of the process
+    /// that creates the item: a team for a build signed with one, and
+    /// the hash of the one binary for a build that is signed ad hoc,
+    /// which every prerelease is. An item that `vapor` creates on such
+    /// a build is therefore closed to `vapord`, whatever its access
+    /// list says, and the daemon, which never asks, would hold for a
+    /// sign-in right after one. So the binary that reads the item
+    /// creates it.
+    pub fn writing_through_the_daemon(mut self) -> Self {
+        let own = std::env::current_exe()
+            .ok()
+            .and_then(|path| vapor_shared::paths::canonicalize(&path).ok());
+        self.writer = companion_binaries().into_iter().find(|path| {
+            path.file_name().and_then(|name| name.to_str())
+                == Some(constants::runtime::DAEMON_BINARY_NAME)
+                && Some(path) != own.as_ref()
+        });
+        self
+    }
+
+    /// Runs the daemon binary as the writer: `secret set <name>` with
+    /// the value on its standard input, or `secret delete <name>`. The
+    /// value is never an argument.
+    fn write_through(
+        &self,
+        writer: &Path,
+        action: &str,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<(), SecretStoreError> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(writer)
+            .args([super::HELPER_COMMAND, action, name, &self.namespace])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| backend(format!("cannot run {}: {error}", writer.display())))?;
+        if let Some(mut input) = child.stdin.take() {
+            // A write that fails shows as the exit status of the child.
+            let _ = input.write_all(value.unwrap_or_default().as_bytes());
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| backend(format!("cannot wait for {}: {error}", writer.display())))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(backend(format!(
+            "{} could not {action} the secret '{name}': {}",
+            writer.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 
     /// For a background process: a read that the keychain would answer
@@ -90,6 +165,14 @@ impl NativeSecretStore {
     /// that a daemon opens, and the read would wait on it.
     pub fn without_prompts(mut self) -> Self {
         self.prompts = false;
+        // The query key below covers the items of the data-protection
+        // keychain. The dialog of the login keychain ("... wants to use
+        // your confidential information") is turned off for the whole
+        // process: a read that would open it fails at once, and the
+        // caller holds for a sign-in.
+        // SAFETY: the call takes a flag by value and changes only the
+        // keychain session state of this process.
+        let _ = unsafe { SecKeychainSetUserInteractionAllowed(0) };
         self
     }
 
@@ -178,6 +261,9 @@ impl SecretStore for NativeSecretStore {
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), SecretStoreError> {
+        if let Some(writer) = &self.writer {
+            return self.write_through(writer, super::HELPER_SET, name, Some(value));
+        }
         // Replace the item, do not update it. Only a new item gets the
         // access list that names the binaries of this build. An item
         // that an older build wrote keeps its old list through an
@@ -202,6 +288,9 @@ impl SecretStore for NativeSecretStore {
     }
 
     fn delete(&self, name: &str) -> Result<(), SecretStoreError> {
+        if let Some(writer) = &self.writer {
+            return self.write_through(writer, super::HELPER_DELETE, name, None);
+        }
         let query = CFDictionary::from_CFType_pairs(&self.base_query(name));
         // SAFETY: `query` outlives the call; `SecItemDelete` only reads it.
         let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
@@ -380,7 +469,12 @@ fn trusted_application(path: Option<&Path>) -> Option<CFType> {
 /// build directory, or `Contents/Helpers/vapor` and
 /// `Contents/MacOS/vapord` inside the app bundle.
 fn companion_binaries() -> Vec<PathBuf> {
-    let Ok(current) = std::env::current_exe() else {
+    // The real path of this binary: the installer puts a link to the
+    // CLI on the `PATH`, and next to that link there is no daemon.
+    let Some(current) = std::env::current_exe()
+        .ok()
+        .map(|path| vapor_shared::paths::canonicalize(&path).unwrap_or(path))
+    else {
         return Vec::new();
     };
     let Some(parent) = current.parent() else {

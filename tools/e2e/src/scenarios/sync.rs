@@ -111,6 +111,38 @@ pub fn scenarios() -> Vec<Scenario> {
             expect: Expect::Pass,
             run: offline_same_size_cloud_edit,
         },
+        Scenario {
+            id: "S76",
+            name: "cloud-event-without-new-bytes",
+            proves: "a chmod, a touch, or a rewrite with the same bytes of a cloud object never turns a local edit that waits for its upload into a conflict copy; the edit reaches the cloud under its name",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::PosixMode],
+            expect: Expect::Pass,
+            run: cloud_event_without_new_bytes,
+        },
+        Scenario {
+            id: "S77",
+            name: "cloud-copy-keeps-the-original",
+            proves: "a copy made in the cloud that keeps the modification time (cp -p, a Finder duplicate) arrives as a second file; the original stays on this device",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: cloud_copy_keeps_the_original,
+        },
+        Scenario {
+            id: "S78",
+            name: "edit-under-an-ignore-rule",
+            proves: "a synced file that changes on this device while an ignore rule hides it uploads when the rule goes, with no conflict copy: the cloud copy never changed",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: edit_under_an_ignore_rule,
+        },
+        Scenario {
+            id: "S81",
+            name: "burst-starts-in-seconds",
+            proves: "a burst of new files that the watcher folds into one scan of their folder starts to reach the cloud a few seconds after the burst ends, not at the end of the 30 s that the scan may be put off for",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: burst_starts_in_seconds,
+        },
     ]
 }
 
@@ -537,4 +569,199 @@ pub fn mode_of(path: &std::path::Path) -> Option<u32> {
         let _ = path;
         None
     }
+}
+
+fn cloud_event_without_new_bytes(ctx: &mut Ctx) -> Result<(), Failure> {
+    // Three files that another tool put in the cloud folder, so no
+    // object carries an op-id. Each gets a local edit that waits (the
+    // daemon is paused), and then an event in the cloud that changes
+    // no bytes. The edit is the one change there is: it must go up
+    // under its name, with no conflict copy on either side.
+    let home = ctx.primary.clone();
+    let names = ["mode.txt", "touched.txt", "rewritten.txt"];
+    fs::create_dir_all(&home.cloud)?;
+    for name in names {
+        write_file(
+            &home.cloud.join(name),
+            format!("{name} from another tool\n"),
+        )?;
+    }
+    start_primary(ctx)?;
+    for name in names {
+        ctx.wait_same_content(
+            &home.cloud.join(name),
+            &home.local.join(name),
+            CONVERGE_TIMEOUT,
+        )?;
+    }
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // The event in the cloud comes first, so its download is the older
+    // intent and is planned before the upload of the edit: the order
+    // that used to end in a conflict copy.
+    ctx.cli().pause()?;
+    set_mode(&home.cloud.join("mode.txt"), 0o600)?;
+    let later = std::time::SystemTime::now() + Duration::from_secs(90);
+    fs::File::options()
+        .write(true)
+        .open(home.cloud.join("touched.txt"))?
+        .set_modified(later)?;
+    write_file(
+        &home.cloud.join("rewritten.txt"),
+        "rewritten.txt from another tool\n",
+    )?;
+    for name in names {
+        write_file(&home.local.join(name), format!("{name} edited here\n"))?;
+    }
+    ctx.cli().resume()?;
+    // Reads the feed now, not at its next poll.
+    ctx.cli().reconcile()?;
+
+    for name in names {
+        let cloud = home.cloud.join(name);
+        let expected = format!("{name} edited here\n");
+        ctx.wait_until(
+            Duration::from_secs(90),
+            &format!("the local edit of {name} to reach the cloud"),
+            || fs::read_to_string(&cloud).is_ok_and(|text| text == expected),
+        )?;
+    }
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    for name in names {
+        let stem = name.trim_end_matches(".txt");
+        ensure!(
+            !conflict_copy_exists(&home.local, stem) && !conflict_copy_exists(&home.cloud, stem),
+            "an event that changed no bytes of {name} made a conflict copy"
+        );
+        ensure!(
+            read_string(&home.local.join(name))? == format!("{name} edited here\n"),
+            "the local edit of {name} lost its name"
+        );
+    }
+    Ok(())
+}
+
+fn cloud_copy_keeps_the_original(ctx: &mut Ctx) -> Result<(), Failure> {
+    // A new cloud object with the size, the time, and the content of a
+    // synced file looks like that file renamed. It is a rename only
+    // when the old name is gone from the cloud; here it is not.
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("original.bin"), "one body, two names\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("original.bin"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    let modified_at = fs::metadata(home.cloud.join("original.bin"))?.modified()?;
+    fs::copy(home.cloud.join("original.bin"), home.cloud.join("copy.bin"))?;
+    fs::File::options()
+        .write(true)
+        .open(home.cloud.join("copy.bin"))?
+        .set_modified(modified_at)?;
+
+    ctx.wait_until(
+        Duration::from_secs(90),
+        "the copy to arrive on this device",
+        || home.local.join("copy.bin").is_file(),
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        home.local.join("original.bin").is_file(),
+        "the original left this device when its copy arrived"
+    );
+    ensure!(
+        read_string(&home.local.join("copy.bin"))? == "one body, two names\n",
+        "the copy holds other bytes"
+    );
+    Ok(())
+}
+
+fn burst_starts_in_seconds(ctx: &mut Ctx) -> Result<(), Failure> {
+    const FILES: usize = 800;
+    // The scan of a burst's folder may be put off for 30 s. In `Idle`
+    // it starts when the burst is over; this is far from both.
+    const STARTS_WITHIN: Duration = Duration::from_secs(20);
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    let burst = home.local.join("burst");
+    fs::create_dir_all(&burst)?;
+    for index in 0..FILES {
+        fs::write(burst.join(format!("file{index:04}.txt")), "burst\n")?;
+    }
+    let written = std::time::Instant::now();
+    let cloud_burst = home.cloud.join("burst");
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the first file of the burst in the cloud",
+        || {
+            fs::read_dir(&cloud_burst).is_ok_and(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            })
+        },
+    )?;
+    let first_after = written.elapsed();
+    ensure!(
+        first_after < STARTS_WITHIN,
+        "the first file of the burst reached the cloud after {first_after:?}"
+    );
+    ctx.wait_until(
+        Duration::from_secs(120),
+        "the whole burst in the cloud",
+        || {
+            fs::read_dir(&cloud_burst).is_ok_and(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+                    == FILES
+            })
+        },
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+fn edit_under_an_ignore_rule(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let (local, cloud) = (home.local.join("a.secret"), home.cloud.join("a.secret"));
+    write_file(&local, "synced\n")?;
+    ctx.wait_same_content(&local, &cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // The rule arrives, and the scan that a rule change asks for
+    // passes while the file is hidden.
+    write_file(&home.local.join(".vaporignore"), "*.secret\n")?;
+    ctx.wait_exists(&home.cloud.join(".vaporignore"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    write_file(&local, "edited while hidden\n")?;
+    ctx.cli().reconcile()?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        read_string(&cloud)? == "synced\n",
+        "a file that an ignore rule hides synced"
+    );
+
+    // The rule goes. The edit is the one change there is.
+    write_file(&home.local.join(".vaporignore"), "")?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the edit to reach the cloud once the rule is gone",
+        || fs::read_to_string(&cloud).is_ok_and(|text| text == "edited while hidden\n"),
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        !conflict_copy_exists(&home.local, "a") && !conflict_copy_exists(&home.cloud, "a"),
+        "an edit made under an ignore rule became a conflict copy"
+    );
+    ensure!(
+        read_string(&local)? == "edited while hidden\n",
+        "the edit lost its name on this device"
+    );
+    Ok(())
 }

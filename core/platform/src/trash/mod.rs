@@ -132,6 +132,89 @@ mod tests {
         assert_eq!(free_name_in(&bin, &dotfile), bin.join(".env 2"));
     }
 
+    /// What every bin does, the fake and the native one alike: a file
+    /// and a folder leave their place and are whole where they landed,
+    /// two items of one name both land, and an item that is not there
+    /// is an error that leaves nothing behind. Returns where the items
+    /// landed, so the caller can clean up a bin that is not its own.
+    fn exercise_contract(bin: &dyn TrashBin, scratch: &Path, tag: &str) -> Vec<PathBuf> {
+        let file = scratch.join(format!("vapor-contract-{tag}.txt"));
+        std::fs::write(&file, b"kept whole").expect("file");
+        let folder = scratch.join(format!("vapor-contract-{tag}"));
+        std::fs::create_dir_all(folder.join("inner")).expect("folder");
+        std::fs::write(folder.join("inner/deep.txt"), b"deep").expect("deep");
+
+        let landed_file = bin.trash(&file).expect("trash a file");
+        let landed_folder = bin.trash(&folder).expect("trash a folder");
+        assert!(!file.exists(), "the file left its place");
+        assert!(!folder.exists(), "the folder left its place");
+        assert_eq!(
+            std::fs::read(&landed_file).expect("landed file"),
+            b"kept whole"
+        );
+        assert_eq!(
+            std::fs::read(landed_folder.join("inner/deep.txt")).expect("landed folder"),
+            b"deep"
+        );
+
+        // The same name again: both are kept, under two names.
+        std::fs::write(&file, b"second").expect("file again");
+        let landed_second = bin.trash(&file).expect("trash the second one");
+        assert_ne!(landed_second, landed_file);
+        assert_eq!(std::fs::read(&landed_file).expect("first"), b"kept whole");
+        assert_eq!(std::fs::read(&landed_second).expect("second"), b"second");
+
+        assert!(
+            bin.trash(&scratch.join(format!("vapor-contract-{tag}-missing")))
+                .is_err(),
+            "an item that is not there is an error"
+        );
+        vec![landed_file, landed_folder, landed_second]
+    }
+
+    #[test]
+    fn the_fake_bin_satisfies_the_contract() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let bin = InMemoryTrashBin::new(temp.path().join("bin"));
+        let landed = exercise_contract(&bin, temp.path(), "fake");
+        assert!(
+            landed
+                .iter()
+                .all(|path| path.starts_with(temp.path().join("bin")))
+        );
+    }
+
+    /// The same contract against the trash of the host. The three
+    /// items carry the process id in their names, and the test removes
+    /// them from the trash again.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_native_bin_satisfies_the_contract() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let bin = NativeTrashBin::for_current_host();
+        let tag = format!("native-{}", std::process::id());
+        // A host with no user trash (a container, a session with no
+        // home) refuses, and a caller falls back to its own trash.
+        let probe = temp.path().join(format!("vapor-contract-{tag}-probe"));
+        std::fs::write(&probe, b"probe").expect("probe");
+        match bin.trash(&probe) {
+            Ok(landed) => {
+                let _ = std::fs::remove_file(landed);
+            }
+            Err(_) => {
+                assert!(probe.exists(), "a refusal leaves the file where it was");
+                return;
+            }
+        }
+        for landed in exercise_contract(&bin, temp.path(), &tag) {
+            if landed.is_dir() {
+                let _ = std::fs::remove_dir_all(&landed);
+            } else {
+                let _ = std::fs::remove_file(&landed);
+            }
+        }
+    }
+
     #[test]
     fn fake_bin_moves_files_and_directories_and_can_refuse() {
         let temp = tempfile::TempDir::new().expect("temp");

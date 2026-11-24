@@ -251,12 +251,16 @@ impl DaemonApp {
         }
 
         // Routine transitions are INFO; Suspended stops uploads and
-        // hashing outright, which is worth a WARNING.
+        // hashing outright, which is worth a WARNING. A reason that
+        // changes while the state stays (the CPU load moves from 69%
+        // to 71%) is no transition: it would be a line a second.
         let fields = [
             ("throttle_state", format!("{:?}", throttle_state)),
             ("reason", reason.clone()),
         ];
-        if throttle_state == ThrottleState::Suspended {
+        if self.snapshot.throttle_state == throttle_state {
+            logging::debug("Updated throttle reason", &fields);
+        } else if throttle_state == ThrottleState::Suspended {
             logging::warning("Updated throttle state", &fields);
         } else {
             logging::info("Updated throttle state", &fields);
@@ -970,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn app_reconcile_flow_waits_out_suspension_and_clears_boundary_on_success() {
+    fn app_reconcile_flow_waits_out_suspension_and_opens_the_folder_at_release() {
         let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
         let mut maps = stormed_maps(&subtree_root);
         let mut scheduler = KeyedSupersedingScheduler::default();
@@ -998,11 +1002,9 @@ mod tests {
             Some(subtree_root.clone())
         );
 
-        let completion = app
-            .complete_reconcile(&mut maps, &mut scheduler)
-            .expect("complete reconcile");
-        assert!(completion.boundary_cleared);
         assert!(maps.compacted_subtree(&subtree_root).is_none());
+        app.complete_reconcile(&mut maps, &mut scheduler)
+            .expect("complete reconcile");
     }
 
     #[test]
@@ -1045,6 +1047,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
 

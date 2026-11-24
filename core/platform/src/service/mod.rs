@@ -99,6 +99,13 @@ pub trait ServiceInstaller: Send + Sync {
     fn install_and_enable(&self) -> Result<(), ServiceInstallError>;
     fn disable_and_uninstall(&self) -> Result<(), ServiceInstallError>;
     fn start_daemon(&self) -> Result<(), ServiceInstallError>;
+    /// Asks the daemon to stop and waits for its process to go. A
+    /// daemon that does not go within the wait is killed, so a stop
+    /// never leaves a process behind that holds the job and syncs
+    /// nothing.
     fn stop_daemon(&self) -> Result<(), ServiceInstallError>;
+    /// Ends the daemon's process at once, with no request to stop: for
+    /// a daemon that holds its job and no longer answers.
+    fn kill_daemon(&self) -> Result<(), ServiceInstallError>;
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError>;
 }

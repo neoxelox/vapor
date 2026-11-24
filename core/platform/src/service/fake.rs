@@ -95,6 +95,15 @@ impl ServiceInstaller for InMemoryServiceInstaller {
         Ok(())
     }
 
+    fn kill_daemon(&self) -> Result<(), ServiceInstallError> {
+        self.record("kill");
+        self.inner
+            .lock()
+            .expect("InMemoryServiceInstaller mutex poisoned")
+            .status = ServiceStatus::Stopped;
+        Ok(())
+    }
+
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {
         Ok(self
             .inner

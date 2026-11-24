@@ -371,6 +371,12 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S73 | a synced folder that is renamed in the cloud while Vapor does not run: the next start moves its files on this device and removes the old folder, which the move left empty |
 | S74 | a profile in `vapor.json` whose local folder is inside the one of an earlier profile does not run: `vapor status` lists it as suspended with the reason, neither of its folders is created, and the earlier profile syncs |
 | S75 | an empty folder where the adopted cloud root was never becomes deletions on this device, also when a sync is asked for before the next check of the root: no local file goes to the trash, a `root-replaced` decision opens, and `reattach` sends the local files to the new folder |
+| S76 | a `chmod`, a `touch`, or a rewrite with the same bytes of a cloud object never turns a local edit that waits for its upload into a conflict copy: the edit reaches the cloud under its name |
+| S77 | a copy made in the cloud that keeps the modification time (`cp -p`, a Finder duplicate) arrives as a second file, and the original stays on this device |
+| S78 | a synced file that changes on this device while an ignore rule hides it uploads when the rule goes, with no conflict copy |
+| S79 | a version that an upload replaced unseen, left by the provider as a `~conflict-replaced` copy, is one conflict decision whose option says what the copy is, and the answer keeps it on both sides |
+| S80 | two profiles on one cloud folder that both change one file before either upload lands keep both edits on both devices and in the cloud |
+| S81 | a burst of new files that the watcher folds into one scan of their folder starts to reach the cloud a few seconds after the burst ends, not after the 30 s the scan may be put off for |
 | R01 | install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own (`--full`, disposable runners only) |
 
 ## Extending the harness

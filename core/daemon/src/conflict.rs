@@ -91,21 +91,21 @@ pub fn conflict_copy_path(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (stem, extension) = match file_name.rfind('.') {
-        // A leading dot (hidden file) is part of the stem, not an
-        // extension separator.
-        Some(0) | None => (file_name.as_str(), ""),
-        Some(index) => file_name.split_at(index),
+    let named = |sequence| {
+        original.with_file_name(vapor_shared::conflict::copy_name(
+            &file_name,
+            device_id,
+            timestamp_ms,
+            sequence,
+        ))
     };
-
-    let base = format!("{stem}{CONFLICT_MARKER}{device_id}-{timestamp_ms}");
-    let candidate = original.with_file_name(format!("{base}{extension}"));
+    let candidate = named(None);
     if !path_exists(&candidate) {
         return candidate;
     }
     let mut sequence: u64 = 2;
     loop {
-        let candidate = original.with_file_name(format!("{base}-{sequence}{extension}"));
+        let candidate = named(Some(sequence));
         if !path_exists(&candidate) {
             return candidate;
         }
@@ -120,7 +120,9 @@ pub struct ConflictCopyName {
     /// The canonical file name the copy diverged from
     /// (`report~conflict-dev-17….md` → `report.md`).
     pub canonical_file_name: String,
-    /// The device whose divergent version the copy preserves.
+    /// The device whose divergent version the copy preserves, or
+    /// [`constants::conflict::REPLACED_VERSION`] for a version that an
+    /// upload of another device replaced.
     pub device_id: String,
     /// When the divergence was observed (the conflicting intent's
     /// event time, epoch milliseconds).
@@ -407,6 +409,9 @@ pub fn question(conflict: &Conflict, this_device: &str, trash_enabled: bool) -> 
                 (None, None) => "Keep the version already under the name".to_string(),
                 (None, Some(device)) if device == this_device => {
                     "Keep this device's edit".to_string()
+                }
+                (None, Some(device)) if device == constants::conflict::REPLACED_VERSION => {
+                    "Keep the version that another upload replaced".to_string()
                 }
                 (None, Some(device)) => format!("Keep the edit made on {device}"),
             },

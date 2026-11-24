@@ -36,8 +36,8 @@ pub mod transport;
 pub use client::{Client, ClientError};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
-    AckResponse, BandwidthCeiling, Ceiling, DiagnosticsResponse, ErrorBody, Hello, HelloAck,
-    IncompatibleVersion, Method, MirrorCounts, ProfileStatus, ReconcileStatus, Request,
+    AckResponse, BandwidthCeiling, BlockedFile, Ceiling, DiagnosticsResponse, ErrorBody, Hello,
+    HelloAck, IncompatibleVersion, Method, MirrorCounts, ProfileStatus, ReconcileStatus, Request,
     ResourcesStatus, Response, ResponseBody, StateReason, StatusResponse, TimelineEntry,
     TimelineResponse, WorkItem, daemon_supported_versions,
 };

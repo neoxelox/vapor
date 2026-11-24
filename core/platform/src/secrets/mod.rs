@@ -83,6 +83,61 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
+/// The first argument of the daemon binary when another Vapor process
+/// runs it to write or remove one secret (`vapord secret set <name>
+/// [<namespace>]`, value on standard input; `vapord secret delete
+/// <name> [<namespace>]`). The namespace is the one of the store that
+/// asks, so a test with a namespace of its own never writes into
+/// Vapor's; without one the helper uses the store of this user. On macOS
+/// the process that reads an item has to be the one that created it on
+/// a build that is signed ad hoc, so the daemon binary does the write.
+pub const HELPER_COMMAND: &str = "secret";
+pub const HELPER_SET: &str = "set";
+pub const HELPER_DELETE: &str = "delete";
+
+/// Runs one helper request in this process: `arguments` are what
+/// follows [`HELPER_COMMAND`], and `input` is where the value of a
+/// `set` comes from. The store is the native one with no scope added:
+/// the caller scoped the name already.
+pub fn run_helper(
+    arguments: &[String],
+    input: &mut dyn std::io::Read,
+) -> Result<(), SecretStoreError> {
+    // A person runs the command that asked: the keychain may ask them
+    // (to replace an item that another build created, for one).
+    let (request, namespace) = match arguments {
+        [action, name, namespace] if !namespace.is_empty() => {
+            (vec![action.clone(), name.clone()], Some(namespace.as_str()))
+        }
+        other => (other.to_vec(), None),
+    };
+    let store = match namespace {
+        Some(namespace) => NativeSecretStore::helper_store(namespace)?,
+        None => NativeSecretStore::for_current_user()?,
+    };
+    serve_helper_request(&store, &request, input)
+}
+
+fn serve_helper_request(
+    store: &dyn SecretStore,
+    arguments: &[String],
+    input: &mut dyn std::io::Read,
+) -> Result<(), SecretStoreError> {
+    match arguments {
+        [action, name] if action == HELPER_SET => {
+            let mut value = String::new();
+            input
+                .read_to_string(&mut value)
+                .map_err(|error| SecretStoreError::Backend(Box::new(error)))?;
+            store.set(name, &value)
+        }
+        [action, name] if action == HELPER_DELETE => store.delete(name),
+        _ => Err(SecretStoreError::Unsupported(
+            "usage: secret set <name> [<namespace>] (value on standard input) | secret delete <name> [<namespace>]",
+        )),
+    }
+}
+
 /// How a process may reach the secret store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecretAccess {
@@ -101,7 +156,7 @@ pub enum SecretAccess {
 pub fn open_store(access: SecretAccess) -> Result<Box<dyn SecretStore>, SecretStoreError> {
     let native = NativeSecretStore::for_current_user()?;
     let native = match access {
-        SecretAccess::Interactive => native,
+        SecretAccess::Interactive => native.writing_through_the_daemon(),
         SecretAccess::Background => native.without_prompts(),
     };
     Ok(match vapor_shared::runtime_paths::secrets_scope() {
@@ -358,5 +413,28 @@ mod tests {
         ));
         assert!(other.list().expect("list").is_empty());
         store.delete("scoped").expect("cleanup");
+    }
+    /// The helper request that the daemon binary serves, against the
+    /// real keychain under a throwaway service name.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_helper_request_writes_and_removes_one_secret() {
+        let service = format!("sh.arn.vapor.test-helper-{}", std::process::id());
+        let store = NativeSecretStore::with_namespace(&service);
+        let request = |action: &str| vec![action.to_string(), "token".to_string()];
+
+        serve_helper_request(&store, &request(HELPER_SET), &mut "s3cret".as_bytes()).expect("set");
+        assert_eq!(store.get("token").expect("the helper wrote it"), "s3cret");
+
+        serve_helper_request(&store, &request(HELPER_DELETE), &mut std::io::empty())
+            .expect("delete");
+        assert!(matches!(
+            store.get("token"),
+            Err(SecretStoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            serve_helper_request(&store, &["print".to_string()], &mut std::io::empty()),
+            Err(SecretStoreError::Unsupported(_))
+        ));
     }
 }

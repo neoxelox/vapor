@@ -100,6 +100,13 @@ background service. This is how "autolaunch at login" ports.
 | Windows (per-user) | Task Scheduler `AtLogOn` trigger via `ITaskService` |
 | Windows (system) | SCM (`CreateServiceW`) via `windows-service` |
 
+`stop_daemon` asks the daemon to end and waits: a daemon that is still
+there after 10 seconds is ended with `kill_daemon` (`SIGKILL`), which
+the supervisor also calls for a daemon that hangs. `status` reads
+whether the job is loaded from the service manager and whether its
+process runs from the process table, so it is right for a daemon that
+no longer answers.
+
 Each installer configures the OS restart policy so the OS respects the
 backoff computed by `core/lifecycle::CrashLoopGuard`:
 
@@ -129,7 +136,7 @@ when a value will not outlive the process.
 
 | OS | Native API | Status |
 |---|---|---|
-| macOS | Keychain Services (`SecItem*` through `security-framework-sys` and `core-foundation`) | Shipped. One generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord` so the daemon reads CLI-stored tokens without a prompt. Details: `docs/operations/provider-auth-operations.md`. |
+| macOS | Keychain Services (`SecItem*` through `security-framework-sys` and `core-foundation`) | Shipped. One generic-password item per secret under the `sh.arn.vapor` service, created by `vapord` (`vapor auth login` hands it the value on standard input), so the daemon reads a token with no dialog. A background read never opens one. Details: `docs/operations/provider-auth-operations.md`. |
 | Windows | Credential Manager | Stub. `for_current_user` returns `Unsupported`. |
 | Linux (desktop) | Secret Service through libsecret's `secret-tool` CLI (`lookup` / `store` / `clear` / `search`), items filed under the attribute `service = sh.arn.vapor` | Shipped. Chosen when `DBUS_SESSION_BUS_ADDRESS` is set, `secret-tool` is on `PATH`, and `VAPOR_SECRETS_COMMAND` is not. |
 | Linux (headless) | External command shim named by `VAPOR_SECRETS_COMMAND` (a `pass`, vault, or `age` wrapper): `<command> get <name>` prints the secret, `<command> set <name>` reads it on stdin, `<command> delete <name>`, `<command> list` prints one name per line; exit 1 means not found | Shipped. Takes precedence over the Secret Service when set. Never a plaintext file. |
@@ -246,12 +253,13 @@ unlink.
 
 | OS | Mechanism | Status |
 |---|---|---|
-| macOS | Rename into `~/.Trash`, Finder-style numbered duplicates | Shipped. Cross-volume moves are refused rather than copied, and Finder shows no Put Back for these files. The move through `NSFileManager`, which gives both, is open work (`docs/tasks/core.md`). |
+| macOS | `NSFileManager trashItemAtURL`, which moves the file to the trash of its own volume and picks the name | Shipped. A file on another volume goes to the trash of that volume; a volume with no trash is refused, and the managed trash takes over. |
 | Windows | `SHFileOperation` / `IFileOperation` with `FOF_ALLOWUNDO` (Recycle Bin) | Planned. Refuses with `Unsupported` today. |
 | Linux | freedesktop trash spec: `$XDG_DATA_HOME/Trash` (default `~/.local/share/Trash`) for files on the home volume, `<mount>/.Trash-<uid>` for other volumes; `info/<name>.trashinfo` written before the rename, numbered duplicates like a file manager | Shipped. A volume without a usable `.Trash-<uid>` is refused, and the managed trash takes over. |
 
 The fake (`InMemoryTrashBin`) moves into a directory the test owns and
-can be told to refuse, which is how the fallback is tested.
+can be told to refuse, which is how the fallback is tested. The fake
+and the native bin run the same contract test.
 
 ## Parity matrix
 
@@ -267,7 +275,7 @@ ships a surface (`AGENTS.md` §1). Where each one stands:
 | `IdleNotifier` | shipped | session presence only | zero idle time |
 | `FilesystemCapabilities` | shipped (xattr) | shipped (xattr, side-file fallback) | stub |
 | `ProcessSupervisor` | shipped (signals) | shipped (signals) | stub |
-| `TrashBin` | shipped (`~/.Trash`) | shipped (freedesktop trash) | stub |
+| `TrashBin` | shipped (`NSFileManager`) | shipped (freedesktop trash) | stub |
 
 macOS is the one shipping OS today. Linux has its native
 implementations and no app or release lane yet. The stubs compile, so

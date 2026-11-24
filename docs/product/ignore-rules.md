@@ -92,6 +92,12 @@ The full list is `DEFAULT_PRE_IGNORE_RULES` in
   file that a rule frees starts to sync.
 - A file that already synced and that a new rule hides stays where it
   is on both sides. Vapor stops syncing it; it deletes nothing.
+- What you do to such a file while the rule hides it is not a change
+  that Vapor watched. An edit uploads when the rule goes, with no
+  conflict copy while the cloud copy is unchanged. A file that you
+  removed here stays in the cloud and comes back when the rule goes: a
+  rule is a way to free space on one device, and it must not become a
+  deletion everywhere.
 - A folder that arrives with an ignore file of its own (a project that
   is moved in with its `.gitignore`) syncs by those rules from the
   start: Vapor loads them before it looks at the files.

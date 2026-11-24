@@ -117,17 +117,25 @@ pub struct ProviderCapabilities {
     /// re-upload ([`Provider::move_object`]); the engine turns a
     /// detected local rename into one call when this is set.
     pub supports_server_side_move: bool,
+    /// The changes feed is fed by a watcher on this device and a poll
+    /// of it costs no request to a cloud: the engine reads it each
+    /// second in every throttle state but `Suspended`, so a change is
+    /// seen when it happens. A feed that is a network call is polled at
+    /// the cadence of the throttle state.
+    pub changes_feed_is_watched: bool,
 }
 
 impl ProviderCapabilities {
     pub const FILESYSTEM: Self = Self {
         supports_remote_changes_feed: true,
         supports_server_side_move: true,
+        changes_feed_is_watched: true,
     };
 
     pub const GDRIVE_MVP: Self = Self {
         supports_remote_changes_feed: true,
         supports_server_side_move: true,
+        changes_feed_is_watched: false,
     };
 }
 
@@ -247,6 +255,15 @@ pub trait TransferSession: Send {
 pub enum RemoteChangeKind {
     CreatedOrModified,
     Removed,
+    /// A folder got another name or another place, and the feed says so
+    /// with one entry for the folder and none for the files in it
+    /// (Google Drive). `path` is a path of the folder: the one it has
+    /// now, or the one it had. The engine walks the folder that holds
+    /// that path, and the walk finds what the change did. With the root
+    /// as its path it says that the place of something that changed
+    /// could not be read, and the engine walks everything. A feed that
+    /// reports each file under such a folder never sends this.
+    FolderMoved,
 }
 
 /// One entry of the remote changes feed.
@@ -472,6 +489,7 @@ impl Provider for SuspendedProvider {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
+            changes_feed_is_watched: false,
         }
     }
 
@@ -543,6 +561,7 @@ impl Provider for FilesystemStubProvider {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
+            changes_feed_is_watched: false,
         }
     }
 

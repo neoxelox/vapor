@@ -96,15 +96,12 @@ impl ReconcileController {
             return 0;
         }
 
-        // Idle: a storm that has gone quiet releases early instead of
-        // waiting out its full deferral. The deferral exists to avoid
-        // competing with the burst and the user, and both are gone. In
-        // the other states the deferral runs its length.
-        let quiet_release = (throttle_state == ThrottleState::Idle).then(|| {
-            std::time::Duration::from_millis(
-                vapor_shared::constants::engine::DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS,
-            )
-        });
+        // Idle: the scan starts a moment after the storm ends. The
+        // deferral exists to avoid competing with the burst and the
+        // user, and both are gone. In the other states the deferral
+        // runs its length.
+        let quiet_release =
+            (throttle_state == ThrottleState::Idle).then(crate::storm::IdleRelease::default);
         let ready = maps.take_deferred_reconcile_intents_ready_by(now, quiet_release);
         for intent in &ready {
             scheduler.upsert_pending_intent_record(intent.clone());
@@ -509,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_reconcile_clears_compaction_boundary_when_quiet() {
+    fn the_release_of_a_deferred_reconcile_ends_the_compaction_of_its_folder() {
         let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
         let mut maps = stormed_maps(&subtree_root);
         let mut scheduler = KeyedSupersedingScheduler::default();
@@ -525,68 +522,33 @@ mod tests {
             ),
             1
         );
+        // The walk has not started yet, and the folder is open again: a
+        // save from now on is an event of its own. The walk lists the
+        // folder after this moment, so it sees every change that the
+        // compaction took in.
+        assert!(maps.compacted_subtree(&subtree_root).is_none());
+        maps.record_event(FsEventRecord {
+            path: subtree_root.join("after.txt"),
+            kind: FsEventKind::Modified,
+            observed_at: timestamp(33),
+        });
+        assert_eq!(maps.pending_event_count(), 1);
+
         controller
             .try_start_next(
                 &mut scheduler,
                 &mut workgate,
                 ThrottleState::Idle,
-                timestamp(32),
+                timestamp(33),
             )
             .expect("start reconcile");
-
         let completion = controller
             .complete_success(&mut maps, &mut scheduler, &mut workgate)
             .expect("complete reconcile");
 
         assert_eq!(completion.root, subtree_root);
         assert_eq!(completion.disposition, CompletionDisposition::Removed);
-        assert!(completion.boundary_cleared);
-        assert!(maps.compacted_subtree(&completion.root).is_none());
-
-        maps.record_event(FsEventRecord {
-            path: completion.root.join("after.txt"),
-            kind: FsEventKind::Modified,
-            observed_at: timestamp(40),
-        });
-        assert_eq!(maps.pending_event_count(), 1);
-    }
-
-    #[test]
-    fn successful_reconcile_keeps_boundary_when_follow_up_work_exists() {
-        let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
-        let mut maps = stormed_maps(&subtree_root);
-        let mut scheduler = KeyedSupersedingScheduler::default();
-        let mut controller = ReconcileController::default();
-        let mut workgate = idle_reconcile_gate();
-
-        controller.release_ready_deferred_reconciles(
-            &mut maps,
-            &mut scheduler,
-            ThrottleState::Idle,
-            timestamp(32),
-        );
-        controller
-            .try_start_next(
-                &mut scheduler,
-                &mut workgate,
-                ThrottleState::Idle,
-                timestamp(32),
-            )
-            .expect("start reconcile");
-
-        maps.record_event(FsEventRecord {
-            path: subtree_root.join("after.txt"),
-            kind: FsEventKind::Modified,
-            observed_at: timestamp(33),
-        });
-
-        let completion = controller
-            .complete_success(&mut maps, &mut scheduler, &mut workgate)
-            .expect("complete reconcile");
-
-        assert!(!completion.boundary_cleared);
-        assert!(maps.compacted_subtree(&subtree_root).is_some());
-        assert!(maps.deferred_reconcile(&subtree_root).is_some());
+        assert!(maps.deferred_reconcile(&subtree_root).is_none());
     }
 
     fn idle_reconcile_gate() -> ThrottleWorkgate {
@@ -608,6 +570,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
 

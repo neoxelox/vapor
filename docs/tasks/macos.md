@@ -38,6 +38,14 @@ decision waits; the sign-in notice has a Sign In button.
       `docs/architecture/ipc-contracts.md` diagnostics section (filterable
       list + per-row drill-down; surface `droppedEvents` and
       `suppressedEchoes`).
+- [ ] M3-20 Show the files that cannot sync. `vapor status --json`
+      has `blocked` and `blockedFiles` (path, reason, next try), and
+      the queued count no longer holds them. The menu bar state and
+      the diagnostics panel have to name them with the reason, and the
+      state must not read "syncing" for them. A change under a folder
+      that waits for its scan shows as `reconcile.state: waiting` with
+      the count in `reconcile.detail`; the syncing state has to cover
+      that too.
 - [ ] M3-5 Implement the live timeline tab (bounded buffer; default 1000
       events; non-persistent across relaunch; say so when the answer
       was `truncated`).
@@ -331,9 +339,6 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       each run. The sign-in no longer needs a person each time: the
       token of the account is in the gitignored `.env` as
       `VAPOR_E2E_GDRIVE_TOKEN` (`core.md` TR-8), and `vapor auth login
-      --token -` takes it inside a guest. On a local build the daemon
-      then cannot read it from the keychain (`core.md` PL-7); until
-      that is fixed a scenario has to widen the item's partition list
-      itself, as `tools/vm/workloads/README.md` says. Decide with the
+      --token -` takes it inside a guest. Decide with the
       owner whether it is a leg of `./scripts/release.sh` next to the
       Drive leg of Tier E2E (`core.md` TR-8).

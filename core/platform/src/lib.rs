@@ -31,6 +31,7 @@ pub mod metrics;
 pub mod process;
 pub mod secrets;
 pub mod service;
+pub mod time;
 pub mod trash;
 
 pub use fs_caps::{

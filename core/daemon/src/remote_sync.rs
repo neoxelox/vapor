@@ -90,6 +90,10 @@ pub struct RemotePoller {
     /// taken, and a change between the two would be in neither. The
     /// wait ends with the answer of that poll, whatever it is.
     awaiting_cursor: bool,
+    /// The last page held as many changes as a page can: more wait.
+    page_was_full: bool,
+    /// When a change was last near (`note_activity`).
+    last_activity_inst: Option<Instant>,
     /// The wait ended with a poll that failed, so a walk may have
     /// started with no cursor. The baseline that answers later is
     /// newer than the listings of that walk, and a change between the
@@ -114,6 +118,8 @@ impl RemotePoller {
             discard_history: false,
             refused_sign_in: None,
             awaiting_cursor: true,
+            page_was_full: false,
+            last_activity_inst: None,
             walk_may_predate_cursor: false,
         }
     }
@@ -146,6 +152,13 @@ impl RemotePoller {
         self.awaiting_cursor
     }
 
+    /// Whether the feed has changes it has not handed over yet: a poll
+    /// is in flight, or the last page was full and the next one is
+    /// asked for at once.
+    pub fn more_changes_expected(&self) -> bool {
+        self.in_flight.is_some() || self.page_was_full
+    }
+
     /// Collisions found since the last call, for the timeline.
     pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
         std::mem::take(&mut self.name_collisions)
@@ -157,20 +170,42 @@ impl RemotePoller {
     }
 
     /// Poll cadence for the current throttle state; `None` means the
-    /// state forbids polling entirely.
-    fn cadence_for(state: ThrottleState) -> Option<Duration> {
-        match state {
-            ThrottleState::Idle => Some(Duration::from_secs(
-                constants::engine::REMOTE_POLL_IDLE_SECONDS,
-            )),
-            ThrottleState::Light => Some(Duration::from_secs(
-                constants::engine::REMOTE_POLL_LIGHT_SECONDS,
-            )),
-            ThrottleState::Throttled => Some(Duration::from_secs(
-                constants::engine::REMOTE_POLL_THROTTLED_SECONDS,
-            )),
-            ThrottleState::Suspended => None,
+    /// state forbids polling entirely. A feed that a local watcher
+    /// feeds is read each second whatever the state: reading it costs
+    /// nothing, and the change is already on this device's disk. A
+    /// feed that is a network call follows the state, except while a
+    /// change is near (`active`).
+    fn cadence_for(state: ThrottleState, watched: bool, active: bool) -> Option<Duration> {
+        if state == ThrottleState::Suspended {
+            return None;
         }
+        if watched {
+            return Some(Duration::from_secs(
+                constants::engine::REMOTE_POLL_WATCHED_SECONDS,
+            ));
+        }
+        let seconds = match state {
+            ThrottleState::Idle => constants::engine::REMOTE_POLL_IDLE_SECONDS,
+            _ if active => constants::engine::REMOTE_POLL_IDLE_SECONDS,
+            ThrottleState::Light => constants::engine::REMOTE_POLL_LIGHT_SECONDS,
+            ThrottleState::Throttled => constants::engine::REMOTE_POLL_THROTTLED_SECONDS,
+            ThrottleState::Suspended => return None,
+        };
+        Some(Duration::from_secs(seconds))
+    }
+
+    /// A change is near: this device just moved a file, or a poll just
+    /// brought changes. The feed is polled at the `Idle` cadence for a
+    /// while from `now_inst` on.
+    pub fn note_activity(&mut self, now_inst: Instant) {
+        self.last_activity_inst = Some(now_inst);
+    }
+
+    fn change_is_near(&self, now_inst: Instant) -> bool {
+        self.last_activity_inst.is_some_and(|last| {
+            now_inst.saturating_duration_since(last)
+                < Duration::from_secs(constants::engine::REMOTE_POLL_ACTIVE_WINDOW_SECONDS)
+        })
     }
 
     /// Clears the poll cadence so the next tick polls immediately.
@@ -228,17 +263,22 @@ impl RemotePoller {
             }
             return Ok(report);
         }
-        if !app.provider().capabilities().supports_remote_changes_feed {
+        let capabilities = app.provider().capabilities();
+        if !capabilities.supports_remote_changes_feed {
             return Ok(report);
         }
         let throttle_state = app.snapshot().throttle_state;
-        let Some(cadence) = Self::cadence_for(throttle_state) else {
+        let now_inst = clock.now();
+        let Some(cadence) = Self::cadence_for(
+            throttle_state,
+            capabilities.changes_feed_is_watched,
+            self.change_is_near(now_inst),
+        ) else {
             return Ok(report);
         };
         if !app.remote_poll_allowed() {
             return Ok(report);
         }
-        let now_inst = clock.now();
         let due = self
             .last_poll_inst
             .map(|last| now_inst.saturating_duration_since(last) >= cadence)
@@ -449,6 +489,22 @@ impl RemotePoller {
                         report.mirror_reverts += 1;
                         continue;
                     }
+                    if sync_mode != SyncMode::PushOnly
+                        && change.kind == RemoteChangeKind::CreatedOrModified
+                        && let Some(folder) = respelled_folder_above(&local_target)
+                    {
+                        // The cloud names a folder on the way to this
+                        // file by another spelling than this device
+                        // stores: the folder was renamed in the cloud,
+                        // by capitals only. A download through the new
+                        // spelling would write into the old folder and
+                        // leave its name as it is. The walk of the
+                        // folder above it renames the local folder to
+                        // the cloud's spelling, and the index rows with
+                        // it.
+                        batch.push((folder, PendingIntentKind::ReconcileSubtree, event_time));
+                        continue;
+                    }
                     if change.kind == RemoteChangeKind::CreatedOrModified
                         && let Some(existing) =
                             crate::name_collision::colliding_local_path(&local_target)
@@ -527,6 +583,30 @@ impl RemotePoller {
                                 continue;
                             }
                             batch.push((local_target, PendingIntentKind::Download, event_time));
+                        }
+                        RemoteChangeKind::FolderMoved => {
+                            // One entry stands for every file under the
+                            // folder, and none of them has an entry of
+                            // its own. The walk of the folder that holds
+                            // this path finds what the change did: a
+                            // name with another spelling, files under a
+                            // new path, files that left.
+                            //
+                            // The root as the path: the provider could
+                            // not read where a change is, and the walk
+                            // of everything finds it.
+                            let holder = if change.path.is_root() {
+                                Some(local_target.clone())
+                            } else {
+                                local_target.parent().map(Path::to_path_buf)
+                            };
+                            if let Some(holder) = holder {
+                                batch.push((
+                                    holder,
+                                    PendingIntentKind::ReconcileSubtree,
+                                    event_time,
+                                ));
+                            }
                         }
                         RemoteChangeKind::Removed => {
                             if remote_echoes.matches_delete(change.path.as_str(), now) {
@@ -610,6 +690,7 @@ impl RemotePoller {
                     state_db.set_state(&self.cursor_state_key, &page.next_cursor, now)?;
                     self.cursor = Some(page.next_cursor);
                 }
+                self.page_was_full = page_was_full;
                 if page_was_full {
                     // Re-poll immediately on the next tick to continue
                     // draining the known backlog.
@@ -678,6 +759,13 @@ fn folder_of_other_spelling(target: &Path) -> Option<PathBuf> {
     folder
 }
 
+/// The folder to walk when a folder on the way to `target` is stored
+/// under another spelling than `target` gives it. `None` when every
+/// folder is spelled alike, also when only the file's own name differs.
+fn respelled_folder_above(target: &Path) -> Option<PathBuf> {
+    folder_of_other_spelling(target).filter(|folder| Some(folder.as_path()) != target.parent())
+}
+
 fn local_file_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file())
@@ -696,12 +784,20 @@ fn local_dir_exists(path: &Path) -> bool {
 /// The self-write cache expires records after ~30s, but the poll cadence
 /// reaches 60s under Throttled (and stops entirely under Suspended), so
 /// the daemon's own upload can be observed in the feed after its live
-/// record expired. The persisted sync index still holds the op-id and
-/// content hash we last wrote for the path: a change carrying the hash
-/// is our own bytes reflected back; a change carrying the op-id is our
-/// object, which an in-place edit (an append, a same-size rewrite)
-/// leaves tagged, so the op-id only counts when the size and mtime the
-/// feed reports still match what the index recorded at the transfer.
+/// record expired. The persisted sync index still holds what the last
+/// transfer left in the cloud, and a change that describes exactly that
+/// object changes nothing:
+///
+/// - A change that carries the indexed hash is the same bytes. A change
+///   that carries another hash is other bytes, whatever else agrees.
+/// - A change with the size and the remote mtime the index recorded is
+///   the rsync quick check passing: nothing wrote the object since. It
+///   needs no op-id. An object that no Vapor wrote has none, and a
+///   `chmod` or a `chflags` of it is still no change.
+/// - A change that carries the indexed op-id is our object. An in-place
+///   edit (an append, a same-size rewrite) leaves it tagged, so the
+///   op-id counts only while the feed has no size or mtime that says
+///   otherwise.
 fn is_durable_self_write_echo(
     state_db: &mut DurableStateDb,
     local_target: &Path,
@@ -710,17 +806,21 @@ fn is_durable_self_write_echo(
     let Ok(Some(index)) = state_db.sync_index(local_target) else {
         return false;
     };
-    if change.content_hash.as_deref() == Some(index.content_hash.as_str()) {
+    if let Some(hash) = change.content_hash.as_deref()
+        && !index.content_hash.is_empty()
+    {
+        return hash == index.content_hash;
+    }
+    if let (Some(size), Some(modified_at)) = (change.size_bytes, change.modified_at)
+        && index.matches_remote(size, modified_at)
+    {
         return true;
     }
     if change.op_id.as_deref() != Some(index.last_op_id.as_str()) {
         return false;
     }
     match (change.size_bytes, change.modified_at) {
-        (Some(size), Some(modified_at)) => {
-            index.matches_remote(size, modified_at)
-                || (index.remote_modified_at.is_none() && size == index.size_bytes)
-        }
+        (Some(size), Some(_)) => index.remote_modified_at.is_none() && size == index.size_bytes,
         (Some(size), None) => size == index.size_bytes,
         (None, _) => true,
     }
@@ -952,6 +1052,164 @@ mod tests {
         assert_eq!(change(&mut fixture, 200), 0, "reported one time");
     }
 
+    /// A feed that answers with the changes a test hands it, as a
+    /// provider whose feed has one entry for a folder does.
+    struct ScriptedFeed {
+        pages: std::sync::Mutex<Vec<Vec<vapor_providers::RemoteChange>>>,
+    }
+
+    impl vapor_providers::Provider for ScriptedFeed {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            vapor_providers::ProviderCapabilities::FILESYSTEM
+        }
+        fn ensure_cloud_root(&self, _dir: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn enumerate(
+            &self,
+            _dir: &vapor_providers::RemotePath,
+        ) -> Result<Vec<vapor_providers::RemoteEntry>, ProviderError> {
+            Ok(Vec::new())
+        }
+        fn stat(
+            &self,
+            _path: &vapor_providers::RemotePath,
+        ) -> Result<Option<vapor_providers::RemoteEntry>, ProviderError> {
+            Ok(None)
+        }
+        fn content_hash(
+            &self,
+            _path: &vapor_providers::RemotePath,
+        ) -> Result<String, ProviderError> {
+            Ok(String::new())
+        }
+        fn begin_upload(
+            &self,
+            _request: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::permanent("no transfers"))
+        }
+        fn begin_download(
+            &self,
+            _request: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::permanent("no transfers"))
+        }
+        fn delete(
+            &self,
+            _path: &vapor_providers::RemotePath,
+            _op_id: &str,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn poll_changes(
+            &self,
+            cursor: Option<&str>,
+            _max: usize,
+        ) -> Result<ChangesPoll, ProviderError> {
+            let mut pages = self.pages.lock().expect("pages");
+            let changes = if cursor.is_none() || pages.is_empty() {
+                Vec::new()
+            } else {
+                pages.remove(0)
+            };
+            Ok(ChangesPoll::Page(vapor_providers::RemoteChangesPage {
+                changes,
+                next_cursor: format!("left-{}", pages.len()),
+            }))
+        }
+    }
+
+    #[test]
+    fn a_folder_that_moved_in_the_cloud_asks_for_a_walk_of_the_folder_that_holds_it() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let local_root = temp.path().join("local");
+        std::fs::create_dir_all(local_root.join("work/Reports")).expect("local tree");
+        let moved = |path: &str| vapor_providers::RemoteChange {
+            path: vapor_providers::RemotePath::new(path).expect("path"),
+            kind: RemoteChangeKind::FolderMoved,
+            observed_at: ts(10),
+            op_id: None,
+            content_hash: None,
+            size_bytes: None,
+            modified_at: None,
+        };
+        // The folder got another spelling, then moved to the top. Then
+        // the provider could not read where a change is.
+        let place_unknown = vapor_providers::RemoteChange {
+            path: vapor_providers::RemotePath::root(),
+            ..moved("x")
+        };
+        let provider = ScriptedFeed {
+            pages: std::sync::Mutex::new(vec![
+                vec![moved("work/Reports"), moved("work/reports")],
+                vec![moved("work/reports"), moved("reports")],
+                vec![place_unknown],
+            ]),
+        };
+        let clock = Arc::new(ManualClock::at_now());
+        let mut app = DaemonApp::new_with_clock(Box::new(provider), clock.clone());
+        let mut state_db =
+            DurableStateDb::open(temp.path().join("state/vapor.sqlite")).expect("open state db");
+        let mut poller = RemotePoller::new("default");
+        let mut echoes = SelfWriteCache::new();
+        let mut poll = |state_db: &mut DurableStateDb, now: SystemTime| {
+            clock.advance(Duration::from_secs(61));
+            let shared: SharedClock = clock.clone();
+            poller
+                .poll_if_due(
+                    &mut app,
+                    state_db,
+                    &mut echoes,
+                    Some(&local_root),
+                    None,
+                    SyncMode::TwoWay,
+                    &shared,
+                    now,
+                    &ProviderCallMode::Inline,
+                )
+                .expect("poll")
+        };
+        poll(&mut state_db, ts(0)); // baseline
+
+        // Two entries for one folder, one walk: the folder that holds
+        // both spellings.
+        let report = poll(&mut state_db, ts(20));
+        assert_eq!(report.observed_changes, 2);
+        let mut walks = Vec::new();
+        while let Some(intent) = state_db.lease_next_ready(ts(30)).expect("lease") {
+            assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+            walks.push(intent.path.clone());
+            state_db.complete_leased(intent.id).expect("the walk ran");
+        }
+        assert_eq!(walks, vec![local_root.join("work")]);
+
+        // A move to another folder walks the folder it left and the one
+        // it is in now.
+        poll(&mut state_db, ts(40));
+        let mut walks = Vec::new();
+        while let Some(intent) = state_db.lease_next_ready(ts(50)).expect("lease") {
+            assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+            walks.push(intent.path.clone());
+            state_db.complete_leased(intent.id).expect("the walk ran");
+        }
+        walks.sort();
+        assert_eq!(walks, vec![local_root.clone(), local_root.join("work")]);
+
+        // The root as the path asks for the walk of everything, and not
+        // of the folder that holds the root.
+        poll(&mut state_db, ts(60));
+        let intent = state_db
+            .lease_next_ready(ts(70))
+            .expect("lease")
+            .expect("a walk");
+        assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(intent.path, local_root);
+    }
+
     #[test]
     fn self_write_echoes_are_suppressed_not_enqueued() {
         let mut fixture = Fixture::new();
@@ -986,6 +1244,71 @@ mod tests {
                 .remote_echoes
                 .matches_write("ours.txt", Some("op-mine"), None, ts(10))
         );
+    }
+
+    /// Syncs `name` as a file that no Vapor wrote: the index row holds
+    /// the content, the size, and the remote mtime, and an empty op-id.
+    fn seed_untagged_synced_file(fixture: &mut Fixture, name: &str, body: &[u8]) -> PathBuf {
+        let remote = fixture.cloud_root.join(name);
+        let local = fixture.local_root.join(name);
+        std::fs::write(&remote, body).expect("seed remote");
+        std::fs::write(&local, body).expect("seed local");
+        let remote_modified_at = std::fs::metadata(&remote)
+            .and_then(|metadata| metadata.modified())
+            .expect("remote mtime");
+        let local_modified_at = std::fs::metadata(&local)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        fixture
+            .state_db
+            .set_sync_index(
+                &local,
+                &vapor_providers::filesystem::hash_hex_of_bytes(body),
+                body.len() as u64,
+                local_modified_at,
+                Some(remote_modified_at),
+                "",
+                ts(1),
+            )
+            .expect("seed index");
+        remote
+    }
+
+    #[test]
+    fn an_event_that_changes_no_bytes_of_an_untagged_object_is_no_change() {
+        let mut fixture = Fixture::new();
+        fixture.poll(ts(0)); // baseline
+        let remote = seed_untagged_synced_file(&mut fixture, "theirs.txt", b"from another tool");
+
+        // A `chmod` or a `chflags` in the cloud: an event, and the
+        // object still has the size and the time of the last sync.
+        fixture
+            .feed
+            .emit(remote.clone(), WatchEventKind::Modified, ts(10));
+
+        let report = fixture.poll(ts(20));
+        assert_eq!(report.observed_changes, 1);
+        assert_eq!(
+            report.suppressed_echoes, 1,
+            "the object is what the index recorded: no change"
+        );
+        assert_eq!(report.enqueued_intents, 0);
+    }
+
+    #[test]
+    fn a_write_to_an_untagged_object_is_still_a_change() {
+        let mut fixture = Fixture::new();
+        fixture.poll(ts(0)); // baseline
+        let remote = seed_untagged_synced_file(&mut fixture, "theirs.txt", b"from another tool");
+
+        std::fs::write(&remote, b"from another tool, edited").expect("edit remote");
+        fixture
+            .feed
+            .emit(remote.clone(), WatchEventKind::Modified, ts(10));
+
+        let report = fixture.poll(ts(20));
+        assert_eq!(report.suppressed_echoes, 0);
+        assert_eq!(report.enqueued_intents, 1, "another size is a change");
     }
 
     #[test]
@@ -1093,6 +1416,42 @@ mod tests {
             .expect("state read")
             .expect("cursor present");
         assert_ne!(cursor.value, "999999");
+    }
+
+    #[test]
+    fn a_watched_feed_is_read_each_second_in_every_state_but_suspended() {
+        for state in [
+            ThrottleState::Idle,
+            ThrottleState::Light,
+            ThrottleState::Throttled,
+        ] {
+            assert_eq!(
+                RemotePoller::cadence_for(state, true, false),
+                Some(Duration::from_secs(1)),
+                "{state:?}"
+            );
+        }
+        assert_eq!(
+            RemotePoller::cadence_for(ThrottleState::Suspended, true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_network_feed_is_polled_sooner_while_a_change_is_near() {
+        let throttled = |active| RemotePoller::cadence_for(ThrottleState::Throttled, false, active);
+        assert_eq!(throttled(false), Some(Duration::from_secs(60)));
+        assert_eq!(throttled(true), Some(Duration::from_secs(5)));
+
+        // The window closes a minute after the last sign of a change.
+        use crate::clock::Clock as _;
+        let clock = ManualClock::at_now();
+        let mut poller = RemotePoller::new("default");
+        poller.note_activity(clock.now());
+        clock.advance(Duration::from_secs(59));
+        assert!(poller.change_is_near(clock.now()));
+        clock.advance(Duration::from_secs(2));
+        assert!(!poller.change_is_near(clock.now()));
     }
 
     #[test]

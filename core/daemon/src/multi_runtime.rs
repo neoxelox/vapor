@@ -1235,8 +1235,37 @@ impl MultiProfileRuntime {
         let per_profile_cap = (DIAGNOSTICS_ROW_CAP / self.slots.len().max(1)).max(10);
         let mut daemon_reconcile = crate::runtime::ReconcileStatus::Idle;
         for slot in &self.slots {
-            let queued = slot.runtime.state_db().queue_depth().unwrap_or(0) as u64;
+            // A file that keeps failing is not work in progress: it is
+            // counted apart, and named with its reason.
+            let blocked = slot.runtime.state_db().blocked_depth().unwrap_or(0) as u64;
+            let queued =
+                (slot.runtime.state_db().queue_depth().unwrap_or(0) as u64).saturating_sub(blocked);
             let failed = slot.runtime.state_db().failed_depth().unwrap_or(0) as u64;
+            let room = constants::state::STATUS_BLOCKED_FILES_MAX
+                .saturating_sub(snapshot.blocked_files.len());
+            if blocked > 0 && room > 0 {
+                let rows = slot
+                    .runtime
+                    .state_db()
+                    .blocked_intents(room)
+                    .unwrap_or_default();
+                snapshot
+                    .blocked_files
+                    .extend(rows.into_iter().map(|intent| {
+                        vapor_ipc::BlockedFile {
+                            profile_id: slot.profile.id.clone(),
+                            path: intent.path.to_string_lossy().into_owned(),
+                            action: intent.kind.wire_action().to_string(),
+                            reason: intent.last_error.unwrap_or_default(),
+                            attempts: intent.attempt_count,
+                            next_attempt_ms: intent
+                                .available_at
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .map(|since| since.as_millis() as u64)
+                                .unwrap_or(0),
+                        }
+                    }));
+            }
             let decisions = slot.runtime.state_db().open_decision_count().unwrap_or(0) as u64;
             let (reverts, deletes) = slot.runtime.mirror_counters();
             let reconcile = slot.runtime.reconcile_status();
@@ -1259,6 +1288,7 @@ impl MultiProfileRuntime {
                 },
                 queued,
                 failed,
+                blocked,
                 decisions,
                 mirror: vapor_ipc::MirrorCounts { reverts, deletes },
                 suspended: slot.failed.is_some(),
@@ -1268,6 +1298,7 @@ impl MultiProfileRuntime {
             daemon_reconcile = daemon_reconcile.more_active(reconcile);
             snapshot.queued += queued;
             snapshot.failed += failed;
+            snapshot.blocked += blocked;
             snapshot.decisions += decisions;
             snapshot.mirror.reverts += reverts;
             snapshot.mirror.deletes += deletes;
@@ -1496,7 +1527,7 @@ fn compose_slot(
                 ],
             );
             let reason = format!("the state database cannot be opened: {error}");
-            return suspended_placeholder(composer, profile, reason);
+            return retried_placeholder(composer, profile, reason);
         }
     };
     let app = DaemonApp::new_with_shared_workgate(
@@ -1537,7 +1568,7 @@ fn compose_slot(
                 ],
             );
             let reason = format!("the profile could not be composed: {error:?}");
-            return suspended_placeholder(composer, profile, reason);
+            return retried_placeholder(composer, profile, reason);
         }
     };
     if let Some(built_filter) = runtime.shared_path_filter() {
@@ -1588,17 +1619,45 @@ fn compose_slot(
     }
     let control = Arc::new(RuntimeControl::new());
     runtime.attach_control(control.clone());
+    // The schedule of the startup reconcile is a write to the state
+    // database: a failure of it can pass, like one of the open.
+    let runtime_retry = failed.as_ref().map(|_| RuntimeRetry {
+        attempts: 0,
+        at: composer.clock.now() + suspended_profile_retry_delay(0),
+    });
     ProfileSlot {
         profile,
         runtime,
         control,
         consecutive_tick_errors: 0,
-        failed_at_composition: failed.is_some(),
+        failed_at_composition: false,
         failed,
         missing_root: None,
-        runtime_retry: None,
+        runtime_retry,
         relapse: None,
     }
+}
+
+/// A slot for a profile whose composition failed for a reason that can
+/// pass on its own: a state database that cannot be opened (a full
+/// disk, a lock held by another process), a runtime that cannot be
+/// built. Nothing in the configuration is wrong, so nothing the user
+/// changes there would bring it back; the profile is composed again
+/// after the waits of a suspended profile, as one that ran and then
+/// failed is.
+fn retried_placeholder(
+    composer: &mut SlotComposer,
+    profile: ResolvedProfile,
+    reason: String,
+) -> ProfileSlot {
+    let first_try = composer.clock.now() + suspended_profile_retry_delay(0);
+    let mut slot = suspended_placeholder(composer, profile, reason);
+    slot.failed_at_composition = false;
+    slot.runtime_retry = Some(RuntimeRetry {
+        attempts: 0,
+        at: first_try,
+    });
+    slot
 }
 
 /// A slot for a profile that cannot be composed: an inert runtime on
@@ -1880,8 +1939,15 @@ mod tests {
         /// Builds a multi-profile runtime over `specs`:
         /// (profile id, sync mode, shares_local_root_with_first).
         fn new(specs: &[(&str, SyncMode, bool)]) -> Self {
+            Self::new_after(specs, |_| {})
+        }
+
+        /// [`Self::new`], with `prepare` run on the fixture's directory
+        /// before the daemon composes its profiles.
+        fn new_after(specs: &[(&str, SyncMode, bool)], prepare: impl FnOnce(&Path)) -> Self {
             let temp = TempDir::new().expect("temp dir");
             let clock = Arc::new(ManualClock::at_now());
+            prepare(temp.path());
 
             let shared_local = temp.path().join("local-shared");
             std::fs::create_dir_all(&shared_local).expect("shared local root");
@@ -3129,6 +3195,35 @@ mod tests {
                 .exists(),
             "the profile syncs again"
         );
+    }
+
+    #[test]
+    fn a_profile_whose_state_database_cannot_be_opened_is_tried_again() {
+        // A file stands where the folder of the profile's database
+        // goes, as a full disk or a lock would stop the open.
+        let in_the_way = |root: &Path| root.join("state/profiles/only");
+        let mut fixture = MultiFixture::new_after(&[("only", SyncMode::TwoWay, false)], |root| {
+            std::fs::create_dir_all(root.join("state/profiles")).expect("state");
+            std::fs::write(in_the_way(root), b"in the way").expect("obstacle");
+        });
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+        assert_eq!(
+            fixture.multi.all_suspended(),
+            Some(AllSuspended::AtRuntime),
+            "nothing in the configuration is wrong: the daemon tries again"
+        );
+
+        // The cause is still there at the first try: the profile waits
+        // for the next one.
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+
+        // The cause goes, and the next try composes the profile. No
+        // restart, and no change of the configuration.
+        std::fs::remove_file(in_the_way(fixture._temp.path())).expect("the cause goes");
+        fixture.tick(301_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
+        assert_eq!(fixture.multi.all_suspended(), None);
     }
 
     #[test]

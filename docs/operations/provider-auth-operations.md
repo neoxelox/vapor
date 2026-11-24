@@ -100,26 +100,33 @@ is not visible in another: sign in again there.
   attribute is the secret name (`auth.default.gdrive.token` for the
   default profile), so Keychain Access lists every Vapor entry under
   one search term and a user can remove them by hand.
-- The item is created with an access list naming the binary that
-  wrote it plus its companions (`vapor` and `vapord`, side by side in
-  a build directory or at `Contents/Helpers/vapor` and
-  `Contents/MacOS/vapord` inside the bundle). The daemon therefore
-  reads a token the CLI stored without a keychain prompt. A store over
-  an item that exists removes the item and adds it again, because only
-  the creation writes the access list: a sign-in after an update gives
-  the item the list of the binaries that run now.
+- The daemon binary creates the item. `vapor auth login` and the
+  app's sign-in do not write to the keychain themselves: they run the
+  `vapord` next to them (side by side in a build directory, or
+  `Contents/MacOS/vapord` inside the bundle) as `vapord secret set
+  <name>` with the value on standard input, never on the command
+  line. macOS lets a process read an item with no dialog only when the
+  item names that process twice: in its access list, and in a second
+  list that the keychain fills from the code signature of the process
+  that creates the item. An item that `vapor` creates is closed to
+  `vapord` on a build with no Developer ID, whatever its access list
+  says. So the binary that reads the token writes it. The access list
+  still names both binaries.
+- A store over an item that exists removes the item and adds it again,
+  because only the creation writes the two lists: a sign-in after an
+  update gives the item the lists of the binaries that run now.
 - The daemon never opens a keychain dialog. It reads with the
-  interaction turned off, so a read that would need the user's consent
-  fails, and the profile holds for a sign-in (below). A dialog from a
-  background process would sit unseen and block the read.
+  interaction turned off for its whole process, so a read that would
+  need the user's consent fails, and the profile holds for a sign-in
+  (below). A dialog from a background process would sit unseen and
+  block the read.
 - Development builds and prerelease builds are not signed with a
   Developer ID, and macOS identifies such a binary by its content
   hash. A rebuilt `vapord`, or an updated prerelease app, is a new
-  identity that the item's access list does not name. The daemon's
-  read then fails, the profile asks for a sign-in, and `vapor auth
-  login` stores the item again for the new binaries. A release signed
-  with a Developer ID is identified by its code requirement and keeps
-  its access across updates.
+  identity that the item does not name. The daemon's read then fails,
+  the profile asks for a sign-in, and one `vapor auth login` stores the
+  item again for the new binary. A release signed with a Developer ID
+  is identified by its team and keeps its access across updates.
 - Without a GUI session (SSH, CI) the keychain refuses any operation
   that would need a prompt with `errSecInteractionNotAllowed`; the
   error surfaces verbatim in `vapor auth` output and in the daemon's
@@ -190,11 +197,14 @@ file, so it holds the profile instead of failing work
   retry attempt.
 - **What the user sees.** The profile's `signInRequired` is `true`
   in `vapor status --json`, its run state is `error` with the reason
-  `Vapor needs to sign in to gdrive again: sync is on hold until then
+  `Vapor needs to sign in to gdrive: sync is on hold until then
   (vapor auth login --profile <id>)`, `vapor status` prints a
   `Sign-in required` line, and the timeline records a `sign-in` entry.
   The daemon logs one WARNING when the hold starts and an INFO line
-  when it lifts. In the macOS app the menu bar mark turns orange, and
+  when it lifts. A sign-in that is given while the cloud cannot be
+  reached ends the ask at the next check: the daemon read the stored
+  sign-in, so the reason names the cloud from then on. A sign-in that
+  the cloud refuses once it can be reached puts the hold back. In the macOS app the menu bar mark turns orange, and
   the Dashboard and the menu show the notice with a Sign In button,
   which runs `vapor auth login --profile <id> --browser` from
   the bundled CLI.
@@ -213,7 +223,16 @@ file, so it holds the profile instead of failing work
 - `vapor auth logout --profile <id>` removes every credential the
   profile holds; `vapor auth status` reports each profile as
   `signed-in`, `signed-out`, or `not-needed` without ever revealing
-  token values.
+  token values. A daemon that runs follows within about 30 seconds:
+  the provider looks at the secret store that often. A store with no
+  tokens at two looks, 2 seconds apart, is a sign-out: the provider
+  stops using the tokens it holds in memory, and the profile holds for
+  a sign-in. One look is not enough, because the keychain replaces an
+  item by a delete and an add. A store that does not answer (a locked
+  keychain) is not a sign-out. A token refresh never writes into a
+  store that holds no tokens or the tokens of another sign-in, and a
+  sign-in with another account replaces the tokens in memory at the
+  next look.
 - `--profile` names the profile; its provider decides what signing in
   means. With one profile the flag is optional; with several, a command
   that acts on one profile refuses without it and lists the ids.

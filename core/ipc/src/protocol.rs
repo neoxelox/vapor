@@ -281,6 +281,14 @@ pub struct StatusResponse {
     /// Work that failed for good, across profiles.
     #[serde(default)]
     pub failed: u64,
+    /// Files that cannot be synced for now, across profiles: each one
+    /// failed several times in a row and is tried again minutes apart.
+    /// They are not part of `queued`.
+    #[serde(default)]
+    pub blocked: u64,
+    /// The first blocked files, each with the reason of its last try.
+    #[serde(default)]
+    pub blocked_files: Vec<BlockedFile>,
     /// Open decisions across profiles (`vapor decisions list`),
     /// conflicts included.
     #[serde(default)]
@@ -297,6 +305,27 @@ pub struct StatusResponse {
     pub resources: Option<ResourcesStatus>,
     #[serde(default)]
     pub profiles: Vec<ProfileStatus>,
+}
+
+/// A file that cannot be synced for now, as `vapor status` names it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedFile {
+    #[serde(default)]
+    pub profile_id: String,
+    pub path: String,
+    /// What Vapor tries to do with it: one of
+    /// `constants::intent::ACTION_*`.
+    #[serde(default)]
+    pub action: String,
+    /// Why the last try failed.
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub attempts: u32,
+    /// When the next try is due, in milliseconds since the Unix epoch.
+    #[serde(default)]
+    pub next_attempt_ms: u64,
 }
 
 /// One profile's row inside [`StatusResponse`].
@@ -320,6 +349,9 @@ pub struct ProfileStatus {
     pub queued: u64,
     #[serde(default)]
     pub failed: u64,
+    /// Files of this profile that cannot be synced for now.
+    #[serde(default)]
+    pub blocked: u64,
     #[serde(default)]
     pub decisions: u64,
     #[serde(default)]

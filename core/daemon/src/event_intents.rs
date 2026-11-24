@@ -310,21 +310,12 @@ impl BoundedEventIntentMaps {
     /// Releases every deferred reconcile regardless of its not-before
     /// time. The user's `vapor reconcile` pulls deferred work forward
     /// instead of waiting out the defer window.
-    pub fn take_all_deferred_reconcile_intents(&mut self) -> Vec<PendingIntentRecord> {
+    pub fn take_all_deferred_reconcile_intents(
+        &mut self,
+        now: SystemTime,
+    ) -> Vec<PendingIntentRecord> {
         let roots: Vec<PathBuf> = self.deferred_reconciles.keys().cloned().collect();
-        let mut intents = Vec::with_capacity(roots.len());
-        for root in roots {
-            if let Some(record) = self.deferred_reconciles.remove(&root) {
-                self.untrack_path(&root);
-                intents.push(PendingIntentRecord {
-                    path: root,
-                    kind: PendingIntentKind::ReconcileSubtree,
-                    observed_at: record.available_at,
-                });
-            }
-        }
-
-        intents
+        self.release_deferred_reconciles(roots, now)
     }
 
     pub fn take_ready_deferred_reconcile_intents(
@@ -334,38 +325,71 @@ impl BoundedEventIntentMaps {
         self.take_deferred_reconcile_intents_ready_by(now, None)
     }
 
-    /// Like [`Self::take_ready_deferred_reconcile_intents`], but a record
-    /// whose storm has been quiet for `quiet_release` also counts as
-    /// ready even before its full deferral elapses. New events on the
-    /// same root refresh `last_observed_at`, so an ongoing storm keeps
-    /// its record deferred.
+    /// Like [`Self::take_ready_deferred_reconcile_intents`], with the
+    /// earlier start of an idle device when `idle` is given: a moment
+    /// after the storm ends. A storm that goes on keeps its record
+    /// deferred; a few events a second in the folder do not.
     pub fn take_deferred_reconcile_intents_ready_by(
         &mut self,
         now: SystemTime,
-        quiet_release: Option<std::time::Duration>,
+        idle: Option<crate::storm::IdleRelease>,
     ) -> Vec<PendingIntentRecord> {
-        let ready = |record: &crate::storm::DeferredReconcileRecord| {
-            record.available_at <= now
-                || quiet_release.is_some_and(|quiet| record.last_observed_at + quiet <= now)
-        };
         let ready_roots: Vec<PathBuf> = self
             .deferred_reconciles
             .iter()
-            .filter_map(|(root, record)| ready(record).then_some(root.clone()))
+            .filter_map(|(root, record)| record.is_ready(now, idle).then_some(root.clone()))
             .collect();
-        let mut ready_intents = Vec::with_capacity(ready_roots.len());
-        for root in ready_roots {
+        self.release_deferred_reconciles(ready_roots, now)
+    }
+
+    /// Turns the deferred reconciles of `roots` into reconcile intents.
+    /// The compaction of each folder ends here: the walk that is about
+    /// to start lists the folder after this moment, so it sees every
+    /// change the folder took in, and a change that comes later travels
+    /// as its own event again. A folder that stayed compacted until its
+    /// walk was done kept every later save waiting for one more walk.
+    ///
+    /// A released reconcile is due at `now`, not at the end of the
+    /// deferral it was released ahead of: the queue would otherwise
+    /// hold it until then, and the early release would change nothing.
+    fn release_deferred_reconciles(
+        &mut self,
+        roots: Vec<PathBuf>,
+        now: SystemTime,
+    ) -> Vec<PendingIntentRecord> {
+        let mut intents = Vec::with_capacity(roots.len());
+        for root in roots {
             if let Some(record) = self.deferred_reconciles.remove(&root) {
                 self.untrack_path(&root);
-                ready_intents.push(PendingIntentRecord {
+                if self.compacted_storm_reason(&root).is_some() {
+                    self.compacted_subtrees.remove(&root);
+                }
+                intents.push(PendingIntentRecord {
                     path: root,
                     kind: PendingIntentKind::ReconcileSubtree,
-                    observed_at: record.available_at,
+                    observed_at: record.available_at.min(now),
                 });
             }
         }
+        intents
+    }
 
-        ready_intents
+    /// What waits for a deferred reconcile: for each compacted folder,
+    /// the changes it took in and the time its reconcile starts in a
+    /// throttle state other than `Idle`.
+    pub fn deferred_reconcile_summaries(&self) -> Vec<(PathBuf, usize, SystemTime)> {
+        self.deferred_reconciles
+            .values()
+            .map(|record| {
+                let held = self
+                    .compacted_subtrees
+                    .get(&record.root)
+                    .map_or(0, |compacted| {
+                        compacted.suppressed_event_count + compacted.suppressed_intent_count
+                    });
+                (record.root.clone(), held, record.available_at)
+            })
+            .collect()
     }
 
     pub fn clear_compacted_subtree_boundary(&mut self, root: &Path) -> bool {
@@ -590,20 +614,23 @@ impl BoundedEventIntentMaps {
                 compaction_count,
             },
         );
-        if let Some(deferred_available_at) = deferred_available_at {
-            self.schedule_deferred_reconcile(
+        if deferred_available_at.is_some() {
+            self.storm_detector.forget_storm_under(subtree_root);
+            self.note_storm(
                 subtree_root,
                 reason
                     .storm_reason()
                     .expect("deferred reconcile requires a storm reason"),
                 observed_at,
-                deferred_available_at,
             );
         } else {
             self.upsert_reconcile_intent(subtree_root, observed_at);
         }
 
-        logging::warning(
+        // A burst of changes in one folder is ordinary work (an
+        // install, an unpacked archive), and nothing for a user to act
+        // on.
+        logging::info(
             "Compacted pending paths into a subtree reconcile intent",
             &[
                 ("subtree", subtree_root.display().to_string()),
@@ -655,12 +682,14 @@ impl BoundedEventIntentMaps {
         observed_at: SystemTime,
     ) {
         if let Some(storm_reason) = self.compacted_storm_reason(subtree_root) {
-            self.schedule_deferred_reconcile(
-                subtree_root,
-                storm_reason,
-                observed_at,
-                self.storm_detector.deferred_available_at(observed_at),
-            );
+            let delay = self.storm_detector.thresholds().deferred_reconcile_delay;
+            let (window, busy_events) = self.storm_detector.busy_measure();
+            match self.deferred_reconciles.get_mut(subtree_root) {
+                Some(existing) => {
+                    existing.note_absorbed(observed_at, delay, window, busy_events);
+                }
+                None => self.note_storm(subtree_root, storm_reason, observed_at),
+            }
             return;
         }
 
@@ -685,43 +714,19 @@ impl BoundedEventIntentMaps {
         );
     }
 
-    fn schedule_deferred_reconcile(
-        &mut self,
-        subtree_root: &Path,
-        reason: StormReason,
-        observed_at: SystemTime,
-        available_at: SystemTime,
-    ) {
+    /// A storm under `subtree_root` was seen at `observed_at`: its
+    /// deferred reconcile is made, or pushed back when there is one.
+    fn note_storm(&mut self, subtree_root: &Path, reason: StormReason, observed_at: SystemTime) {
+        let delay = self.storm_detector.thresholds().deferred_reconcile_delay;
         if let Some(existing) = self.deferred_reconciles.get_mut(subtree_root) {
-            existing.reason = reason;
-            existing.last_observed_at = observed_at;
-            // "Defer until quiet", but bounded: a subtree that never goes
-            // quiet must not push its own reconcile out forever. The cap
-            // is measured from first detection, so continued churn can
-            // delay convergence by at most DEFERRED_RECONCILE_MAX_DELAY.
-            let max_available_at = existing.first_detected_at
-                + std::time::Duration::from_millis(
-                    constants::engine::DEFERRED_RECONCILE_MAX_DELAY_MILLIS,
-                );
-            existing.available_at = existing
-                .available_at
-                .max(available_at)
-                .min(max_available_at);
-            existing.reschedule_count += 1;
+            existing.note_storm(reason, observed_at, delay);
             return;
         }
 
         self.track_path(subtree_root);
         self.deferred_reconciles.insert(
             subtree_root.to_path_buf(),
-            DeferredReconcileRecord {
-                root: subtree_root.to_path_buf(),
-                reason,
-                first_detected_at: observed_at,
-                last_observed_at: observed_at,
-                available_at,
-                reschedule_count: 0,
-            },
+            DeferredReconcileRecord::new(subtree_root.to_path_buf(), reason, observed_at, delay),
         );
     }
 
@@ -732,13 +737,7 @@ impl BoundedEventIntentMaps {
     /// engine is already saturated.
     pub fn record_ingest_overflow(&mut self, dropped_count: usize, now: SystemTime) {
         let watch_root = self.watch_root.clone();
-        let available_at = self.storm_detector.deferred_available_at(now);
-        self.schedule_deferred_reconcile(
-            &watch_root,
-            StormReason::IngestOverflow,
-            now,
-            available_at,
-        );
+        self.note_storm(&watch_root, StormReason::IngestOverflow, now);
         logging::warning(
             "Scheduled whole-scope reconcile to repair dropped ingest events",
             &[
@@ -1167,6 +1166,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
         maps.record_event(fs_event(
@@ -1181,7 +1181,10 @@ mod tests {
         ));
         assert_eq!(maps.deferred_reconcile_count(), 1);
 
-        let quiet = Some(Duration::from_secs(5));
+        let quiet = Some(crate::storm::IdleRelease {
+            quiet: Duration::from_secs(5),
+            max_delay: Duration::from_secs(600),
+        });
         // 3s of quiet is not enough; the record stays deferred.
         assert!(
             maps.take_deferred_reconcile_intents_ready_by(timestamp(5), quiet)
@@ -1204,6 +1207,11 @@ mod tests {
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].kind, PendingIntentKind::ReconcileSubtree);
         assert_eq!(released[0].path, subtree_root);
+        assert_eq!(
+            released[0].observed_at,
+            timestamp(11),
+            "a reconcile that is released early is due at its release, not at the end of the deferral"
+        );
     }
 
     #[test]
@@ -1219,6 +1227,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
 
@@ -1278,6 +1287,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
         maps.record_event(fs_event(
@@ -1293,10 +1303,11 @@ mod tests {
         assert_eq!(maps.deferred_reconcile_count(), 1);
 
         // The reconcile boost: released well before the 30 s not-before.
-        let released = maps.take_all_deferred_reconcile_intents();
+        let released = maps.take_all_deferred_reconcile_intents(timestamp(3));
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].path, subtree_root);
         assert_eq!(released[0].kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(released[0].observed_at, timestamp(3), "due now");
         assert_eq!(maps.deferred_reconcile_count(), 0);
     }
 
@@ -1313,6 +1324,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
 
@@ -1358,6 +1370,7 @@ mod tests {
                 directory_event_count_threshold: 3,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(10),
+                absorbed_busy_event_threshold: 1,
             },
         );
 
@@ -1392,6 +1405,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 2,
                 deferred_reconcile_delay: Duration::from_secs(15),
+                absorbed_busy_event_threshold: 1,
             },
         );
 
@@ -1587,6 +1601,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
             },
         );
 
@@ -1629,6 +1644,139 @@ mod tests {
         );
     }
 
+    /// Thresholds that trip a folder at three paths, with a compacted
+    /// folder still in a storm at five events a window.
+    fn small_storm_thresholds() -> StormThresholds {
+        StormThresholds {
+            window: Duration::from_secs(2),
+            directory_unique_paths_threshold: 3,
+            directory_event_count_threshold: 99,
+            global_pending_event_count_threshold: 99,
+            deferred_reconcile_delay: Duration::from_secs(30),
+            absorbed_busy_event_threshold: 5,
+        }
+    }
+
+    #[test]
+    fn a_save_next_to_a_compacted_folder_does_not_compact_their_parent() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let busy = watch_root.join("code/demo");
+        let other = watch_root.join("code/other-project/main.rs");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root.clone(),
+            EventIntentLimits::new(100, 100),
+            small_storm_thresholds(),
+        );
+        // The burst: three paths in one project, spread over its
+        // folders, so the project is the deepest folder over the
+        // threshold. Its parent counts the same three paths.
+        for (index, name) in ["src/a.rs", "lib/b.rs", "bin/c.rs"].iter().enumerate() {
+            maps.record_event(fs_event(
+                busy.join(name),
+                FsEventKind::Modified,
+                index as u64,
+            ));
+        }
+        assert!(maps.compacted_subtree(&busy).is_some());
+
+        // One save in the project next to it, inside the same window.
+        maps.record_event(fs_event(other.clone(), FsEventKind::Modified, 1));
+
+        assert!(
+            maps.compacted_subtree(&watch_root.join("code")).is_none(),
+            "the burst was taken by the compaction of its own folder"
+        );
+        assert!(
+            maps.pending_event(&other).is_some(),
+            "the save next to the burst travels as its own event"
+        );
+    }
+
+    #[test]
+    fn a_few_events_a_second_do_not_push_the_reconcile_of_a_compacted_folder_back() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let busy = watch_root.join("code/demo");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            small_storm_thresholds(),
+        );
+        for (index, name) in ["src/a.rs", "lib/b.rs", "bin/c.rs"].iter().enumerate() {
+            maps.record_event(fs_event(
+                busy.join(name),
+                FsEventKind::Modified,
+                index as u64,
+            ));
+        }
+        let first_plan = maps
+            .deferred_reconcile(&busy)
+            .expect("deferred")
+            .available_at;
+
+        // A save every second for twenty seconds: ordinary work.
+        for second in 3..23 {
+            maps.record_event(fs_event(
+                busy.join("src/a.rs"),
+                FsEventKind::Modified,
+                second,
+            ));
+        }
+        assert_eq!(
+            maps.deferred_reconcile(&busy)
+                .expect("deferred")
+                .available_at,
+            first_plan,
+            "work below storm level does not move the reconcile"
+        );
+
+        // Five events inside one window: the storm is back.
+        for _ in 0..5 {
+            maps.record_event(fs_event(busy.join("src/a.rs"), FsEventKind::Modified, 24));
+        }
+        assert!(
+            maps.deferred_reconcile(&busy)
+                .expect("deferred")
+                .available_at
+                > first_plan
+        );
+    }
+
+    #[test]
+    fn the_compaction_of_a_folder_ends_when_its_reconcile_is_released() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let busy = watch_root.join("code/demo");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            small_storm_thresholds(),
+        );
+        for (index, name) in ["src/a.rs", "lib/b.rs", "bin/c.rs"].iter().enumerate() {
+            maps.record_event(fs_event(
+                busy.join(name),
+                FsEventKind::Modified,
+                index as u64,
+            ));
+        }
+        // On an idle device the reconcile starts a moment after the
+        // burst, not after the long delay.
+        let idle = Some(crate::storm::IdleRelease {
+            quiet: Duration::from_millis(1_500),
+            max_delay: Duration::from_secs(30),
+        });
+        assert!(
+            maps.take_deferred_reconcile_intents_ready_by(timestamp(3), idle)
+                .is_empty()
+        );
+        let released = maps.take_deferred_reconcile_intents_ready_by(timestamp(4), idle);
+        assert_eq!(released.len(), 1);
+        assert!(maps.compacted_subtree(&busy).is_none());
+
+        // A save after the release is an event of its own again.
+        let later = busy.join("src/later.rs");
+        maps.record_event(fs_event(later.clone(), FsEventKind::Modified, 5));
+        assert!(maps.pending_event(&later).is_some());
+    }
+
     fn disabled_storm_thresholds() -> StormThresholds {
         StormThresholds {
             window: Duration::from_secs(2),
@@ -1636,6 +1784,7 @@ mod tests {
             directory_event_count_threshold: usize::MAX,
             global_pending_event_count_threshold: usize::MAX,
             deferred_reconcile_delay: Duration::from_secs(30),
+            absorbed_busy_event_threshold: 1,
         }
     }
 

@@ -94,6 +94,17 @@ pub mod runtime {
 
 pub mod state {
     pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+    /// A queued intent that failed this many times in a row is blocked,
+    /// not queued work: something about the file stops it (it cannot be
+    /// read, its target is locked), the tries are minutes apart, and
+    /// the user has to be told. `vapor status` counts it apart.
+    pub const BLOCKED_AFTER_ATTEMPTS: u32 = 5;
+    /// Blocked files `vapor status` names with their reason.
+    pub const STATUS_BLOCKED_FILES_MAX: usize = 10;
+    /// A new event for a path makes a retry of that path due at once,
+    /// but only when the last try is at least this old: an event that
+    /// follows a failed try by seconds is most likely made by the try.
+    pub const RETRY_WAKE_GRACE_MILLIS: u64 = 10_000;
     /// The root identities a profile adopted, checked at every start
     /// and on a cadence so a replaced root is never mirrored blindly.
     pub const LOCAL_ROOT_IDENTITY_KEY: &str = "root_identity.local";
@@ -604,6 +615,12 @@ pub mod decision {
 /// device it names. Each copy is a `conflict` decision.
 pub mod conflict {
     pub const COPY_MARKER: &str = "~conflict-";
+    /// Stands where the device id goes in the name of a copy that no
+    /// device chose to make: the version an upload replaced without
+    /// having seen it, because two uploads of one file landed in the
+    /// same moment. A device id always has a `-` in it, so this is
+    /// never one.
+    pub const REPLACED_VERSION: &str = "replaced";
     /// How often a running daemon matches the open `conflict` decisions
     /// to the copies on disk: a file with copies gets a question, one
     /// whose versions changed gets the question rewritten, and one with
@@ -715,6 +732,27 @@ pub mod service {
     /// crash-loop guard, and at which an app reads the result. Mirrored
     /// by the Swift constants file per AGENTS.md §8.6.
     pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
+    /// How often the supervisor asks, between two ticks, whether the
+    /// daemon still answers on its socket. An answer that stops is the
+    /// sign of an exit, and the tick runs at once: a crashed daemon is
+    /// back in about a second, not at the next tick.
+    pub const SUPERVISOR_WATCH_MILLIS: u64 = 500;
+    /// A daemon whose process is there and which gives no answer on its
+    /// socket for this long is ended by the supervisor, and started
+    /// again under the crash-loop guard: it holds its job and syncs
+    /// nothing. Long enough for a daemon that starts, and for one that
+    /// stops.
+    pub const UNRESPONSIVE_KILL_SECONDS: u64 = 30;
+    /// The same for a daemon that has not answered since it started:
+    /// a start may take long (a large state database, a volume that
+    /// wakes up), and it is not a hang. After one such daemon was
+    /// ended, the next is left alone until it answers.
+    pub const UNRESPONSIVE_START_SECONDS: u64 = 300;
+    /// How long a daemon that was told to stop waits for its worker
+    /// threads. A worker inside a call that does not return (a read of
+    /// a mount that hangs) must not keep the process alive: the state
+    /// is durable, so the process ends without it.
+    pub const SHUTDOWN_JOIN_LIMIT_SECONDS: u64 = 5;
     /// The crash-loop policy. Crashes inside the window count together.
     /// The first restarts at once; from the second on, the restart
     /// waits a delay that doubles from the base up to the maximum; the
@@ -984,6 +1022,14 @@ pub mod engine {
     /// nowhere near the conservative `Other` window.
     pub const DOCUMENT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
+    /// The quiet window of a file with no class of its own whose writes
+    /// came in one short burst: it was written in one go (a copy, a
+    /// save), so it is complete when the burst is. The longer default
+    /// window stays for a file whose writes are spread out, which is
+    /// what a file that still grows looks like.
+    pub const SETTLED_FILE_DEBOUNCE_WINDOW_MILLIS: u64 = 1_000;
+    /// Writes spread over more than this are those of a file that grows.
+    pub const GROWING_FILE_SPAN_MILLIS: u64 = 1_000;
     pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
     /// Keyboard or pointer input inside this window marks the user as
     /// active, which holds the throttle at `Throttled` so sync never
@@ -1060,11 +1106,21 @@ pub mod engine {
     /// cap, bounds how much work is admitted.
     pub const PROVIDER_JOB_WORKERS_MIN: usize = 8;
     pub const PROVIDER_JOB_WORKERS_MAX: usize = 16;
-    /// Remote changes-feed poll cadence per throttle state; Google
-    /// Drive follows the same discipline. Suspended never polls.
+    /// Remote changes-feed poll cadence per throttle state, for a feed
+    /// that is a network call. Suspended never polls.
     pub const REMOTE_POLL_IDLE_SECONDS: u64 = 5;
     pub const REMOTE_POLL_LIGHT_SECONDS: u64 = 15;
     pub const REMOTE_POLL_THROTTLED_SECONDS: u64 = 60;
+    /// The cadence of a feed that a watcher on this device feeds: a
+    /// poll costs no request, so it is read each second in every state
+    /// but `Suspended`.
+    pub const REMOTE_POLL_WATCHED_SECONDS: u64 = 1;
+    /// The cadence while a change is near: for this long after a poll
+    /// that brought changes, or after a transfer of this device, the
+    /// feed is polled at the `Idle` cadence in every state but
+    /// `Suspended`. A device in use would otherwise see the next change
+    /// of a working session a minute late.
+    pub const REMOTE_POLL_ACTIVE_WINDOW_SECONDS: u64 = 60;
     /// Maximum remote changes consumed per poll page.
     pub const REMOTE_CHANGES_PAGE_MAX: usize = 256;
     /// Retry cadence for ensuring the provider-side sync root when the
@@ -1160,20 +1216,29 @@ pub mod engine {
     pub const STORM_DIRECTORY_UNIQUE_PATHS_THRESHOLD: usize = 200;
     pub const STORM_DIRECTORY_EVENT_COUNT_THRESHOLD: usize = 600;
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
+    /// How long after a storm ends its deferred reconcile starts, in the
+    /// throttle states other than `Idle`: the device is in use or under
+    /// a constraint, and the scan must not compete with what made the
+    /// storm.
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
-    /// Early-release path for a storm-deferred reconcile: once the
-    /// device is already idle (`Idle`) and the storm has been
-    /// quiet this long, waiting out the full deferral only delays
-    /// convergence the user is watching for (a repo clone appearing in
-    /// the cloud folder). The full delay still applies while the user
-    /// stays active.
-    pub const DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS: u64 = 5_000;
+    /// The same wait in `Idle`. The deferral protects a device under
+    /// load; on an idle one it only costs the time the user waits for a
+    /// clone or an install to reach the cloud folder.
+    pub const DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS: u64 = 1_500;
+    /// A compacted folder still counts as in a storm while it takes in
+    /// this many events inside one storm window. Fewer than that is
+    /// ordinary work (a save a second), which must not keep pushing the
+    /// reconcile of the folder back.
+    pub const STORM_ABSORBED_BUSY_EVENTS: usize = 50;
     /// Upper bound on how long a storm-deferred reconcile may keep being
-    /// pushed back by continued churn. Measured from the moment the storm
-    /// was first detected; once reached, the reconcile becomes releasable
-    /// even if the subtree never goes quiet, so a permanently-busy subtree
-    /// cannot starve its own convergence forever.
+    /// pushed back by a storm that goes on, measured from the moment the
+    /// storm was first detected. Once reached, the reconcile starts even
+    /// if the folder never goes quiet, so a folder that is busy for good
+    /// still converges.
     pub const DEFERRED_RECONCILE_MAX_DELAY_MILLIS: u64 = 600_000;
+    /// The same bound in `Idle`: nothing else needs the device, so a
+    /// long storm is scanned every half minute while it lasts.
+    pub const DEFERRED_RECONCILE_IDLE_MAX_DELAY_MILLIS: u64 = 30_000;
     /// Requeue delay for durable intents that could not start because a
     /// workgate permit or reconcile slot was unavailable. Deliberately
     /// coarser than the tick interval so blocked intents do not churn the
@@ -1190,6 +1255,20 @@ pub mod engine {
     /// tick waker, so a fully idle daemon polls at 1 Hz instead of 4 Hz.
     pub const IDLE_TICK_MILLIS: u64 = 1_000;
     pub const RECONCILE_SLICE_MILLIS: u64 = 500;
+    /// How long a removal that needs a copy to the trash of another
+    /// volume waits before it looks again, while the throttle is
+    /// `Suspended`.
+    pub const SUSPENDED_COPY_WAIT_SECONDS: u64 = 30;
+    /// How long the removal of a cloud folder waits, at least, while
+    /// removals of its entries are still in the queue.
+    pub const FOLDER_DELETE_WAIT_SECONDS: u64 = 2;
+    /// How long a download waits when a synced folder that the cloud
+    /// replaced with a file still holds files here: their removals are
+    /// queued and run in this time.
+    pub const TYPE_CLASH_WAIT_SECONDS: u64 = 3;
+    /// The same wait while a mass-delete question holds those removals:
+    /// nothing moves until the user answers, so the look is rare.
+    pub const TYPE_CLASH_WAIT_HELD_SECONDS: u64 = 60;
     /// Minimum dwell time before the throttle controller may down-shift to
     /// or out of `Light`. Pairs with `MIN_DWELL_THROTTLED_SECONDS` to keep
     /// state stable under oscillating CPU / network samples.

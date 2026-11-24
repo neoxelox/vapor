@@ -51,6 +51,7 @@ in its pull request and in the documents under `docs/`.
 
 ### Fixed
 
+- The findings of a session of heavy use: a cloud event that changes no bytes no longer makes a conflict copy of a local edit, two uploads of one file in the same moment keep both versions, a burst of files starts to sync in 2 seconds and not 30, a crashed daemon is back in a second and one that hangs is ended, a sign-in from a terminal is read by the daemon, a folder renamed or moved in Google Drive reaches the other devices in seconds, and `vapor status` lists the files that cannot sync.
 - A rename that changes only the case of a name no longer removes the file from the cloud.
 - After a conflict with a slow download, the version that won is no longer deleted from the cloud.
 - A file removed and put back within seconds stays in the cloud, and a file put back with an old date is not deleted again.

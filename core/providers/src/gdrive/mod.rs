@@ -49,6 +49,16 @@ const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const GOOGLE_APPS_MIME_PREFIX: &str = "application/vnd.google-apps.";
 const OP_ID_PROPERTY: &str = "vaporOpId";
 
+/// Where a file or a folder of the changes feed is.
+enum ChangedPath {
+    InScope(ResolvedChangePath),
+    /// Outside the sync root.
+    OutOfScope,
+    /// A folder above it could not be read (the cloud did not answer),
+    /// so its place is not known. The feed does not say it again.
+    Unknown,
+}
+
 /// A changed file's freshly-resolved path, plus the stale cached path it
 /// moved from (a rename/move) when that differs.
 struct ResolvedChangePath {
@@ -102,11 +112,35 @@ impl GdriveConfig {
     }
 }
 
+/// How long the tokens in memory stand with no look at the secret
+/// store. A sign-out removes the tokens from the store and a new
+/// sign-in replaces them; a daemon that runs follows both this soon.
+const TOKEN_STORE_CHECK: Duration = Duration::from_secs(30);
+/// How long a store with no tokens must go on saying so before the
+/// profile counts as signed out. One read is not enough: the keychain
+/// replaces an item by a delete and an add, and a read between the two
+/// finds nothing.
+const TOKEN_SIGN_OUT_CONFIRM: Duration = Duration::from_secs(2);
+
+/// What the provider knows of the secret store behind the tokens it
+/// holds in memory.
+struct StoreLook {
+    /// When the store is read next. `None`: at the next call.
+    due: Option<std::time::Instant>,
+    /// Since when the store says that it holds no tokens.
+    missing_since: Option<std::time::Instant>,
+    /// [`TOKEN_STORE_CHECK`] and [`TOKEN_SIGN_OUT_CONFIRM`], which a
+    /// test shortens.
+    check: Duration,
+    confirm: Duration,
+}
+
 struct TokenManager {
     config: GdriveConfig,
     secrets: Arc<dyn SecretStore>,
     transport: Arc<dyn HttpTransport>,
     cached: Mutex<Option<StoredTokens>>,
+    look: Mutex<StoreLook>,
     /// The refresh token Google last refused. While the secret store
     /// still holds it, a call fails without another token request; a
     /// new sign-in stores a different one and the next call uses it.
@@ -123,26 +157,96 @@ impl TokenManager {
             .unwrap_or(0)
     }
 
-    fn load(&self) -> Result<StoredTokens, ProviderError> {
-        if let Some(tokens) = self
+    fn signed_out(&self) -> ProviderError {
+        ProviderError::authentication(format!(
+            "no Google Drive credentials for profile '{}'; {}",
+            self.config.profile_id,
+            self.sign_in_hint()
+        ))
+    }
+
+    /// The store holds the tokens in memory: the next look is a whole
+    /// check time away.
+    fn note_confirmed(&self) {
+        let mut look = self
+            .look
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        look.due = Some(std::time::Instant::now() + look.check);
+        look.missing_since = None;
+    }
+
+    /// The tokens in memory, when the secret store still stands behind
+    /// them. The store is the record of the sign-in: tokens that left
+    /// it are not used again, and tokens of another sign-in take the
+    /// place of the ones in memory.
+    fn cached_and_still_stored(&self) -> Result<Option<StoredTokens>, ProviderError> {
+        let Some(tokens) = self
             .cached
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
-        {
+        else {
+            return Ok(None);
+        };
+        let now = std::time::Instant::now();
+        let mut look = self
+            .look
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if look.due.is_some_and(|due| now < due) {
+            return Ok(Some(tokens));
+        }
+        match self.secrets.get(&self.config.token_secret_name()) {
+            Err(vapor_platform::SecretStoreError::NotFound(_)) => match look.missing_since {
+                // The store said so before, and says so still: the user
+                // signed this profile out.
+                Some(since) if since.elapsed() >= look.confirm => {
+                    drop(look);
+                    self.invalidate();
+                    Err(self.signed_out())
+                }
+                Some(since) => {
+                    look.due = Some(since + look.confirm);
+                    Ok(Some(tokens))
+                }
+                None => {
+                    look.missing_since = Some(now);
+                    look.due = Some(now + look.confirm);
+                    Ok(Some(tokens))
+                }
+            },
+            Ok(raw) => {
+                look.due = Some(now + look.check);
+                look.missing_since = None;
+                match serde_json::from_str::<StoredTokens>(&raw) {
+                    // Another sign-in: the next read takes it.
+                    Ok(stored) if stored.refresh_token != tokens.refresh_token => {
+                        drop(look);
+                        self.invalidate();
+                        Ok(None)
+                    }
+                    _ => Ok(Some(tokens)),
+                }
+            }
+            // The store did not answer (a locked keychain). It did not
+            // say that the sign-in is gone.
+            Err(_) => {
+                look.due = Some(now + look.check);
+                Ok(Some(tokens))
+            }
+        }
+    }
+
+    fn load(&self) -> Result<StoredTokens, ProviderError> {
+        if let Some(tokens) = self.cached_and_still_stored()? {
             return Ok(tokens);
         }
         let raw = self
             .secrets
             .get(&self.config.token_secret_name())
             .map_err(|error| match error {
-                vapor_platform::SecretStoreError::NotFound(_) => {
-                    ProviderError::authentication(format!(
-                        "no Google Drive credentials for profile '{}'; {}",
-                        self.config.profile_id,
-                        self.sign_in_hint()
-                    ))
-                }
+                vapor_platform::SecretStoreError::NotFound(_) => self.signed_out(),
                 // The store holds something and did not give it: the
                 // keychain would have asked, or it failed. A new
                 // sign-in writes an item this build can read.
@@ -162,6 +266,7 @@ impl TokenManager {
             .cached
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tokens.clone());
+        self.note_confirmed();
         Ok(tokens)
     }
 
@@ -266,7 +371,42 @@ impl TokenManager {
                 return Err(error);
             }
         };
+        // The store is read again before the write: the sign-in can
+        // have changed while the refresh ran.
+        match self.secrets.get(&self.config.token_secret_name()) {
+            // No tokens in the store: a sign-out, or a write of another
+            // process that is half done. To write the new tokens would
+            // sign the profile in again. They stay in memory until the
+            // next look at the store says which of the two it was.
+            Err(vapor_platform::SecretStoreError::NotFound(_)) => {
+                *self
+                    .cached
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(refreshed.clone());
+                let mut look = self
+                    .look
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let now = std::time::Instant::now();
+                let since = *look.missing_since.get_or_insert(now);
+                look.due = Some(since + look.confirm);
+                return Ok(refreshed.access_token);
+            }
+            // The store holds another sign-in. The tokens of this
+            // refresh belong to the one the user replaced.
+            Ok(raw)
+                if serde_json::from_str::<StoredTokens>(&raw)
+                    .is_ok_and(|stored| stored.refresh_token.as_deref() != Some(refresh_token)) =>
+            {
+                self.invalidate();
+                return Err(ProviderError::transient(
+                    "the sign-in of this profile changed during a token refresh",
+                ));
+            }
+            _ => {}
+        }
         self.store(&refreshed);
+        self.note_confirmed();
         Ok(refreshed.access_token)
     }
 
@@ -282,6 +422,12 @@ impl TokenManager {
             .cached
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let mut look = self
+            .look
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        look.due = None;
+        look.missing_since = None;
     }
 }
 
@@ -348,6 +494,231 @@ struct GdChangeList {
 const FILE_FIELDS: &str =
     "id,name,mimeType,size,md5Checksum,appProperties,parents,trashed,modifiedTime";
 
+/// One stored version of a file's content.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+struct GdRevision {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "md5Checksum")]
+    md5_checksum: Option<String>,
+    #[serde(default, rename = "modifiedTime")]
+    modified_time: Option<String>,
+    #[serde(default)]
+    size: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GdRevisionList {
+    #[serde(default)]
+    revisions: Vec<GdRevision>,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+const REVISION_FIELDS: &str = "nextPageToken,revisions(id,md5Checksum,modifiedTime,size)";
+/// The most pages of a file's versions one check reads. Drive keeps
+/// 100 versions of a file, 200 with the ones kept for good.
+const REVISION_PAGES_MAX: usize = 5;
+
+/// Work that keeps a version an upload replaced without having seen
+/// it. Drive has no conditional write of content: the guard of an
+/// upload is a read followed by a write, and a second device can write
+/// between the two. Both writes then land, and the first is a version
+/// of the file that no device holds under the name any more. Drive
+/// still has it, as a stored version, and this work gives it a name of
+/// its own.
+#[derive(Clone, Debug)]
+enum ReplacedWork {
+    /// Read the versions of a file after a guarded upload of it landed:
+    /// `base_md5` is what the upload meant to replace, `own_md5` what
+    /// it wrote.
+    Check {
+        file_id: String,
+        parent_id: String,
+        file_name: String,
+        base_md5: String,
+        own_md5: String,
+        /// From the re-verification before the commit to the answer of
+        /// the commit: the time in which another write could land
+        /// unseen.
+        commit_took: Duration,
+        /// The tag the upload put on the file. A file that still has
+        /// it was not written again by a device that runs Vapor.
+        op_id: String,
+    },
+    /// Copy one version into a file next to the one it belongs to.
+    Copy(RevisionCopy),
+}
+
+#[derive(Clone, Debug)]
+struct RevisionCopy {
+    file_id: String,
+    revision: GdRevision,
+    parent_id: String,
+    /// The name of the file the version belongs to.
+    file_name: String,
+    /// The name of the copy, from the moment it is chosen.
+    copy_name: String,
+    /// The resumable session of the copy and how far it is, for a
+    /// version too large for one request.
+    upload: Option<(String, u64)>,
+}
+
+/// How many times one piece of that work is tried after a failure that
+/// time alone does not mend, before it is given up with a warning that
+/// says where the version is. A cloud that cannot be reached, a rate
+/// limit, and a sign-in that is needed spend none: the work waits for
+/// as long as they last.
+const REPLACED_WORK_ATTEMPTS: u32 = 20;
+/// The most checks one poll reads: the poll is the feed, and it must
+/// stay quick. A check is one request. A copy moves bytes, so a poll
+/// makes one step of one copy and no more.
+const REPLACED_WORK_PER_POLL: usize = 8;
+
+/// Room on top of what the time of a commit says about the versions
+/// another device wrote at the same moment. A version that the upload
+/// replaced was committed after the upload last looked at the file, and
+/// Drive gives a version its time when its bytes are in, some time
+/// before it commits the write: about a second for a small file.
+const REPLACED_VERSION_SLACK_BEFORE: Duration = Duration::from_secs(30);
+/// A version that carries a later time than the upload's own and was
+/// replaced by it got that time before the upload committed. This is
+/// room for the clocks of Drive only: each second of it is a second in
+/// which the next save of another device reads as a write of this
+/// moment.
+const REPLACED_VERSION_SLACK_AFTER: Duration = Duration::from_secs(1);
+
+/// How many uploads this provider remembers as its own
+/// ([`GoogleDriveProvider::own_writes`]).
+const OWN_WRITES_MAX: usize = 512;
+
+/// What the versions of a file say about the moment of a guarded
+/// upload of it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SameMoment {
+    /// The version the upload wrote.
+    own: Option<GdRevision>,
+    /// The versions another writer put in at that moment. One of them
+    /// can hold the name; each of the others is on no device under the
+    /// name any more.
+    others: Vec<GdRevision>,
+}
+
+impl SameMoment {
+    /// The versions to keep as copies, given the content that holds
+    /// the name now.
+    ///
+    /// Which of the writes of one moment holds the name is not in the
+    /// list of the versions: the one that committed last does, and it
+    /// can carry the older time. That one is not lost. Every other
+    /// write of another device is.
+    ///
+    /// The upload's own version is lost too when another write of that
+    /// moment holds the name. The device that wrote the head keeps it,
+    /// when that device runs Vapor: its upload put its own tag on the
+    /// file. `head_carries_own_tag` says that the file still has the
+    /// tag of this upload, so the head came from a program that does
+    /// not check what it replaces, and nobody else keeps this version.
+    fn into_kept(self, head_md5: Option<&str>, head_carries_own_tag: bool) -> Vec<GdRevision> {
+        let another_write_holds_the_name = head_md5.is_some_and(|head| {
+            self.others
+                .iter()
+                .any(|revision| revision.md5_checksum.as_deref() == Some(head))
+        });
+        let mut keep: Vec<GdRevision> = self
+            .others
+            .into_iter()
+            .filter(|revision| revision.md5_checksum.as_deref() != head_md5)
+            .collect();
+        if another_write_holds_the_name
+            && head_carries_own_tag
+            && let Some(own) = self.own
+        {
+            keep.push(own);
+        }
+        keep
+    }
+}
+
+/// Reads the list of a file's versions after a guarded upload of it:
+/// `base_md5` is what the upload meant to replace, `own_md5` what it
+/// wrote, and `commit_took` the time from its last look at the file to
+/// the answer of its write. `own_writes` holds the content of the other
+/// uploads of this file that this provider made: its next save is no
+/// write of another device, however soon it came. Versions with the
+/// content of the base or of the upload are not listed: nothing of them
+/// is missing.
+fn versions_of_the_same_moment(
+    revisions: &[GdRevision],
+    base_md5: &str,
+    own_md5: &str,
+    commit_took: Duration,
+    own_writes: &[String],
+) -> SameMoment {
+    // Drive lists the versions by their times, oldest first. A version
+    // gets the time at which Drive had its bytes, or the time its
+    // writer set (Drive for desktop sets the time the file has on its
+    // disk).
+    let md5 = |revision: &GdRevision| revision.md5_checksum.clone().unwrap_or_default();
+    let time_ms = |revision: &GdRevision| {
+        revision
+            .modified_time
+            .as_deref()
+            .and_then(parse_rfc3339_millis)
+            .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|age| age.as_millis())
+    };
+    let Some(own) = revisions
+        .iter()
+        .rposition(|revision| md5(revision) == own_md5)
+    else {
+        return SameMoment::default();
+    };
+    // With no version of the base in the list (Drive dropped it), the
+    // list cannot say what came after it.
+    let Some(base) = revisions[..own]
+        .iter()
+        .rposition(|revision| md5(revision) == base_md5)
+    else {
+        return SameMoment::default();
+    };
+    // The place in the list is not enough. When the base carries a
+    // time its writer set, every version Drive stored before it is
+    // listed after it; and of two writes of one moment, the one that
+    // committed second can carry the older time. The times bound the
+    // moment: a write that the upload did not see was committed inside
+    // `commit_took`, so its time is at most that long after the time
+    // of the upload's own version, and not much longer before it.
+    let own_ms = time_ms(&revisions[own]);
+    let took = commit_took.as_millis();
+    let of_the_moment = |revision: &GdRevision| match (own_ms, time_ms(revision)) {
+        (Some(own), Some(at)) => {
+            at + 2 * took + REPLACED_VERSION_SLACK_BEFORE.as_millis() >= own
+                && at <= own + took + REPLACED_VERSION_SLACK_AFTER.as_millis()
+        }
+        _ => true,
+    };
+    let mut others: Vec<GdRevision> = Vec::new();
+    for (index, revision) in revisions.iter().enumerate().skip(base + 1) {
+        let content = md5(revision);
+        if index == own
+            || content.is_empty()
+            || content == base_md5
+            || content == own_md5
+            || own_writes.contains(&content)
+            || !of_the_moment(revision)
+        {
+            continue;
+        }
+        others.retain(|earlier| md5(earlier) != content);
+        others.push(revision.clone());
+    }
+    SameMoment {
+        own: Some(revisions[own].clone()),
+        others,
+    }
+}
+
 // ---------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------
@@ -395,6 +766,15 @@ pub struct GoogleDriveProvider {
     /// allows two folders with one name, so two uploads into one new
     /// folder must not both find it missing and both create it.
     folder_creation: Mutex<()>,
+    /// What is left to do for versions that uploads replaced, with the
+    /// tries each piece has had. An upload adds to it when it lands;
+    /// the changes poll works it off.
+    replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
+    /// The file and the content of the last uploads this provider
+    /// made. The check for a replaced version reads it: the next save
+    /// of this device is in the list of the versions too, and it is no
+    /// write of another device.
+    own_writes: Arc<Mutex<std::collections::VecDeque<(String, String)>>>,
 }
 
 impl GoogleDriveProvider {
@@ -409,6 +789,12 @@ impl GoogleDriveProvider {
                 secrets,
                 transport,
                 cached: Mutex::new(None),
+                look: Mutex::new(StoreLook {
+                    due: None,
+                    missing_since: None,
+                    check: TOKEN_STORE_CHECK,
+                    confirm: TOKEN_SIGN_OUT_CONFIRM,
+                }),
                 rejected_refresh_token: Mutex::new(None),
                 refreshing: Mutex::new(()),
             }),
@@ -420,6 +806,8 @@ impl GoogleDriveProvider {
             folder_creation: Mutex::new(()),
             out_of_scope: Mutex::new(BTreeMap::new()),
             chunk_hint: Arc::new(Mutex::new(CHUNK_START)),
+            replaced_work: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            own_writes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
@@ -491,6 +879,373 @@ impl GoogleDriveProvider {
         serde_json::from_slice(&response.body).map_err(|error| {
             ProviderError::transient(format!("unparsable Drive API response: {error}"))
         })
+    }
+
+    // -- Versions that uploads replaced --------------------------------
+
+    /// Works off a part of [`Self::replaced_work`]. A piece that fails
+    /// goes to the end of the line and is tried at a later poll.
+    fn keep_replaced_versions(&self) {
+        for _ in 0..REPLACED_WORK_PER_POLL {
+            let next = self
+                .replaced_work
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_front();
+            let Some((work, attempts)) = next else {
+                return;
+            };
+            let moved_bytes = matches!(&work, ReplacedWork::Copy(_));
+            let mut requeue: Vec<(ReplacedWork, u32)> = Vec::new();
+            let mut failed = false;
+            match self.advance_replaced_work(work.clone()) {
+                // What follows keeps the tries of the piece it follows:
+                // a copy that opens a session each time and never ends
+                // must run out of them too.
+                Ok(follow_up) => requeue.extend(follow_up.into_iter().map(|work| (work, attempts))),
+                // The file or the version is gone: nothing is left to
+                // keep, and no try will find it.
+                Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                    crate::logging::debug(
+                        "A version that an upload replaced is gone from Google Drive",
+                        &[("error", error.message)],
+                    );
+                }
+                Err(error) => {
+                    failed = true;
+                    let waits_for_the_cloud = matches!(
+                        error.kind,
+                        vapor_shared::ProviderErrorKind::Transient
+                            | vapor_shared::ProviderErrorKind::RateLimited { .. }
+                            | vapor_shared::ProviderErrorKind::Authentication
+                            | vapor_shared::ProviderErrorKind::CloudRootUnavailable
+                            | vapor_shared::ProviderErrorKind::StorageFull
+                    );
+                    let attempts = if waits_for_the_cloud {
+                        attempts
+                    } else {
+                        attempts + 1
+                    };
+                    if attempts < REPLACED_WORK_ATTEMPTS {
+                        crate::logging::debug(
+                            "Could not keep a version that an upload replaced yet; trying again",
+                            &[("error", error.message)],
+                        );
+                        // A copy starts again from its first byte:
+                        // nothing of a resumable session is a file
+                        // until its end.
+                        let work = match work {
+                            ReplacedWork::Copy(mut copy) => {
+                                copy.upload = None;
+                                ReplacedWork::Copy(copy)
+                            }
+                            check => check,
+                        };
+                        requeue.push((work, attempts));
+                    } else {
+                        match &work {
+                            // Nothing says that a version was replaced.
+                            ReplacedWork::Check { file_name, .. } => crate::logging::debug(
+                                "Gave up the check for a version that an upload replaced",
+                                &[("file", file_name.clone()), ("error", error.message)],
+                            ),
+                            ReplacedWork::Copy(copy) => crate::logging::warning(
+                                "Two writes of one file landed in Google Drive at the same moment, and the version that lost the name could not be kept as a copy; it is in the version history of the file in Google Drive",
+                                &[("file", copy.file_name.clone()), ("error", error.message)],
+                            ),
+                        }
+                    }
+                }
+            }
+            let mut queue = self
+                .replaced_work
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if failed {
+                queue.extend(requeue);
+            } else {
+                for work in requeue.into_iter().rev() {
+                    queue.push_front(work);
+                }
+            }
+            drop(queue);
+            // One failure is enough for one poll, and so is one step of
+            // a copy: the bytes it moves are outside the transfer
+            // budgets of the engine.
+            if failed || moved_bytes {
+                return;
+            }
+        }
+    }
+
+    /// Does one piece of the work and answers with what follows it.
+    fn advance_replaced_work(
+        &self,
+        work: ReplacedWork,
+    ) -> Result<Vec<ReplacedWork>, ProviderError> {
+        match work {
+            ReplacedWork::Check {
+                file_id,
+                parent_id,
+                file_name,
+                base_md5,
+                own_md5,
+                commit_took,
+                op_id,
+            } => {
+                let revisions = match self.list_revisions(&file_id) {
+                    Ok(revisions) => revisions,
+                    // The file is gone, and its versions with it.
+                    Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                        return Ok(Vec::new());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let own_writes: Vec<String> = self
+                    .own_writes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .filter(|(file, content)| file == &file_id && content != &own_md5)
+                    .map(|(_, content)| content.clone())
+                    .collect();
+                let same_moment = versions_of_the_same_moment(
+                    &revisions,
+                    &base_md5,
+                    &own_md5,
+                    commit_took,
+                    &own_writes,
+                );
+                // The common answer, and it costs the one request.
+                if same_moment.others.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let url = format!("{API_BASE}/files/{file_id}?fields={FILE_FIELDS}");
+                let head: GdFile = match self.api_json("GET", url, None) {
+                    Ok(head) => head,
+                    Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                        return Ok(Vec::new());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let head_carries_own_tag = head
+                    .app_properties
+                    .as_ref()
+                    .and_then(|properties| properties.get(OP_ID_PROPERTY))
+                    .is_some_and(|tag| tag == &op_id);
+                Ok(same_moment
+                    .into_kept(head.md5_checksum.as_deref(), head_carries_own_tag)
+                    .into_iter()
+                    .map(|revision| {
+                        ReplacedWork::Copy(RevisionCopy {
+                            file_id: file_id.clone(),
+                            revision,
+                            parent_id: parent_id.clone(),
+                            file_name: file_name.clone(),
+                            copy_name: String::new(),
+                            upload: None,
+                        })
+                    })
+                    .collect())
+            }
+            ReplacedWork::Copy(copy) => self.advance_revision_copy(copy),
+        }
+    }
+
+    fn list_revisions(&self, file_id: &str) -> Result<Vec<GdRevision>, ProviderError> {
+        let mut revisions = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..REVISION_PAGES_MAX {
+            let mut url = format!(
+                "{API_BASE}/files/{file_id}/revisions?pageSize=1000&fields={REVISION_FIELDS}"
+            );
+            if let Some(token) = &page_token {
+                url.push_str(&format!("&pageToken={}", oauth::url_encode(token)));
+            }
+            let page: GdRevisionList = self.api_json("GET", url, None)?;
+            revisions.extend(page.revisions);
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(revisions)
+    }
+
+    /// Copies one stored version into a file of its own, named as a
+    /// conflict copy of the file it belongs to. A small version goes
+    /// in one request; a large one moves one chunk per call through a
+    /// resumable session.
+    fn advance_revision_copy(
+        &self,
+        mut copy: RevisionCopy,
+    ) -> Result<Vec<ReplacedWork>, ProviderError> {
+        let replaced_at_ms = copy
+            .revision
+            .modified_time
+            .as_deref()
+            .and_then(parse_rfc3339_millis)
+            .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|age| age.as_millis() as u64)
+            .unwrap_or(0);
+        // Two versions of one millisecond, or two with no time, would
+        // have one name. A name that other content holds already is
+        // not this version's copy: the next number is tried.
+        let mut name = copy.copy_name.clone();
+        if copy.upload.is_none() {
+            let mut sequence = None;
+            loop {
+                name = vapor_shared::conflict::copy_name(
+                    &copy.file_name,
+                    vapor_shared::constants::conflict::REPLACED_VERSION,
+                    replaced_at_ms,
+                    sequence,
+                );
+                match self.find_child(&copy.parent_id, &name)? {
+                    None => break,
+                    // A copy of this version that is there already
+                    // (another device kept it, or a try of this one
+                    // got that far) is enough.
+                    Some(existing) if existing.md5_checksum == copy.revision.md5_checksum => {
+                        return Ok(Vec::new());
+                    }
+                    Some(_) if sequence.unwrap_or(1) >= 8 => {
+                        return Err(ProviderError::permanent(
+                            "every name for the copy of a replaced version is taken",
+                        ));
+                    }
+                    Some(_) => sequence = Some(sequence.map_or(2, |number| number + 1)),
+                }
+            }
+            copy.copy_name = name.clone();
+        }
+        let size: u64 = copy
+            .revision
+            .size
+            .as_deref()
+            .and_then(|size| size.parse().ok())
+            .unwrap_or(0);
+        let media = format!(
+            "{API_BASE}/files/{}/revisions/{}?alt=media",
+            copy.file_id, copy.revision.id
+        );
+        let metadata = serde_json::json!({ "name": name, "parents": [copy.parent_id] });
+
+        if copy.upload.is_none() {
+            if size <= SIMPLE_UPLOAD_MAX_BYTES {
+                let response = self.execute_authed("GET", media, Vec::new(), Vec::new())?;
+                if response.status >= 300 {
+                    return Err(classify_api_failure(&response));
+                }
+                let content = response.body;
+                if let Some(expected) = copy.revision.md5_checksum.as_deref()
+                    && md5_hex_of_bytes(&content) != expected
+                {
+                    return Err(ProviderError::transient(
+                        "a stored version came down with other bytes than Drive described",
+                    ));
+                }
+                let boundary = multipart_boundary_absent_in(&content);
+                let mut body = Vec::new();
+                body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+                body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+                body.extend_from_slice(metadata.to_string().as_bytes());
+                body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+                body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+                body.extend_from_slice(&content);
+                body.extend_from_slice(format!("\r\n--{boundary}--").as_bytes());
+                let response = self.execute_authed(
+                    "POST",
+                    format!("{UPLOAD_BASE}/files?uploadType=multipart&fields=id"),
+                    vec![(
+                        "Content-Type".to_string(),
+                        format!("multipart/related; boundary={boundary}"),
+                    )],
+                    body,
+                )?;
+                if response.status >= 300 {
+                    return Err(classify_api_failure(&response));
+                }
+                self.report_kept_copy(&copy, &name);
+                return Ok(Vec::new());
+            }
+            let response = self.execute_authed(
+                "POST",
+                format!("{UPLOAD_BASE}/files?uploadType=resumable&fields=id"),
+                vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("X-Upload-Content-Length".to_string(), size.to_string()),
+                ],
+                metadata.to_string().into_bytes(),
+            )?;
+            if response.status >= 300 {
+                return Err(classify_api_failure(&response));
+            }
+            let session_url = response
+                .header("Location")
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    ProviderError::transient("resumable initiation returned no session URI")
+                })?;
+            copy.upload = Some((session_url, 0));
+            return Ok(vec![ReplacedWork::Copy(copy)]);
+        }
+
+        let (session_url, sent) = copy.upload.clone().expect("checked above");
+        if sent >= size {
+            return Err(ProviderError::transient(
+                "the copy of a stored version sent every byte and did not finish",
+            ));
+        }
+        let chunk = CHUNK_START.min(size - sent);
+        let last = sent + chunk - 1;
+        let response = self.execute_authed(
+            "GET",
+            media,
+            vec![("Range".to_string(), format!("bytes={sent}-{last}"))],
+            Vec::new(),
+        )?;
+        if response.status >= 300 {
+            return Err(classify_api_failure(&response));
+        }
+        if response.body.len() as u64 != chunk {
+            return Err(ProviderError::transient(format!(
+                "a stored version answered {} bytes for a range of {chunk}",
+                response.body.len()
+            )));
+        }
+        let response = self.execute_authed(
+            "PUT",
+            session_url.clone(),
+            vec![(
+                "Content-Range".to_string(),
+                format!("bytes {sent}-{last}/{size}"),
+            )],
+            response.body,
+        )?;
+        match response.status {
+            308 => {
+                let acked = response
+                    .header("Range")
+                    .and_then(parse_resumable_range_end)
+                    .map(|end| end + 1)
+                    .unwrap_or(last + 1);
+                copy.upload = Some((session_url, acked.min(size)));
+                Ok(vec![ReplacedWork::Copy(copy)])
+            }
+            200 | 201 => {
+                self.report_kept_copy(&copy, &name);
+                Ok(Vec::new())
+            }
+            _ => Err(classify_api_failure(&response)),
+        }
+    }
+
+    fn report_kept_copy(&self, copy: &RevisionCopy, name: &str) {
+        crate::logging::warning(
+            "Two writes of one file landed in Google Drive at the same moment; kept the version that lost the name as a copy",
+            &[("file", copy.file_name.clone()), ("copy", name.to_string())],
+        );
     }
 
     // -- Path/id resolution --------------------------------------------
@@ -612,10 +1367,16 @@ impl GoogleDriveProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(path);
         if let Some(id) = id {
-            self.path_by_id
+            // Only when the file is still known under this path: a
+            // listing can have found it under another one since, and
+            // that knowledge stays.
+            let mut path_by_id = self
+                .path_by_id
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&id);
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if path_by_id.get(&id).is_some_and(|known| known == path) {
+                path_by_id.remove(&id);
+            }
         }
         // A folder that changed takes the trust of everything under it
         // with it: those paths hang off the old place.
@@ -624,6 +1385,44 @@ impl GoogleDriveProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|folder, _| folder != path && !folder.starts_with(&below));
+    }
+
+    /// Forgets every file and folder the cache holds under `path`. A
+    /// folder that got another name or another place takes them along,
+    /// and what the cache says about them names the old place: a lookup
+    /// of an old path would find a file that is not there, and a file
+    /// made later at that path would count as the second of its name.
+    fn forget_under(&self, path: &str) {
+        let below = format!("{path}/");
+        self.id_by_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|known, _| !known.starts_with(&below));
+        self.path_by_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, known| !known.starts_with(&below));
+    }
+
+    /// The path a feed entry gives its file, when the cache knows the
+    /// folder that holds it. No request.
+    fn path_from_the_cache(&self, file: &GdFile) -> Option<String> {
+        let parent = file.parents.first()?;
+        let root_id = self
+            .root_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        if parent == &root_id {
+            return Some(file.name.clone());
+        }
+        let parent_path = self
+            .path_by_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(parent)
+            .cloned()?;
+        Some(format!("{parent_path}/{}", file.name))
     }
 
     /// Notes that a request just confirmed `path` as a folder with the
@@ -876,11 +1675,11 @@ impl GoogleDriveProvider {
 
     /// Best-effort path for a changed file id: cache first, then a
     /// parent-chain walk toward the ensured root.
-    fn path_for_changed_file(&self, file: &GdFile) -> Option<ResolvedChangePath> {
+    fn path_for_changed_file(&self, file: &GdFile) -> ChangedPath {
         // Zero-request reject for a file already resolved to be outside the
         // sync root, until its TTL lapses (in case it moved into scope).
         if self.is_known_out_of_scope(&file.id) {
-            return None;
+            return ChangedPath::OutOfScope;
         }
         // Any previously-cached path for this id is the OLD path: it must
         // NOT be trusted as the current one: a remote rename/move keeps the
@@ -893,17 +1692,20 @@ impl GoogleDriveProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&file.id)
             .cloned();
-        let root_id = self
+        let Some(root_id) = self
             .root_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()?;
+            .clone()
+        else {
+            return ChangedPath::OutOfScope;
+        };
         // Walk up through parents until the root (bounded depth).
         let mut segments = vec![file.name.clone()];
         let Some(mut current_parent) = file.parents.first().cloned() else {
             // A parentless file cannot be under the root.
             self.mark_out_of_scope(&file.id);
-            return None;
+            return ChangedPath::OutOfScope;
         };
         let mut new_path = None;
         for _ in 0..64 {
@@ -925,22 +1727,30 @@ impl GoogleDriveProvider {
                 break;
             }
             let url = format!("{API_BASE}/files/{current_parent}?fields={FILE_FIELDS}");
-            // A transient API error returns `None` without caching a
-            // verdict, so the next poll retries rather than wrongly
-            // remembering the file as out-of-scope.
-            let parent: GdFile = self.api_json("GET", url, None).ok()?;
+            let parent: GdFile = match self.api_json("GET", url, None) {
+                Ok(parent) => parent,
+                // The folder above is gone: nothing under it is in
+                // the sync root.
+                Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                    return ChangedPath::OutOfScope;
+                }
+                // The cloud did not answer. No verdict is remembered,
+                // and the caller must not take the file for one that
+                // is outside the root.
+                Err(_) => return ChangedPath::Unknown,
+            };
             segments.push(parent.name.clone());
             let Some(next) = parent.parents.first().cloned() else {
                 // Walked up to a top-level parent that is not our root.
                 self.mark_out_of_scope(&file.id);
-                return None;
+                return ChangedPath::OutOfScope;
             };
             current_parent = next;
         }
         let Some(new_path) = new_path else {
             // Exhausted the depth bound without reaching the root.
             self.mark_out_of_scope(&file.id);
-            return None;
+            return ChangedPath::OutOfScope;
         };
         // Reconcile caches to the fresh path; a stale mapping at a
         // different path is a rename/move the caller must surface as a
@@ -960,7 +1770,7 @@ impl GoogleDriveProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&file.id);
-        Some(ResolvedChangePath {
+        ChangedPath::InScope(ResolvedChangePath {
             new_path,
             old_path,
             names_the_path,
@@ -1257,9 +2067,13 @@ impl Provider for GoogleDriveProvider {
             .map(|metadata| metadata.len())
             .unwrap_or(0);
 
+        let overwritten = existing
+            .as_ref()
+            .and_then(|file| Some((file.parents.first()?.clone(), file.name.clone())));
         Ok(Box::new(GdriveUploadSession {
             state: UploadState::NotStarted,
             tokens: self.tokens.clone(),
+            overwritten,
             file_id: existing.map(|file| file.id),
             metadata,
             source,
@@ -1269,6 +2083,10 @@ impl Provider for GoogleDriveProvider {
             precondition: request.precondition.clone(),
             hasher: Md5::new(),
             hashed_bytes: 0,
+            replaced_work: self.replaced_work.clone(),
+            own_writes: self.own_writes.clone(),
+            op_id: request.op_id.clone(),
+            reverified_at: None,
         }))
     }
 
@@ -1329,6 +2147,9 @@ impl Provider for GoogleDriveProvider {
         cursor: Option<&str>,
         max_changes: usize,
     ) -> Result<ChangesPoll, ProviderError> {
+        // Before the read of the feed, so that a copy made here is in
+        // the answer of this poll or of the next.
+        self.keep_replaced_versions();
         let Some(cursor) = cursor else {
             let start: GdStartPageToken =
                 self.api_json("GET", format!("{API_BASE}/changes/startPageToken"), None)?;
@@ -1357,6 +2178,10 @@ impl Provider for GoogleDriveProvider {
         })?;
 
         let now = SystemTime::now();
+        // Set when the place of a changed file or folder could not be
+        // read. The feed does not report it again, so the engine is
+        // told to compare everything.
+        let mut place_unknown = false;
         let mut changes = Vec::new();
         for change in &list.changes {
             let removed = change.removed
@@ -1404,26 +2229,69 @@ impl Provider for GoogleDriveProvider {
             }
             let Some(file) = &change.file else { continue };
             if file.mime_type == FOLDER_MIME {
-                // A folder was renamed, moved, or trashed. No change is
-                // reported for a folder itself, but whatever the cache
-                // holds for it, and for everything under it, names the
-                // old place.
-                let cached_path = self
+                let path_before = self
                     .path_by_id
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get(&file.id)
                     .cloned();
-                if let Some(cached_path) = cached_path {
-                    self.evict_path(&cached_path);
+                let Some(path_before) = path_before else {
+                    // A folder this provider did not know: a new one,
+                    // whose files come with entries of their own.
+                    continue;
+                };
+                // The entry of a folder that is where it was (the echo
+                // of a folder this device made, a change of something
+                // else of it) says nothing new, and costs no request.
+                if self.path_from_the_cache(file).as_deref() == Some(path_before.as_str()) {
+                    continue;
                 }
-            }
-            if file.mime_type == FOLDER_MIME || is_google_native_non_folder(&file.mime_type) {
+                // Whatever the cache holds for a folder that got
+                // another name or another place, and for everything
+                // under it, names the old place.
+                self.evict_path(&path_before);
+                self.forget_under(&path_before);
+                // Drive reports such a folder with this one entry, and
+                // nothing for the files in it. The engine walks the
+                // folder that held it and the one that holds it now.
+                let path_now = match self.path_for_changed_file(file) {
+                    ChangedPath::InScope(resolved) => Some(resolved.new_path),
+                    ChangedPath::OutOfScope => None,
+                    ChangedPath::Unknown => {
+                        place_unknown = true;
+                        None
+                    }
+                };
+                if path_now.as_deref() == Some(path_before.as_str()) {
+                    continue;
+                }
+                for path in [Some(path_before), path_now].into_iter().flatten() {
+                    let Ok(path) = RemotePath::new(path) else {
+                        continue;
+                    };
+                    changes.push(RemoteChange {
+                        path,
+                        kind: RemoteChangeKind::FolderMoved,
+                        observed_at: now,
+                        op_id: None,
+                        content_hash: None,
+                        size_bytes: None,
+                        modified_at: None,
+                    });
+                }
                 continue;
             }
-            let Some(resolved) = self.path_for_changed_file(file) else {
-                // Outside the sync root (or unmappable): not ours.
+            if is_google_native_non_folder(&file.mime_type) {
                 continue;
+            }
+            let resolved = match self.path_for_changed_file(file) {
+                ChangedPath::InScope(resolved) => resolved,
+                // Not ours.
+                ChangedPath::OutOfScope => continue,
+                ChangedPath::Unknown => {
+                    place_unknown = true;
+                    continue;
+                }
             };
             // A rename/move surfaces as Removed(old) + CreatedOrModified(new)
             // so the local side deletes the old path and downloads the new
@@ -1462,6 +2330,18 @@ impl Provider for GoogleDriveProvider {
                 content_hash: file.md5_checksum.clone(),
                 size_bytes: file.size.as_deref().and_then(|size| size.parse().ok()),
                 modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
+            });
+        }
+
+        if place_unknown {
+            changes.push(RemoteChange {
+                path: RemotePath::root(),
+                kind: RemoteChangeKind::FolderMoved,
+                observed_at: now,
+                op_id: None,
+                content_hash: None,
+                size_bytes: None,
+                modified_at: None,
             });
         }
 
@@ -1574,6 +2454,20 @@ struct GdriveUploadSession {
     /// acknowledged only in part is sent again from the acknowledged
     /// offset, and those bytes must not be hashed twice.
     hashed_bytes: u64,
+    /// Where a guarded overwrite that landed leaves the check for a
+    /// version it replaced ([`ReplacedWork`]).
+    replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
+    /// Shared with the provider ([`GoogleDriveProvider::own_writes`]).
+    own_writes: Arc<Mutex<std::collections::VecDeque<(String, String)>>>,
+    /// The tag this upload puts on the file.
+    op_id: String,
+    /// When the last re-verification before a commit began, on the
+    /// clock that does not jump and on the one that counts a sleep of
+    /// the device.
+    reverified_at: Option<(std::time::Instant, SystemTime)>,
+    /// The folder and the name of the file that is overwritten, which
+    /// a copy of a replaced version is placed and named by.
+    overwritten: Option<(String, String)>,
 }
 
 impl GdriveUploadSession {
@@ -1588,13 +2482,14 @@ impl GdriveUploadSession {
     /// whole (possibly hours-long, throttle-paused) transfer to one
     /// round-trip. A divergence surfaces as PreconditionFailed, which the
     /// engine resolves as keep-both instead of a silent overwrite.
-    fn reverify_precondition_before_commit(&self) -> Result<(), ProviderError> {
+    fn reverify_precondition_before_commit(&mut self) -> Result<(), ProviderError> {
         let RemotePrecondition::HashEquals(expected) = &self.precondition else {
             return Ok(());
         };
         let Some(file_id) = &self.file_id else {
             return Ok(());
         };
+        self.reverified_at = Some((std::time::Instant::now(), SystemTime::now()));
         let url = format!("{API_BASE}/files/{file_id}?fields={FILE_FIELDS}");
         let response = self
             .handle()
@@ -1618,6 +2513,70 @@ impl GdriveUploadSession {
             ));
         }
         Ok(())
+    }
+
+    /// The re-verification before the commit and the commit are two
+    /// requests, and another device can write between them. After a
+    /// guarded overwrite landed, the versions of the file say whether
+    /// one did; the changes poll reads them, so the upload does not
+    /// wait for the answer.
+    ///
+    /// A commit whose answer did not come gets the check too: the write
+    /// can have landed, and the retry then finds its own bytes in the
+    /// cloud and sends nothing. A check for a write that did not land
+    /// finds no version of it and ends.
+    fn check_for_a_replaced_version(&self, own_md5: &str) {
+        let (RemotePrecondition::HashEquals(base_md5), Some(file_id), Some((parent_id, file_name))) =
+            (&self.precondition, &self.file_id, &self.overwritten)
+        else {
+            return;
+        };
+        if own_md5.is_empty() || own_md5 == base_md5 {
+            return;
+        }
+        let mut own_writes = self
+            .own_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        own_writes.push_back((file_id.clone(), own_md5.to_string()));
+        while own_writes.len() > OWN_WRITES_MAX {
+            own_writes.pop_front();
+        }
+        drop(own_writes);
+        let commit_took = self
+            .reverified_at
+            .map(|(at, wall)| at.elapsed().max(wall.elapsed().unwrap_or_default()))
+            .unwrap_or_default();
+        self.replaced_work
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back((
+                ReplacedWork::Check {
+                    file_id: file_id.clone(),
+                    parent_id: parent_id.clone(),
+                    file_name: file_name.clone(),
+                    base_md5: base_md5.clone(),
+                    own_md5: own_md5.to_string(),
+                    commit_took,
+                    op_id: self.op_id.clone(),
+                },
+                0,
+            ));
+    }
+
+    /// Whether a failed commit can have landed all the same: the
+    /// request went out, and no answer says that Drive refused it.
+    fn commit_can_have_landed(error: &ProviderError) -> bool {
+        matches!(error.kind, vapor_shared::ProviderErrorKind::Transient)
+    }
+
+    /// The check for the last chunk of a resumable upload whose answer
+    /// did not come, with the hash of the bytes that went out.
+    fn check_after_a_lost_answer(&self) {
+        if self.hashed_bytes == self.total_bytes {
+            let sent = hex_encode(&self.hasher.clone().finalize());
+            self.check_for_a_replaced_version(&sent);
+        }
     }
 
     fn simple_multipart(&mut self) -> Result<TransferOutcome, ProviderError> {
@@ -1654,29 +2613,44 @@ impl GdriveUploadSession {
             ),
         };
         self.reverify_precondition_before_commit()?;
-        let response = self.handle().execute_authed(
-            method,
-            url,
-            vec![(
-                "Content-Type".to_string(),
-                format!("multipart/related; boundary={boundary}"),
-            )],
-            body,
-        )?;
-        if response.status >= 300 {
-            return Err(classify_api_failure(&response));
-        }
-        let file: GdFile = serde_json::from_slice(&response.body).map_err(|error| {
-            ProviderError::transient(format!("unparsable upload response: {error}"))
-        })?;
+        let committed = self
+            .handle()
+            .execute_authed(
+                method,
+                url,
+                vec![(
+                    "Content-Type".to_string(),
+                    format!("multipart/related; boundary={boundary}"),
+                )],
+                body,
+            )
+            .and_then(|response| {
+                if response.status >= 300 {
+                    return Err(classify_api_failure(&response));
+                }
+                serde_json::from_slice::<GdFile>(&response.body).map_err(|error| {
+                    ProviderError::transient(format!("unparsable upload response: {error}"))
+                })
+            });
+        let file = match committed {
+            Ok(file) => file,
+            Err(error) => {
+                if Self::commit_can_have_landed(&error) {
+                    self.check_for_a_replaced_version(&content_md5);
+                }
+                return Err(error);
+            }
+        };
         self.state = UploadState::Done;
+        let content_hash = file
+            .md5_checksum
+            .filter(|md5| !md5.is_empty())
+            .unwrap_or(content_md5);
+        self.check_for_a_replaced_version(&content_hash);
         Ok(TransferOutcome {
             bytes_total: self.total_bytes,
             remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
-            content_hash: file
-                .md5_checksum
-                .filter(|md5| !md5.is_empty())
-                .unwrap_or(content_md5),
+            content_hash,
         })
     }
 
@@ -1794,10 +2768,11 @@ impl TransferSession for GdriveUploadSession {
                 // The resumable update only materializes when the final chunk
                 // commits, so re-verify the precondition immediately before it:
                 // begin_upload's check could be arbitrarily stale by now.
-                if range_end + 1 == self.total_bytes {
+                let commits = range_end + 1 == self.total_bytes;
+                if commits {
                     self.reverify_precondition_before_commit()?;
                 }
-                let response = self.handle().execute_authed(
+                let response = match self.handle().execute_authed(
                     "PUT",
                     session_url,
                     vec![(
@@ -1808,7 +2783,15 @@ impl TransferSession for GdriveUploadSession {
                         ),
                     )],
                     chunk,
-                )?;
+                ) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if commits && Self::commit_can_have_landed(&error) {
+                            self.check_after_a_lost_answer();
+                        }
+                        return Err(error);
+                    }
+                };
                 match response.status {
                     // 308: chunk accepted, upload incomplete. Trust the
                     // server's `Range: bytes=0-N` header (the authoritative
@@ -1850,6 +2833,7 @@ impl TransferSession for GdriveUploadSession {
                             ));
                         }
                         let content_hash = stored_hash.or(sent_hash).unwrap_or_default();
+                        self.check_for_a_replaced_version(&content_hash);
                         Ok(TransferStep::Completed(TransferOutcome {
                             bytes_total: self.total_bytes,
                             content_hash,
@@ -1861,6 +2845,9 @@ impl TransferSession for GdriveUploadSession {
                     }
                     _ => {
                         let error = classify_api_failure(&response);
+                        if commits && Self::commit_can_have_landed(&error) {
+                            self.check_after_a_lost_answer();
+                        }
                         if matches!(
                             error.kind,
                             vapor_shared::ProviderErrorKind::Transient
@@ -1979,7 +2966,7 @@ impl TransferSession for GdriveDownloadSession {
 impl GdriveDownloadSession {
     fn finish(&mut self) -> Result<TransferStep, ProviderError> {
         if let Some(destination) = self.destination.take() {
-            destination.sync_all().map_err(|error| {
+            vapor_platform::fs_ops::make_durable(&destination).map_err(|error| {
                 ProviderError::transient(format!("cannot sync downloaded payload: {error}"))
             })?;
         }

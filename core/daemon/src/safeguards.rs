@@ -225,6 +225,15 @@ impl MassChangeGuard {
         self.tripped
     }
 
+    /// Records one deletion that is held because the question of an
+    /// earlier burst is still open. The guard counts as tripped until
+    /// that question is answered, also in a daemon that started after
+    /// the question was asked.
+    pub fn hold_while_open(&mut self, now: SystemTime) {
+        self.counter.record(now);
+        self.tripped = true;
+    }
+
     /// The count inside the window right now.
     pub fn count(&mut self, now: SystemTime) -> usize {
         self.counter.count(now)
