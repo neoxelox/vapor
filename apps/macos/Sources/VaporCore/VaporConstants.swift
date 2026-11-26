@@ -46,6 +46,7 @@ public enum VaporConstants {
       ".DS_Store",
       "Thumbs.db",
       "desktop.ini",
+      ".directory",
       // What an OS keeps at the root of a volume, for a sync root that
       // is a whole external drive
       ".fseventsd/",
@@ -212,7 +213,6 @@ public enum VaporConstants {
     public static let profiles = "profiles"
     public static let resourceLimits = "resourceLimits"
     public static let idleBoost = "idleBoost"
-    public static let safeguards = "safeguards"
     public static let trash = "trash"
   }
 

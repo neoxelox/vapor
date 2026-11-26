@@ -50,12 +50,30 @@ Target modules with heavy coverage expected in `core/daemon`:
   math; provider-job dispatch/harvest (the pool runs inline:
   synchronously at dispatch, in tests so ticks stay deterministic;
   the tests that turn the worker threads on also assert that the
-  thread that drives the ticks read no file content).
+  thread that drives the ticks read no file content); an upload or a
+  download that meets a cloud object with an op-id of this device
+  that the index row does not hold tells the provider, whatever the
+  local file holds; content of another writer and a path with no base
+  give no call.
 - `local_hash.rs`: which local files a worker reads (the quick check
   and the size decide); a hash is not used for a file that changed
   after it was read.
 - `provider_jobs.rs`: pool modes (inline vs worker threads); probe
   shapes; transfer hold/resume; generation-based cancellation.
+- `follow_ups.rs`: a record of work that a provider owes is stored
+  until the provider reports its end; the stored records go back to
+  the provider at a start, and the ones it does not take are
+  forgotten; the stand-in provider of a profile that does not run
+  leaves them; the store is bounded.
+- `remote_move.rs`: a file or a folder that got another name in the
+  cloud is renamed with everything in it, and the index rows follow;
+  a new path that is taken is never replaced; work that is queued
+  under the old path stops the rename; a name that both sides changed
+  stays as the sync mode says; an entry that this device removed, or
+  that two entries could be, is not paired.
+- `remote_ids.rs`: a start hands the provider the id of each synced
+  file and folder, and leaves out a file that syncs under another
+  name.
 - `path_filter.rs`: gitignore/vaporignore precedence; nested discovery;
   heavy-dir skip.
 - `event_intents.rs`: compaction; deferred markers; bounded caps.
@@ -94,6 +112,9 @@ Priority scenarios:
   deletion-preservation guard.
 - Restart recovery with pending intents and in-flight leases; no
   duplication, no loss.
+- The work a provider owes for an upload is saved in the tick, and in
+  the write, that saves the sync index row of the upload, and the
+  runtime that is built next on the same database hands it back.
 - Throttle transitions during real work (`Suspended` halts new
   admission; running work completes cleanly or yields at the next
   slice checkpoint; chunked transfers hold at their checkpoint), and
@@ -112,8 +133,7 @@ Priority scenarios:
 - Multi-profile runtime preserves isolation (own DB per profile,
   shared workgate caps, blast-radius containment on a panicking
   profile).
-- Safeguards: a deletion burst in either direction is held whole behind a `mass-delete` decision while other work continues; `apply` releases, `discard` restores;
-  the reconcile boost re-polls the remote feed.
+- The reconcile boost re-polls the remote feed.
 - The events of the daemon's own writes. The runtime fixture has a
   stand-in watcher (`watching_the_local_tree()`) that reports what a
   real watcher reports after a download, a rename, or a move to the

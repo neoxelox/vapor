@@ -45,6 +45,10 @@ side the engine will:
 - **Revert** a locally-modified file back to the cloud's canonical content
   (the local edit does not propagate and does not survive).
 - **Remove** local-only files that do not exist in the cloud folder.
+- **Rename** a file or a folder on the local side when the cloud gave
+  it another name or another place. When this device renamed the same
+  entry too, the cloud's name stays and the local entry is renamed to
+  it.
 - **Never** upload, create, delete, or rename anything on the cloud.
 
 ### `push-only` (local authoritative)
@@ -57,6 +61,10 @@ the engine will:
 - **Delete on the cloud** any file that was deleted locally.
 - **Overwrite** a remotely-modified file with the local canonical content.
 - **Remove** cloud-only files that do not exist in the local folder.
+- **Move back** a cloud file or folder that got another name or another
+  place in the cloud, with one move of the cloud object where the
+  provider has an id for it. When this device renamed the same entry
+  too, the cloud object is moved to the name on this device.
 - **Never** download, create, delete, or rename anything on the local side.
 
 ### Interaction with the conflict policy
@@ -67,6 +75,16 @@ of truth, so divergence is resolved in favor of the authoritative side with
 no conflict copy. This does **not** change the default: `two-way` remains
 the default mode and *keep-both* remains its policy, exactly as
 `AGENTS.md §4` requires. One-way strict mirror is a per-profile opt-in.
+
+### Names and places
+
+The mode also says whose name stays when both sides gave one file or
+one folder another name or another place before either synced. No time
+is compared. `two-way` keeps the name on this device and moves the
+cloud object to it, `pull-only` keeps the cloud's, and `push-only`
+keeps this device's. A change of capitals only follows the same rule.
+The rule covers names and places, never content: `data-flow.md` §A
+name or a place that the cloud changed.
 
 ### Interaction with loop prevention and deletions
 
@@ -195,6 +213,9 @@ warning is answered):
   cloud-only file is removed; a local deletion removes the cloud copy; no
   download ever occurs.
 - `two-way`: keep-both behavior is unchanged; one-way gates never fire.
+- A name that both sides changed: `two-way` and `push-only` end under the
+  name of this device, `pull-only` under the cloud's, for a folder, a
+  file, and a change of capitals only (S87 for `two-way`).
 - Mode change mid-run converges to the new mode's steady state.
 - Mixed per-profile modes stay isolated (one `two-way`, several `pull-only`).
 - `self_write_cache` still suppresses echoes in every mode.

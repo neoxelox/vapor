@@ -137,8 +137,9 @@ suite.
 
 With `--internet` the guest has a route to the Internet. Use it only
 to test a real cloud provider, and only with the dedicated test
-account, never with the owner's own. Start one only when the owner
-asks. The first sign-in of an account needs a person: start the guest
+account, never with the owner's own. Start one whenever a change to
+the Google Drive provider needs its check, with no question to the
+owner (`AGENTS.md` §10.1). The first sign-in of an account needs a person: start the guest
 with `--window` too, say that the window is up, and let the owner sign
 in. When the owner has stored the token of the test account, pipe it
 to `vapor auth login --token -` instead. Without the option a guest is

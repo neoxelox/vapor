@@ -26,7 +26,7 @@ their defaults. `vapor config get` reads dotted keys too.
 ```sh
 vapor config set syncMode pull-only
 vapor config set resourceLimits.cpuPercent 10
-vapor config set safeguards.massDelete.threshold 500
+vapor config set trash.retentionDays 14
 vapor config set resourceLimits.concurrentTransfers null
 vapor config set postIgnoreRules '["build/", "*.log"]'
 ```
@@ -50,8 +50,8 @@ setting changed in one place survives a save in another.
 
 - **Within a few seconds**, with the daemon running: `useGitignore`,
   `useVaporignore`, `preIgnoreRules`, `postIgnoreRules`,
-  `timelineLimit`, and the `resourceLimits`, `idleBoost`, `safeguards`,
-  and `trash` groups.
+  `timelineLimit`, and the `resourceLimits`, `idleBoost`, and `trash`
+  groups.
 - **Within a few seconds too**: which profiles there are. A profile
   that is added or enabled starts, one that is removed from the file or
   disabled stops, and a new `name` shows, while the other profiles go
@@ -241,21 +241,6 @@ of the CPU. It raises the ceilings to its own `cpuPercent`,
 `memoryPercent`, and `bandwidthPercent`; a boost ceiling below its
 `resourceLimits` counterpart counts as equal to it. Ramping down is
 faster than ramping up, so a returning user never meets a busy daemon.
-
-### `safeguards.massDelete`
-
-The ransomware and bulk-mistake backstop. Defaults `{ enabled: true,
-threshold: 1000, windowSeconds: 60, ratioPercent: 25 }`.
-
-A burst of deletes in either direction that reaches `threshold` inside
-`windowSeconds`, or `ratioPercent` of the synced files (never fewer
-than 10), is held whole behind a `mass-delete` decision before any of it
-reaches the other side; everything else keeps syncing. `vapor decisions
-resolve <id> --choose apply` lets the deletes through; `--choose
-discard` restores the files from the side that still has them. Values
-below the floors (10 deletes, 5 seconds) are raised to them;
-`ratioPercent: 0` turns the ratio rule off; `enabled: false` turns the
-guard off, and the daemon logs a warning.
 
 ### `trash`
 

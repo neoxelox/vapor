@@ -255,7 +255,6 @@ impl MultiProfileRuntime {
     /// Composes the full multi-profile daemon: shared workgate, one
     /// runtime per enabled profile (each on its own durable DB), and
     /// deduplicated watchers with per-profile fan-out.
-    #[allow(clippy::too_many_arguments)]
     pub fn start(
         profiles: Vec<ResolvedProfile>,
         filter_options: EventPathFilterOptions,
@@ -264,7 +263,6 @@ impl MultiProfileRuntime {
         device_id: &str,
         start_watchers: bool,
         budget_config: crate::resource_budget::EffectiveBudgetConfig,
-        mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     ) -> Result<Self, DaemonRuntimeError> {
         Self::start_with_state_root(
             profiles,
@@ -275,7 +273,6 @@ impl MultiProfileRuntime {
             start_watchers,
             None,
             budget_config,
-            mass_delete_settings,
         )
     }
 
@@ -364,7 +361,6 @@ impl MultiProfileRuntime {
         start_watchers: bool,
         state_root: Option<PathBuf>,
         budget_config: crate::resource_budget::EffectiveBudgetConfig,
-        mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     ) -> Result<Self, DaemonRuntimeError> {
         let now = clock.now_system();
         let tick_waker = Arc::new(TickWaker::default());
@@ -398,7 +394,6 @@ impl MultiProfileRuntime {
             shared_bandwidth,
             idle_notifier,
             concurrent_transfers,
-            mass_delete_settings,
             trash_settings: crate::trash::TrashSettings::default(),
             filters_by_root: BTreeMap::new(),
         };
@@ -921,13 +916,6 @@ impl MultiProfileRuntime {
                 .replace_config(budget);
             for slot in &mut self.slots {
                 slot.runtime.set_concurrent_transfers(ceiling);
-            }
-        }
-        if change.live.contains(&keys::KEY_SAFEGUARDS) {
-            let settings = crate::safeguards::MassDeleteGuardSettings::resolve(&config);
-            self.composer.mass_delete_settings = settings;
-            for slot in &mut self.slots {
-                slot.runtime.configure_mass_delete_guard(settings);
             }
         }
         if change.live.contains(&keys::KEY_TRASH) {
@@ -1696,7 +1684,6 @@ struct SlotComposer {
     shared_bandwidth: Arc<crate::bandwidth::TransferBandwidth>,
     idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
     concurrent_transfers: Option<usize>,
-    mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     trash_settings: crate::trash::TrashSettings,
     /// One ignore-rule filter per canonical local root: profiles that
     /// watch the same directory share the instance, so an ignore-file
@@ -1868,7 +1855,6 @@ fn compose_slot(
     }
     runtime.set_device_id(composer.device_id.as_str());
     runtime.set_profile_id(profile.id.clone());
-    runtime.configure_mass_delete_guard(composer.mass_delete_settings);
     let trash_root = composer.trash_root(&profile.id);
     runtime.attach_trash(
         crate::trash::LocalTrash::new(
@@ -2288,7 +2274,6 @@ mod tests {
                 crate::resource_budget::EffectiveBudgetConfig::resolve(
                     &vapor_shared::config::VaporConfig::default(),
                 ),
-                crate::safeguards::MassDeleteGuardSettings::default(),
             )
             .expect("multi runtime");
 
@@ -2396,7 +2381,6 @@ mod tests {
                 crate::resource_budget::EffectiveBudgetConfig::resolve(
                     &vapor_shared::config::VaporConfig::default(),
                 ),
-                crate::safeguards::MassDeleteGuardSettings::default(),
             )
             .expect("multi runtime")
         };
@@ -2726,7 +2710,6 @@ mod tests {
             crate::resource_budget::EffectiveBudgetConfig::resolve(
                 &vapor_shared::config::VaporConfig::default(),
             ),
-            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
 
@@ -2807,7 +2790,6 @@ mod tests {
             crate::resource_budget::EffectiveBudgetConfig::resolve(
                 &vapor_shared::config::VaporConfig::default(),
             ),
-            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
 
@@ -2886,7 +2868,6 @@ mod tests {
             crate::resource_budget::EffectiveBudgetConfig::resolve(
                 &vapor_shared::config::VaporConfig::default(),
             ),
-            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
 
@@ -2988,7 +2969,6 @@ mod tests {
             false,
             Some(temp.path().join("state")),
             crate::resource_budget::EffectiveBudgetConfig::resolve(&load.config),
-            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
         multi.set_config_problems(set.problems);
@@ -3621,7 +3601,6 @@ mod tests {
             false,
             Some(temp.path().join("state")),
             crate::resource_budget::EffectiveBudgetConfig::resolve(&applied),
-            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
         multi.watch_config(&config_path, applied);
@@ -3723,7 +3702,6 @@ mod tests {
             crate::resource_budget::EffectiveBudgetConfig::resolve(
                 &vapor_shared::config::VaporConfig::default(),
             ),
-            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
         assert_eq!(multi.failed_profile_count(), 1);

@@ -301,6 +301,9 @@ impl FilesystemProvider {
             modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             content_hash: None,
             op_id,
+            // A path on a mounted volume has no id that stays with the
+            // object when a tool that is not Vapor moves it.
+            id: None,
         }))
     }
 
@@ -1249,6 +1252,7 @@ impl FilesystemUploadSession {
             bytes_total: self.bytes_total,
             content_hash: hex_encode(&std::mem::take(&mut self.hasher).finalize()),
             remote_modified_at: current_size_mtime(&self.target).map(|(_, mtime)| mtime),
+            remote_id: None,
         })
     }
 
@@ -1701,6 +1705,7 @@ impl TransferSession for FilesystemDownloadSession {
                         .metadata()
                         .ok()
                         .and_then(|metadata| metadata.modified().ok()),
+                    remote_id: None,
                 }));
             }
             let destination = self

@@ -50,10 +50,9 @@ Available now:
 - 🧠 **Crash-safe queue.** Every change is saved to disk before it moves, so a crash or a reboot loses nothing.
 - 🛡 **Keep-both conflicts.** When two devices edit the same file, every version is kept and you pick the one to keep.
 - ❓ **Decisions.** When Vapor is not sure, it holds only those files and asks you a plain question.
-- 🛟 **Mass-delete guard.** A sudden burst of deletions waits for your yes before it reaches the other side.
 - 🔌 **Unplug-safe.** An unplugged drive or a swapped sync folder never turns into deletions.
 - 🗑️ **Trash.** Everything Vapor removes on your device waits in a trash you can restore from.
-- ✂️ **Move detection.** A rename or a move syncs as a move, never as a new upload.
+- ✂️ **Move detection.** A file or a whole folder that you rename or move syncs as a move, never as a new upload.
 - 🔤 **Case-safe names.** Two files that differ only in capitals never overwrite each other.
 - 🔂 **Loop prevention.** Vapor's own writes never bounce back as new changes.
 - ⏮️ **Offline catch-up.** Edits, renames, and deletions made while Vapor was off sync at the next start.
@@ -66,7 +65,7 @@ Available now:
 - ⚙️ **Resource ceilings.** You cap the share of CPU, memory, and bandwidth, and Vapor measures itself against it.
 - 🌩 **Storm control.** A burst of thousands of changes becomes one scan, not thousands of uploads.
 - 🧹 **Ignore rules.** Your `.gitignore` files work as they are, and `vapor ignored` shows what they hold back.
-- ♻️ **Live settings.** Ceilings, ignore rules, safeguards, and which profiles run apply while Vapor runs, with no restart.
+- ♻️ **Live settings.** Ceilings, ignore rules, and which profiles run apply while Vapor runs, with no restart.
 - 🚀 **Always on.** It starts at login, restarts after a crash with or without the app open, and stops retrying when something is really broken.
 - 🧰 **One installer.** The app, the daemon, and `vapor` on your `PATH` arrive together, and installing a newer file updates all three.
 - ⏯️ **Pause, resume, Sync now.** Changes wait while paused, and Sync now compares both folders right away.
@@ -177,10 +176,6 @@ The Applies column says when a change takes effect: **live** within a few second
 | `idleBoost.headroomCpuPercent` | `30` | live | Boost only while other processes use at most this share of the CPU. |
 | `idleBoost.rampUpSeconds` | `30` | live | Time to climb to the boosted ceilings. |
 | `idleBoost.rampDownSeconds` | `10` | live | Time to drop back when you return. |
-| `safeguards.massDelete.enabled` | `true` | live | Hold a burst of deletions and ask before it reaches the other side. |
-| `safeguards.massDelete.threshold` | `1000` | live | Deletions inside the window that make a burst (at least 10). |
-| `safeguards.massDelete.windowSeconds` | `60` | live | The window (at least 5). |
-| `safeguards.massDelete.ratioPercent` | `25` | live | Share of the synced files that also makes a burst; `0` turns this rule off. |
 | `trash.enabled` | `true` | live | Keep what Vapor removes from this device; `false` deletes for good. |
 | `trash.retentionDays` | `7` | live | Days an item stays in the trash. |
 | `trash.useSystem` | `false` | live | Try the system trash (the Finder's Trash) first. |

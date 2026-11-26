@@ -242,17 +242,11 @@ def d_burst(ctx):
     st = status()
     ctx.info(f"status after the burst: {st}")
     shutil.rmtree(os.path.join(A, sub))
-    time.sleep(40)
-    ds = (vt.vapor_json("decisions", "list") or {}).get("decisions", [])
-    ctx.info(f"after `rm -rf` of the 400 files: open questions {[(d.get('kind'), d.get('question', '')[:90]) for d in ds]}")
-    for d in ds:
-        if d.get("kind") == "mass-delete":
-            vt.vapor("decisions", "resolve", str(d["id"]), "--choose", "apply", "--profile", str(d.get("profileId", "default")))
     t0 = time.time()
     while time.time() - t0 < 900 and os.path.exists(os.path.join(B, sub)) and tree(B, sub):
         time.sleep(2)
     ctx.expect(not tree(B, sub), f"the deletion reaches the other device ({len(tree(B, sub))} files left there)")
-    ctx.info(f"deletion of 400 files, A -> Drive -> B: {round(time.time() - t0)} s after the answer")
+    ctx.info(f"deletion of 400 files, A -> Drive -> B: {round(time.time() - t0)} s")
 
 
 def d_git(ctx):

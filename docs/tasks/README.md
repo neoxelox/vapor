@@ -65,12 +65,10 @@ Status: open. The review (`docs/specs/2026-11-14-full-review.md`)
 fixed what it found, and left a short list that is not built and a
 list of choices that wait for the owner.
 
-- Engine: `core.md` E-7, E-9, E-12, E-14. The owner put E-7 off: no
-  shipping setup reaches it. E-12 needs a design, and E-14 needs the
-  owner.
-- Providers: `core.md` P-1 … P-3, P-5, P-13. P-5 and P-13 need
-  the owner: the Google verification decision, and whether a guarded
-  overwrite goes through version 2 of the Drive API.
+- Engine: `core.md` E-7, E-9, E-12. The owner put E-7 off: no
+  shipping setup reaches it. E-12 needs a design.
+- Providers: `core.md` P-1, P-3, P-5. P-5 needs the owner: the
+  Google verification decision.
 - Platform: `core.md` PL-1, a check in Finder that needs the owner.
 - The open points of the spec: each one is a question with the choice
   the build made in the meantime.
@@ -83,15 +81,31 @@ Status: open. The installed product was used hard in a Mac guest for
 one session, and what it did wrong is in the task files. The owner
 decides the order; this is the order by what a user loses.
 
-- Sync that waits or stops, or a status that hides it: `core.md`
-  E-20, which needs a design with the owner.
+- Data: `core.md` E-47 (a disk that is mounted inside the sync folder
+  and then unmounted reads as deletions).
 - Speed: `core.md` E-31, E-45, P-9.
   `core.md` PT-3 measures each of them in the perf gate, so a
   slower build fails it.
-- The rest: `core.md` E-44, P-12, P-14, P-15, P-16, P-17, P-18, PL-8,
-  CT-12, `cli.md` L1-9, `macos.md` O-5, MT-7, M3-20, M3-21.
+- The rest: `core.md` E-44, E-46, P-12, P-14, P-15, P-16, P-17, P-19,
+  P-22, PL-8, CT-12, CT-13, `cli.md` L1-9, `macos.md` O-5, MT-7, M3-20,
+  M3-21.
 - A run that repeats the session: `core.md` TR-13. Real providers in a
   guest: `macos.md` MT-6.
+
+### Before the next wave: left open by the rename in one step, 2026-11-25
+
+Status: open. A file or a folder that gets another name or place in
+the cloud is one rename on the device
+(`docs/specs/2026-11-25-cloud-folder-rename.md`). What the change found
+and did not build, by what a user loses:
+
+- A name that both sides changed and that can still end as two
+  folders: `core.md` E-48 (this device also moved the entry), P-20
+  (the `filesystem` provider, which has no ids).
+- Renames that still cost more than one step: `core.md` E-49 (a folder
+  renamed on this device), P-21 (a folder that this device made, until
+  a scan), P-15 and P-16 (the file-by-file path that stays).
+- The rest: `core.md` E-50, E-51, E-52, E-53, E-55.
 
 ### Wave 9: macOS app UX
 
@@ -163,7 +177,7 @@ implementations behind a stable trait surface, not a rewrite.
 
 ### Wave 12: Windows platform implementations (optional)
 
-- `core.md` C6-1 … C6-10, C6-12: Windows native impls for every trait
+- `core.md` C6-1 … C6-10, C6-12, C6-13: Windows native impls for every trait
   (ReadDirectoryChangesW, Task Scheduler, Credential Manager,
   power/thermal signals, `GetLastInputInfo`, NTFS ADS, console-ctrl),
   the Windows distribution trust chain doc, and the named-pipe IPC

@@ -24,9 +24,11 @@ form; the runbook wins on any disagreement.
    the Tier VM suite. Tier VM is the last leg and needs Tart and the
    guest image on this Mac: check `./scripts/vm.sh --list` and
    `tart list` before the gate starts (`vapor-vm`). The
-   Google Drive leg runs only here, by hand, with the dedicated test
-   account and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in `.env`); it
-   never runs in CI and never against a personal account.
+   Google Drive leg of the e2e suite runs here, with the dedicated
+   test account and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in
+   `.env`); it never runs in CI and never against a personal account.
+   Outside a release an agent uses that account for a Drive check with
+   no question (`AGENTS.md` §9.8).
    A red gate stops the release: the fix goes through a pull request
    (`vapor-pr`), and the release starts again from the merged `main`.
 4. The target version sorts above the current one. `version.sh` refuses

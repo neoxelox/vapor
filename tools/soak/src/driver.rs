@@ -38,7 +38,6 @@ const EXPECTED_WARNINGS: &[&str] = &[
     "Resolved concurrent divergence by keeping both versions",
     "Kept both versions on download-apply",
     "Remote changed since last sync; preserving it over a local deletion",
-    "Mass-deletion guard tripped",
     "A one-way mode needs the user's confirmation",
     "Cloud root became unavailable",
     "Sync root is missing",
@@ -1048,8 +1047,8 @@ impl Driver {
 
     /// Waits until the daemon has nothing left to do: queue empty and no
     /// new intent for a quiet window, a requested reconcile, and the
-    /// same again. Handles the states the workload legitimately
-    /// provokes (the mass-delete guard, a parked cloud root).
+    /// same again. Handles the state the workload legitimately
+    /// provokes (a parked cloud root).
     fn converge(&mut self) -> Result<(), Failure> {
         let mut deadline = Instant::now() + self.cfg.converge_deadline;
         // The uploads that a full cloud made wait start late, and get
@@ -1116,19 +1115,7 @@ impl Driver {
             while Instant::now() < quiet_until {
                 std::thread::sleep(wait::POLL_INTERVAL);
                 self.write_status(false)?;
-                // A guard that trips now holds its deletions, and a held
-                // deletion is not in the queue. The answer is what puts
-                // it back, so a window with an answer in it was not
-                // quiet.
-                let answered = if self.db.held_intents().unwrap_or(0) > 0 {
-                    self.answer_decisions()?
-                } else {
-                    0
-                };
-                if answered > 0
-                    || self.db.enqueue_high_water() != high_water
-                    || !self.db.queue_drained()
-                {
+                if self.db.enqueue_high_water() != high_water || !self.db.queue_drained() {
                     still_quiet = false;
                     break;
                 }
@@ -1139,15 +1126,15 @@ impl Driver {
         }
     }
 
-    /// Restarts a dead daemon, answers the mass-delete decisions the
-    /// workload provokes, and waits for the daemon to be running, so
-    /// the run never hangs on a state the workload itself caused.
+    /// Restarts a dead daemon, fails on a question the workload cannot
+    /// have caused, and waits for the daemon to be running, so the run
+    /// never hangs on a state the workload itself caused.
     fn ensure_daemon_working(&mut self, deadline: Instant) -> Result<(), Failure> {
         if self.daemon_pid().is_none() {
             self.note("daemon is not running; restarting it");
             self.start_daemon()?;
         }
-        self.answer_decisions()?;
+        self.refuse_unexpected_decisions()?;
         // While the cloud root is parked the daemon holds the profile
         // (Error, with a root-missing decision open), and while it is
         // unreadable sync blocks (Error, no decision); that is the
@@ -1191,17 +1178,14 @@ impl Driver {
         }
     }
 
-    /// The workload's subtree removals are deliberate, so every open
-    /// mass-delete decision is answered `apply`; each one is recorded
-    /// as a `guard-trip`, the product working as designed. A
-    /// `root-missing` question about the cloud root while the driver
+    /// A `root-missing` question about the cloud root while the driver
     /// has it parked is expected and left open: it withdraws itself when
-    /// the root is restored. Any other open decision is a finding: the
-    /// driver does not know the right answer, and the run must not
-    /// guess.
-    fn answer_decisions(&mut self) -> Result<usize, Failure> {
+    /// the root is restored. So is a `conflict` question. Any other open
+    /// decision is a finding: the driver does not know the right answer,
+    /// and the run must not guess.
+    fn refuse_unexpected_decisions(&self) -> Result<(), Failure> {
         let Ok(report) = self.cli.json(&["decisions", "list", "--json"]) else {
-            return Ok(0);
+            return Ok(());
         };
         let open: Vec<serde_json::Value> = report["decisions"]
             .as_array()
@@ -1210,7 +1194,6 @@ impl Driver {
             .filter(|decision| decision["choice"].is_null())
             .cloned()
             .collect();
-        let mut answered = 0;
         for decision in open {
             let id = decision["id"].as_i64().unwrap_or_default();
             let kind = decision["kind"].as_str().unwrap_or_default().to_string();
@@ -1225,25 +1208,12 @@ impl Driver {
             if kind == "conflict" {
                 continue;
             }
-            if kind != "mass-delete" {
-                return Err(Failure::new(format!(
-                    "the daemon opened a {kind} decision (#{id}) the driver cannot answer: {}",
-                    decision["question"].as_str().unwrap_or_default()
-                )));
-            }
-            self.record_fault_event(
-                "guard-trip",
-                format!(
-                    "mass-delete guard held {} deletion(s) behind decision #{id}; applying ({})",
-                    decision["held"].as_u64().unwrap_or_default(),
-                    decision["question"].as_str().unwrap_or_default()
-                ),
-            );
-            self.cli
-                .ok(&["decisions", "resolve", &id.to_string(), "--choose", "apply"])?;
-            answered += 1;
+            return Err(Failure::new(format!(
+                "the daemon opened a {kind} decision (#{id}) the driver cannot answer: {}",
+                decision["question"].as_str().unwrap_or_default()
+            )));
         }
-        Ok(answered)
+        Ok(())
     }
 
     fn scan_daemon_log(&mut self) -> (Vec<String>, Vec<String>) {

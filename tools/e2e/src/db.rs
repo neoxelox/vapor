@@ -83,14 +83,9 @@ impl StateDb {
         rows.flatten().collect()
     }
 
-    /// Workable rows: pending and leased. A row held behind a decision
-    /// is parked, not queued; `held_intents` counts those.
+    /// Queued rows: pending and leased.
     pub fn pending_intents(&self) -> Option<i64> {
         self.scalar_i64("SELECT COUNT(*) FROM queue_intents WHERE state IN ('pending', 'leased');")
-    }
-
-    pub fn held_intents(&self) -> Option<i64> {
-        self.scalar_i64("SELECT COUNT(*) FROM queue_intents WHERE state = 'held';")
     }
 
     pub fn failed_intents(&self) -> Option<i64> {

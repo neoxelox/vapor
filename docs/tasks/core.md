@@ -41,11 +41,87 @@ are never reused.
       two folders are one, because two accounts may both use `/Vapor`:
       the check needs the identity of each cloud folder and the chain
       of its parents, which the provider trait does not give today.
-- [ ] E-14 Decide what to do with a local folder that a rename in the
-      cloud emptied of synced files and that still holds ignored
-      files. An empty folder is removed. A folder with a `.DS_Store`
-      in it stays for good, and so does one with a `node_modules`
-      folder, which must stay. The rule has to tell the two apart.
+- [ ] E-46 A wait of the planner counts as a try, and two waits have
+      no upper limit. A download waits for the files of a folder that
+      the cloud replaced with a file, and looks again each 3 s. The
+      removal of a cloud folder waits for its entries, and looks again
+      each 2 s to 30 s. Each look adds one to `attempt_count`
+      (`defer_leased`), and a row above `MAX_ATTEMPT_COUNT` (10 000)
+      cannot be read: the lease of the queue then fails with
+      `InvalidAttemptCount`. At 3 s that is 8 hours of a folder whose
+      files cannot leave, for example one that refuses a change. Read
+      from the code and checked at the state database with 10 001 waits
+      of one row (2026-11-24). What the runtime does after the failed
+      lease was not checked. The rename waits stop after
+      `MOVE_SETTLE_MAX_DEFERRALS`.
+### Left open by the rename in one step (2026-11-25)
+
+A file or a folder that gets another name or place in the cloud is one
+rename on the device now, where the provider has an id for it
+(`docs/specs/2026-11-25-cloud-folder-rename.md`). What that change
+found and did not build:
+
+- [ ] E-48 Pair a name that both sides changed when this device also
+      moved the entry into another folder. The engine looks for the
+      entry that this device renamed in the folder of the old path
+      only. An entry that this device moved elsewhere, while the cloud
+      gave it another name, is not paired: the device works file by
+      file, and the folder can end under both names, each with every
+      file, as before the change. A look by content at the upload gate
+      (the hash of a file under the new path is the hash of an index
+      row whose path is gone) finds the pair in any folder. The same
+      end when a scan has no feed entry for the move and compares the
+      folder of the old path before the folder that holds the entry in
+      the cloud: the old name is on neither side there, so its index
+      rows are forgotten before the id could pair the two names.
+- [ ] E-49 Carry a folder that is renamed on this device to the cloud
+      as one move. It goes file by file today: each file is one
+      `Provider::move_object`, the provider makes a new folder, and the
+      old one is removed. Another device then gets one rename for each
+      file, and not one for the folder. The index holds the id of each
+      synced folder since 2026-11-25, and `name_carries` moves a folder
+      with one call, so the upload gate can carry the folder when the
+      first file under the new name is found to be a moved one.
+- [ ] E-50 A leftover folder stays when its volume takes a copy for
+      the trash. A folder that the cloud no longer has, and that holds
+      only files an OS wrote by itself (`.DS_Store` and the like), is
+      removed with them. On a volume that refuses a trash folder the
+      discard of such a file needs a copy, which only a worker makes.
+      The file then stays, and the folder with it. Read from the code;
+      no run showed it.
+- [ ] E-51 A row of `name_carries` stays when its move can no longer
+      be made. The row is written in `two-way` and `push-only`. When
+      the profile changes to `pull-only` before the move ran, nothing
+      removes the row, and the scan leaves its three paths out of the
+      comparison for as long as it is there. A change of the sync mode
+      has to drop the rows of the profile.
+- [ ] E-52 The daemon remembers a rename that it made for 30 seconds
+      (the life of a self-write record). A watcher that reports the
+      rename later than that is not recognised: each file under the
+      new name then gets one remote lookup and one hash, and nothing
+      is transferred. A burst that the watcher folds into a scan can
+      take longer than 30 seconds to arrive. Inside the 30 seconds the
+      record hides too much: a file that the user removes under the
+      old path in the moment of the rename, and a folder that the user
+      moves in at that moment, read as the echo of the rename and wait
+      for the next scan. In `pull-only` a file that the user changed
+      around the rename gets no restore until that scan.
+- [ ] E-53 Measure the start of a profile with a large index. Before
+      the first tick the runtime reads the id of every synced file and
+      folder and hands the list to the provider. That is one read of
+      two tables on the thread that starts the profile; it was not
+      measured on a tree of a hundred thousand files.
+- [ ] E-55 Revert content that the cloud changed under a name that a
+      `push-only` profile moves back. When both sides gave a file
+      another name and the cloud also changed its content, the cloud
+      object is moved to the name on this device. In `two-way` the file
+      is compared at once and the new content is fetched. The upload of
+      a mirror compares nothing and always sends, so `push-only` sends
+      only a file that this device changed: content that the cloud
+      changed stays there until the next scan of everything reverts
+      it. A comparison that sends only when the cloud object differs
+      would close it with no transfer for an unchanged file.
+
 ### Found by the heavy-user session in a Mac guest (2026-11-22)
 
 The release installer of `0.2.0-alpha.3` (`d18a288`), installed in a
@@ -62,43 +138,6 @@ says nothing else, the second run showed the same. E-24, E-29, and
 E-37 were not run again. `docs/tasks/README.md` has the order by what
 a task costs a user.
 
-- [ ] E-20 The mass-delete guard asks during ordinary developer work,
-      and then holds every later deletion. Git's own maintenance
-      removed about 1 000 loose objects: "895 of the 3231 files it
-      syncs (27%) would be removed on the cloud", 1 038 deletions held,
-      the deletes and renames of source files after it among them. A
-      second question came 5 minutes later, because E-19 delivers the
-      deletions of minutes as one burst. `rm -rf node_modules` asks
-      each time. A small tree asks at once: on Google Drive, with 70
-      files synced, the rename of a folder of 10 files opened the
-      question ("19 of the 70 files it syncs (27%)"), because a folder
-      rename counts as deletions. Eight renames and removals of a
-      folder of 10 files, on a Drive tree of 37 to 50 files, asked 8
-      times. The count of a device also holds the deletions that the
-      device applied from the cloud just before: a second device took
-      13 removals from the cloud, then its user removed one file and
-      renamed a folder of 10, and the question said "24 of the 86
-      files it syncs (27%) would be removed on the cloud" (test
-      account, 2026-11-24). The count of the question holds the folders and its total
-      does not: `rm -rf` of 1 440 files in 360 folders asked about
-      "1800 of the 1501 files it syncs (100%)". One removal can ask
-      many times: 360 files removed one at a time in 32 s asked 8
-      questions in 67 s ("95 of the 374", "78 of the 309", down to
-      "23 of the 85"), because each `apply` leaves a smaller tree and
-      the next deletions are a quarter of it again. In the second run the count of the
-      question was right in one run and old in another, and the
-      daemon needed 80 s to 148 s to hold the 10 493 deletions (E-31).
-      And each device asks: one `rm -rf`
-      of 400 files asked on the device that ran it and again on the
-      second device, which kept 251 of the files until its own
-      question was answered. The text of the question keeps the count of the
-      moment it opened ("2916 of the 13070 files (22%)" for 10 493
-      held). A question on every `git gc` teaches the user to answer
-      `apply` without reading. Needs a design with the owner: what a
-      burst is in a tree where tools delete thousands of files as
-      routine (content-addressed stores such as `.git/objects`,
-      dependency folders, build output), and a count in the question
-      that follows the burst.
 - [ ] E-31 Small files move at about 530 a second to a cloud folder on
       this device, and the tick thread is the limit. Measured on
       2026-11-24 with a release build in `Idle` on 12 cores: 6 000
@@ -117,7 +156,7 @@ a task costs a user.
       fewer wake-ups under load, so a tick harvests more than a few
       outcomes, and the planner and hash stages wider for small files.
       The removal of a folder of 6 000 files is one deletion in the
-      cloud and takes 3 s after the answer to the mass-delete question.
+      cloud and takes 3 s.
 - [ ] E-44 The first look for another spelling of a folder still
       reads every index row under the folder when all of them are
       spelled as the folder is (`sync_index_row_spelled_otherwise`): 8
@@ -142,6 +181,20 @@ a task costs a user.
       after 64 s, on a tree of 77 folders whose scan took 90 s then and
       takes about 10 s now. Decide which scans need the wait, and
       whether a scan asked for by the user needs it at all.
+- [ ] E-47 A disk that is mounted inside the sync folder and then
+      unmounted reads as deletions. The watcher reports nothing at the
+      unmount. The next scan of everything (at start, once a day, or
+      on request) finds the empty folder where the disk was, with an
+      index row for each file, and removes the files from the cloud:
+      "Removed from the cloud ... it was deleted on this device". The
+      identity check covers the two roots only. Seen in the e2e manual
+      sandbox on 2026-11-24, with a disk image of 6 files mounted at a
+      folder of the local root: the scan removed all 6 from the cloud
+      folder. On the `filesystem` provider that removal has no undo
+      (P-19). A folder on another device than its root could be held
+      as a root is: wait for the disk, never mirror its absence. The
+      mass-delete guard caught this only for 10 files or more and a
+      quarter of the profile; it is gone since 2026-11-24.
 
 ## Providers
 
@@ -153,10 +206,6 @@ a task costs a user.
       stays in the cloud. Checked with the test account on 2026-11-24:
       both devices ask, and the question goes when one of the two
       files gets another name in Google Drive.
-- [ ] P-2 Keep the Drive file id in the sync index. The Drive feed
-      reports a deletion by id, and the provider's id cache is empty
-      after a restart, so a deletion made in the cloud while the daemon
-      was down is found by the startup reconcile and not by the feed.
 - [ ] P-3 Check the HTTP transport on a network that inspects TLS, and
       follow a proxy that an auto-configuration script names. The
       transport now trusts the system's root certificates next to the
@@ -168,36 +217,6 @@ a task costs a user.
       proxy that needs a sign-in other than a user and a password in
       its address, and a script that names the proxy (PAC), are not
       followed.
-- [ ] P-13 Decide whether a guarded overwrite on Google Drive goes
-      through version 2 of the API, which has a conditional write of
-      content. Version 3 has none, so the provider reads the versions
-      of the file after the upload and copies what was replaced
-      (`data-flow.md` §Conflict handling). With the test account, an
-      upload to `upload/drive/v2/files/<id>` with `If-Match` and a
-      stale etag was refused with 412, and of two such uploads at the
-      same moment exactly one landed in 10 of 10 rounds
-      (`tools/vm/workloads/drive_probe.py extra`). The second device
-      would then see an ordinary conflict. The check of the versions,
-      its copy work, its request for each overwrite, P-12, and the
-      limit below would all go. Not checked: a resumable session with
-      `If-Match` (whether the condition holds at the last chunk or only
-      when the session opens), and how long Google keeps version 2.
-      The choice of an API version is the owner's.
-      The limit of the check as built: a writer can set the time of
-      its version (Drive for desktop sets the time the file has on its
-      disk), and the check finds a write of the same moment only by a
-      time near that moment. A write that lands inside the one round
-      trip of an upload's commit with a time its writer set to another
-      day is not found; it stays in the version history of the file.
-      A version that the upload replaces and that its writer dated
-      later than the upload's own (a clock that is ahead) is listed
-      after it, and the check then finds no base and ends. The check
-      also ends when the list does not hold the upload's own version
-      yet; the runs with the account never saw the list lag a write,
-      and nothing else says that it cannot.
-      Also seen with the account: `files.version` grows by 2 or 3 for
-      one overwrite of content and by 5 to 7 for two, so it does not
-      tell a second writer.
 - [ ] P-14 A young folder that is moved into the synced folder of
       Google Drive can still wait for the next scan of everything.
       Drive has one entry for a folder that moved and none for what it
@@ -211,28 +230,66 @@ a task costs a user.
       account on 2026-11-24: a folder that left and came back, and a
       young folder that got a file outside and was moved back, each
       held all its files on both devices within seconds.
-- [ ] P-15 A folder that moves in Google Drive can cost one device a
-      new transfer. After the folder signal, of two devices that
-      followed the move of a folder with 2 files into another folder,
-      one renamed its files and the other put them in the trash and
-      downloaded them again under the new path. Both ended right, and
-      the trash kept the files. The review of the change read the
-      cause from the code: the removal of the old path waits for the
-      download of the new one only when that download is queued before
-      the removal is first planned, and only for 9 seconds. For a
-      large folder that is a transfer of every file, and the removals
-      can open the mass-delete question (E-20). Seen with the test
-      account, 2026-11-24.
-- [ ] P-16 A folder at the top of the synced folder that gets another
-      name in Google Drive costs each device a scan of everything. The
-      folder signal asks for a walk of the folder that holds the
-      path, and a walk enters every folder under it: one request for
-      each folder of the tree. A move between two folders asks for two
-      walks, also when one of them holds the other. A walk that pairs
-      one level of names, and then enters only the folder that moved,
-      would cost a few requests. The walk of everything that such a
-      rename starts counts as the scan of the day. Found by the review
-      of the change, 2026-11-24.
+- [ ] P-15 Where a device still works a cloud rename file by file, it
+      can put the files in the trash and download them again. A folder
+      or a file that gets another name in Google Drive is one rename
+      on the device since 2026-11-25, with no transfer. The
+      file-by-file path stays for a rename that is not paired: work is
+      queued under the old path, the new name is taken on the device,
+      or the index has no id for the entry. There the removal of the
+      old path waits for the download of the new one only when that
+      download is queued before the removal is first planned, and only
+      for 9 seconds. Both devices end right, and the trash keeps the
+      files. Seen with the test account on 2026-11-24, before the
+      rename in one step. A second way into the same result: an upload
+      of the old path that is planned between the rename in the cloud
+      and the report of the feed (a watcher event that the daemon
+      still held back, a scan). It finds the old name gone and the
+      local file as it was last synced, so it removes the local file,
+      and the rename is then a download. Seen on 2026-11-26 in the
+      end-to-end scenario of a cloud rename, on the `filesystem`
+      provider, about one run in six until the scenario waited longer.
+- [ ] P-16 A folder signal costs a walk of everything under the folder
+      that holds the path. A folder that gets another name in Google
+      Drive is one rename since 2026-11-25 and costs no walk. The
+      signal (`FolderMoved`) stays for a folder that left the synced
+      folder, for one that moved in from outside, for one whose new
+      name another folder has, and for a rename that the device could
+      not make in one step. Its walk enters every folder under the one
+      that holds the path: one request for each folder of the tree. A
+      move between two folders asks for two walks, also when one of
+      them holds the other. A walk that pairs one level of names, and
+      then enters only the folder that moved, would cost a few
+      requests. Found by the review of the change, 2026-11-24.
+- [ ] P-20 Pair a renamed folder on the `filesystem` provider. It has
+      no id for a folder or a file, so a folder that gets another name
+      in such a cloud folder is one folder that is gone and one that
+      is new. The device moves the files one by one, with no transfer,
+      and removes the old folder when nothing of the user is left in
+      it. A name that both sides changed ends as two folders there,
+      each with every file. An id that the volume keeps for a file and
+      a folder (the inode on a local volume) would let the provider
+      report one move, where the volume keeps it across a remount.
+- [ ] P-21 Give a folder that this device makes in the cloud its id in
+      the index at once. The index gets the id of a file when its
+      transfer ends, and the id of a folder when a scan compares the
+      folder on both sides: at the next start at the latest. Until
+      then the provider holds the id in memory only. A stop of the
+      daemon in that time loses it, and a rename of that folder made
+      while the daemon is stopped is applied file by file, by the ids
+      of its files, with no transfer.
+- [ ] P-22 Two devices that send the same new file to Google Drive in
+      the same moment make it twice. Drive lets two files in one
+      folder have one name, and an upload of a new file is a lookup
+      and then a create: both devices find the name free and both
+      create. Each device then syncs one of the two, and a scan asks
+      about the other as a name that cannot sync. Seen with the test
+      account on 2026-11-26: the cloud root went to the trash, both
+      devices answered `recreate`, and both filled the empty folder at
+      once; every file and every folder was there twice, with the
+      same content. No data was lost. A check after a create, like
+      the one after an overwrite, could remove the copy of this device
+      when the other file has the same content and the lower id.
 - [ ] P-17 The check of the cloud root costs Google Drive requests all
       day. Each profile checks its two roots every 15 seconds
       (`ROOT_CHECK_INTERVAL_SECONDS`), and on Google Drive one check
@@ -243,31 +300,101 @@ a task costs a user.
       feed, with the timer as a fallback at a longer interval, costs
       nothing while nothing changes. Seen with the test account,
       2026-11-24.
-- [ ] P-18 Check what the changes feed of Google Drive does with a
-      file that has a `/` in its name. The listing reports such a name
-      as one that cannot sync, and the user is asked. The feed builds
-      the path of a changed file from its name and the names of its
-      folders, so `2024/budget.txt` in the synced folder reads there
-      as a file `budget.txt` in a folder `2024`. With the test account
-      on 2026-11-24 the file never reached a device and nothing
-      failed, but what the intent of that entry did was not read.
-      Found by the review of the pull request.
-- [ ] P-12 Make the Drive check for a replaced version survive a stop
-      of the daemon. An upload that lands leaves the check in memory
-      for the next changes poll. A daemon that stops in between makes
-      no copy, and the replaced version is then only in the version
-      history of the file in Google Drive. Both uploads must land in
-      the same second for a version to be replaced at all, so the
-      window is small; a durable record of the check (the file, the
-      hash it replaced, the hash it wrote) closes it. The copy of a
-      replaced version also moves its bytes inside the changes poll,
-      one step for each poll, outside the transfer caps and the
-      bandwidth ceiling: a durable record would let it run as a
-      transfer. The copy is made by the device whose upload holds the
-      name, so the other device's edit is only in the version history
-      until that device polls: a device that goes to sleep right after
-      its upload keeps the copy waiting. P-13 would remove the check
-      and this task with it.
+- [ ] P-19 A trash for the cloud side of the `filesystem` provider. A
+      deletion that Vapor carries to a cloud folder on a mounted volume
+      removes the file there for good. Google Drive moves it to its
+      trash, and a device keeps what Vapor removes in Vapor's trash.
+      Since the mass-delete guard is gone (2026-11-24), a mistaken
+      removal on a device has no undo in such a cloud folder once it
+      synced. A trash folder in the cloud root, kept for the retention
+      of `trash.retentionDays` and hidden from listings as the other
+      internal names are, would give one (owner, 2026-11-24: a separate
+      feature).
+- [ ] P-12 Finish the Drive check for a replaced version. The check
+      outlives the daemon: the provider gives the engine a record of
+      each check, the engine stores it with the outcome of the
+      transfer, and the next start hands it back (`data-flow.md`
+      §Conflict handling; the follow-up rows of the contract in
+      `provider-onboarding.md`). A stop that left no record is covered
+      too. Drive committed the write and the daemon stopped before the
+      record was saved: a kill before the answer came, a kill after it
+      and before the tick that follows it ended, a tick whose writes
+      the database did not take, or a clean stop while the commit was
+      on its way. At the next start the engine knows that write by its
+      tag: the cloud object carries an op-id of this device and this
+      profile that the index row does not hold. The engine tells the
+      provider (`note_unrecorded_write`), whatever the local file
+      holds, and the provider owes the check from there. What is still
+      open:
+      - The object was written again before this device started. When
+        another device that runs Vapor wrote it, its tag replaced the
+        tag of this device: nothing marks the lost write, and no check
+        is made. When a program that keeps the tag wrote it (the Drive
+        website), the check takes the newer content for the write of
+        this device, and finds a replaced version only in the 50
+        seconds before that content. In both cases a version that the
+        lost write replaced unseen is only in the version history of
+        the file in Google Drive. A move of this device tags the
+        object too: when the step whose outcome was lost was a move,
+        and the content came from another writer, the check takes that
+        content for a write of this device and can keep a copy of a
+        version that nobody lost.
+      - The check finds a write of the same moment by its time. A
+        writer can set the time of its version (Drive for desktop sets
+        the time the file has on its disk): a write that lands inside
+        the round trip of an upload's commit with a time of another
+        day is not found. A replaced version that its writer dated
+        later than the upload's own (a clock that is ahead) is listed
+        after it, and the check then finds no base and ends. The check
+        also ends when the list does not hold the upload's own version
+        yet; the runs with the account never saw the list lag a write,
+        and nothing else says that it cannot. `files.version` grows by
+        2 or 3 for one overwrite and by 5 to 7 for two, so it does not
+        tell a second writer.
+      - A check that runs late reads the wrong holder of the name. The
+        check takes the content that holds the name when it runs for
+        the write that won. After a stop of the daemon and one more
+        save of the file, that content is a later one: the version
+        that won is then kept as a copy (one copy too many), and the
+        version of this device is not kept when the write that won
+        came from a program other than Vapor.
+      - A copy that is made late goes to the folder and under the name
+        that the file had at the upload. A file or a folder that moved
+        since (up to 30 days) leaves the copy at the old place, which
+        can be outside the synced folder now. A file that is in the
+        trash is not told apart either.
+      - Nobody measured the commit of a write with no recorded
+        outcome, so 10 seconds stand for it. A replaced version whose
+        time is more than 50 seconds before the time of the write, or
+        more than 11 seconds after it, is not found. A commit takes
+        that long for a last chunk on a slow link.
+      - The copy of a replaced version moves its bytes inside the
+        changes poll, one step for each poll, outside the transfer
+        caps and the bandwidth ceiling. With the record stored, the
+        copy can run as a transfer.
+      - The copy is made by the device whose upload holds the name,
+        so the other device's edit is only in the version history
+        until that device polls: a device that goes to sleep right
+        after its upload keeps the copy waiting.
+      - A state database that is set aside (another schema version,
+        damage) takes the stored records with it, and their checks
+        are not made. It takes the index rows too, so the engine has
+        no base for a write with no recorded outcome and makes no
+        call.
+      - A profile that is composed again in a running daemon (a
+        change of its settings, a retry after a failure) gets a new
+        provider, and that provider takes the stored records. A poll
+        of the old provider can still be at work for a moment. If
+        both copy the same version in that moment, Drive holds two
+        files of one name: one syncs, and the other is reported as a
+        duplicate. Reasoned from the code; no run showed it.
+      - After a stop the provider knows what the uploads of the
+        checks it gets back wrote, and nothing of the other uploads.
+        Three saves of one file by this device inside one moment,
+        with the checks of the last two ended and the first still
+        waiting at the stop: the check of the first then reads the
+        middle save as a write of another device and keeps it as a
+        copy. No data is lost.
 - [ ] P-5 Decide the Google verification path. The `drive` scope is
       restricted: Google requires app verification and a yearly
       security assessment before more than 100 users can sign in, and a
@@ -280,12 +407,11 @@ a task costs a user.
       400 files of 1 KB took 214 s from one device to the other (the
       upload, the changes poll, and the download together), and 31
       files with one of 20 MiB took 110 s. On `80c842a` the 400 files
-      took 301 s (1.3 a second), their removal 286 s after the answer
-      to the mass-delete question, and the 31 files 64 s. One save
-      took 9 s to 12 s from device to device. On the build of
-      2026-11-24 the 400 files took 208 s (1.9 a second), their
-      removal 82 s after the answer, the 31 files 32 s, and one save
-      5 s to 11 s. The later runs of that day timed the upload apart:
+      took 301 s (1.3 a second), their removal 286 s, and the 31
+      files 64 s. One save took 9 s to 12 s from device to device. On
+      the build of 2026-11-24 the 400 files took 208 s (1.9 a second),
+      their removal 82 s, the 31 files 32 s, and one save 5 s to
+      11 s. The later runs of that day timed the upload apart:
       the 400 files took 154 s with a quiet host and 181 s with a soak
       on it, and the queue of the sending device was empty after 63 s
       and 73 s (about 6 uploads a second). So more than half of the
@@ -401,6 +527,14 @@ the primary path is blocked by it. See `docs/tasks/README.md`.
       settings of the user, into `ProxySettings::https_proxy`. It
       reports none today, so only `HTTPS_PROXY` in the environment is
       followed there.
+- [ ] C6-13 A rename of a folder that refuses a taken name, native on
+      Windows (`MoveFileExW` with no replace flag). The portable
+      fallback of `fs_ops::atomic_noclobber_rename` claims the name
+      with an empty folder, gives the claim up, and renames: a folder
+      never takes the place of a file or of a folder with content
+      there, but an empty folder that appears in that instant can be
+      replaced. A rename that fails removes nothing at the name. macOS
+      and Linux rename in one call.
 - [ ] C6-11 The Windows installers, `Vapor-windows-x64` and
       `Vapor-windows-arm64`, as a `package (windows)` entry of
       `release.yml`. One installer holds the app, `vapord.exe`, and
@@ -477,6 +611,16 @@ runners. What remains before Linux ships a surface:
       Tier 1 test of the live profile set runs every provider call on
       the tick thread. Found by the review of the pull request,
       2026-11-24.
+- [ ] CT-13 Run a backend with ids through the provider contract
+      suite. The three backends of
+      `core/providers/tests/provider_contract.rs` have no ids, so the
+      suite locks only that such a backend reports none. That an id is
+      unique, stays with a moved object, and is the same in a listing,
+      a lookup, and a transfer is tested for Google Drive alone, on
+      the scripted transport. A small backend with ids in the suite
+      (or the Drive provider on that transport) would hold every later
+      backend to the same contract. Found by the review of the pull
+      request, 2026-11-26.
 - [ ] T-16 Resource-ceiling integration tests over the cross-product in
       `docs/performance/acceptance-budgets-and-benchmark-harness.md`
       (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,

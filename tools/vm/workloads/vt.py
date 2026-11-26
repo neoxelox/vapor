@@ -95,7 +95,6 @@ def db_rows(sql, db=None):
 def queue_counts():
     return {
         "pending": db_scalar("SELECT COUNT(*) FROM queue_intents WHERE state IN ('pending','leased')"),
-        "held": db_scalar("SELECT COUNT(*) FROM queue_intents WHERE state='held'"),
         "failed": db_scalar("SELECT COUNT(*) FROM failed_intents"),
         "hw": db_scalar("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='queue_intents'),0)"),
         "index": db_scalar("SELECT COUNT(*) FROM sync_index"),
@@ -368,7 +367,7 @@ def mon_loop(path, interval):
     new = not os.path.exists(path)
     fh = open(path, "a", buffering=1)
     if new:
-        fh.write("ts,pid,cpu_pct,rss_mb,pending,held,failed,index,hw,throttle,run,reconcile,free_gb,db_mb,trash_mb,load1,app_cpu_pct\n")
+        fh.write("ts,pid,cpu_pct,rss_mb,pending,failed,index,hw,throttle,run,reconcile,free_gb,db_mb,trash_mb,load1,app_cpu_pct\n")
     last = {}
     throttle = run = rec = ""
     trash_mb = 0.0
@@ -417,7 +416,7 @@ def mon_loop(path, interval):
                 pass
         load1 = os.getloadavg()[0]
         fh.write(
-            f"{t:.1f},{pid or ''},{cpu_pct},{rss_mb},{q['pending']},{q['held']},{q['failed']},{q['index']},{q['hw']},"
+            f"{t:.1f},{pid or ''},{cpu_pct},{rss_mb},{q['pending']},{q['failed']},{q['index']},{q['hw']},"
             f"{throttle},{run},{rec},{free_gb:.2f},{db_mb:.1f},{trash_mb:.0f},{load1:.2f},{app_pct}\n"
         )
         n += 1

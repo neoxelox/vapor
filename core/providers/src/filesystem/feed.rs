@@ -370,6 +370,7 @@ fn report_directory_files(
             content_hash: None,
             size_bytes: Some(metadata.len()),
             modified_at: metadata.modified().ok(),
+            id: None,
         });
     }
 }
@@ -438,6 +439,7 @@ fn normalize_watch_event(
                 content_hash: None,
                 size_bytes: Some(metadata.len()),
                 modified_at: metadata.modified().ok(),
+                id: None,
             })
         }
         // `NotADirectory` means an ancestor of the path is now a file, so
@@ -469,6 +471,7 @@ fn normalize_watch_event(
                 content_hash: None,
                 size_bytes: None,
                 modified_at: None,
+                id: None,
             })
         }
         // A transient stat failure (EACCES during a permission change,
@@ -492,6 +495,7 @@ fn normalize_watch_event(
                 content_hash: None,
                 size_bytes: None,
                 modified_at: None,
+                id: None,
             })
         }
     }
@@ -593,7 +597,13 @@ mod tests {
         let times: Vec<(&str, RemoteChangeKind, SystemTime)> = page
             .changes
             .iter()
-            .map(|change| (change.path.as_str(), change.kind, change.observed_at))
+            .map(|change| {
+                (
+                    change.path.as_str(),
+                    change.kind.clone(),
+                    change.observed_at,
+                )
+            })
             .collect();
         assert_eq!(
             times,

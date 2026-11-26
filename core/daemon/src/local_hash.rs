@@ -256,6 +256,7 @@ mod tests {
             remote_modified_at: None,
             last_op_id: String::new(),
             updated_at: SystemTime::UNIX_EPOCH,
+            remote_id: None,
         }
     }
 

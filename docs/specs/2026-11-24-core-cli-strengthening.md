@@ -1,7 +1,7 @@
 # A faster and more robust core and CLI before the Mac app
 
-Status: implemented 2026-11-24. The design round and the open points
-wait for the owner.
+Status: implemented 2026-11-24, and round 2 on 2026-11-26. The open
+points wait for the owner.
 
 ## Goal
 
@@ -104,9 +104,11 @@ document that owns it.
 
 ## Design round 1, 2026-11-24
 
-Sent to the owner on 2026-11-24. No answer yet, so nothing below is a
-decision, and nothing of it is built. The recommendation of each
-question is in brackets.
+Sent to the owner on 2026-11-24. The recommendation of each question
+is in brackets. Q1 to Q7 have their answer in
+`2026-11-24-mass-delete-guard-removal.md`: the owner removed the guard,
+so none of the seven is a decision here. Q8 and Q9 were answered on
+2026-11-25, in the decisions under the table.
 
 Facts behind the round, checked in the code that day: the guard holds
 a burst when 1 000 deletions fall in 60 s, or when they are 25% of the
@@ -129,6 +131,38 @@ device whose trash the user turned off.
 | Q7 | Keep the keys `safeguards.massDelete.*` for the cases where Vapor still asks? | Yes. |
 | Q8 | A guarded overwrite on Google Drive through API version 2 (`If-Match`): the missing check ran with the test account on 2026-11-24 and holds (the condition is judged at the last chunk of a resumable upload). Move to version 2? | Yes. It removes the version check, its copies, and task P-12. |
 | Q9 | A local folder that a cloud rename emptied and that still holds ignored files: which ones may go with it? | Remove the folder when all that is left are files the OS writes by itself (`.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`); they go to the trash with it. Keep the folder when anything else is left. |
+
+### Decisions of round 2, 2026-11-25
+
+| # | Decision |
+|---|---|
+| D1 | Vapor uses one version of the Google Drive API, the current one (version 3), for every request. A guarded overwrite does not move to version 2: two versions in one provider cost more than the case is worth (owner, 2026-11-25). This answers Q8. |
+| D2 | The check for a replaced version after an overwrite is made to survive a stop of the daemon (`core.md` P-12), since version 3 keeps that check (owner, 2026-11-25). Built: see below. |
+| D3 | Q9 is answered in `2026-11-25-cloud-folder-rename.md`: a folder renamed in the cloud is renamed on the device in one step, so the leftover folder of the question no longer comes up where Vapor can pair the two names. |
+
+D2 is built (2026-11-26). The provider gives the engine a record of
+each check for a replaced version. The engine stores the record in the
+tick that records the transfer, and the next start hands it back. A
+daemon that stops between the commit at Drive and that tick leaves no
+record. The engine knows such a write at the next start by its tag:
+the cloud object carries an op-id of this device and this profile that
+the index row does not hold. The engine tells the provider, and the
+check is made from there. The same bytes from another device or
+another program carry another tag, or none, and give no check.
+
+The kill test ran with the test account, in a Tier VM guest with the
+Internet, with two profiles on one Drive folder as two devices. Both
+devices save one file while sync is paused. Sync resumes, and the
+daemon is killed in the moment the first record of a check is in a
+state database. The upload of the other device has landed by then and
+holds the name, and no record of it is stored.
+
+| Build | Both edits on both devices |
+|---|---|
+| The stored record alone | 0 of 3 runs. The edit that lost the name was in the version history of Drive only. |
+| With the tag rule | 3 of 3 runs, 15 s to 19 s after the kill: the edit that holds the name as `doc.txt`, the other as `doc~conflict-replaced-<time>.txt`. No stored record was left. |
+
+What stays open is in `docs/tasks/core.md` P-12.
 
 The other tasks that wait for the owner had no round yet: E-12 (two
 Drive profiles on one local folder with nested cloud folders), P-5

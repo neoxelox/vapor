@@ -8,11 +8,11 @@ tier and no script of the repository runs them; making them a run
 that anyone can repeat is open work (`docs/tasks/core.md`).
 
 They never ship, and they run only inside a guest. They kill the
-daemon, move the sync roots away, answer every `mass-delete` question
-with `apply`, and write to `~/Vapor`, `~/CloudDrive`, and `~/.vapor`
-of the user they run as: on a machine with a real install that is
-damage. `vt.py`, which the others import, and `wl_npm.sh` refuse to
-start where the read-only share of a guest is missing.
+daemon, move the sync roots away, and write to `~/Vapor`,
+`~/CloudDrive`, and `~/.vapor` of the user they run as: on a machine
+with a real install that is damage. `vt.py`, which the others import,
+and `wl_npm.sh` refuse to start where the read-only share of a guest
+is missing.
 
 ## How to run them
 
@@ -49,7 +49,7 @@ The guest image has Python 3, git, node, npm, and sqlite3.
 | `wl_npm.sh` | Real `npm ci`, `npm install`, `npm uninstall`, and `rm -rf node_modules` from an offline cache, with the time Vapor needs after each. |
 | `latency.py` | Times one change at a time in both directions: a new file, an edit, a media file, a 5 MB file, a deletion, a rename. Between the two roots of the filesystem provider, or between two local folders that sync through one cloud. |
 | `probe.py` | Saves one file every few seconds in each folder it is given and times its arrival on the other side. Run it next to a workload to see what a single save costs meanwhile. |
-| `answer_loop.py`, `resolve_all.py` | A user who answers `mass-delete` questions with `apply` a few seconds after they show; and one pass that answers every open question. |
+| `resolve_all.py` | One pass that answers every open question. |
 | `drive_tests.py`, `drive_conflict.py` | Two profiles on one Google Drive folder, as two devices: first files, the time of one save from device to device, names, operations both ways, a git repository, a burst and its removal, and a conflict in five variants. They need a guest with the Internet and the dedicated test account. |
 | `drive_race.py` | Both devices edit one file at the same moment through Google Drive, many times, and says for each file whether both edits are on both devices. With `--files 1` both uploads land inside one round trip, which is the case the `~conflict-replaced` copy is for; `--size` makes the versions large enough to go in chunks. |
 | `drive_probe.py` | Asks the Drive API of the test account the questions the provider answers from the API documents, with the requests the provider sends: one line for each fact, `HOLDS` or `BREAKS`. `race` and `extra` print what Drive does that no code depends on; `extra` also asks whether a resumable upload through API version 2 checks its `If-Match` condition at the last chunk. `cloud` changes a file of the synced folder as another program does (a new time with no new bytes, a new name, new bytes with an old time), and makes a file with a name as it is given (`create`, for a name with a `/` in it) or renames a child by its exact name (`rename-child`). It reads the sign-in on stdin and works in a folder of its own, which it puts in the trash of the account. |

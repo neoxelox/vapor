@@ -139,11 +139,11 @@ fn config_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     // Structured keys are stored as JSON (a string containing JSON would
     // make the daemon ignore the group) and unset keys read as defaults.
-    cli.config_set("safeguards", r#"{"massDelete": {"threshold": 500}}"#)?;
+    cli.config_set("trash", r#"{"retentionDays": 14}"#)?;
     let raw = fs::read_to_string(home.config_path())?;
     ensure!(
-        raw.contains("\"threshold\": 500"),
-        "safeguards was not stored as a JSON object: {raw}"
+        raw.contains("\"retentionDays\": 14"),
+        "trash was not stored as a JSON object: {raw}"
     );
     ensure!(
         cli.config_get("syncMode")? == "two-way",

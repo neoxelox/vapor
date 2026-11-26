@@ -97,10 +97,6 @@ pub struct StagedExecutorReport {
     /// Downloads discarded at apply time because their target would
     /// alias a differently-cased local file (`(target, existing)`).
     pub name_collisions: Vec<(PathBuf, PathBuf)>,
-    /// Decisions this advance opened (ids), for the timeline.
-    pub decisions_opened: Vec<i64>,
-    /// Intents parked behind a decision this advance.
-    pub held: usize,
     /// Strict-mirror local removals performed this advance (pull-only
     /// restore path found no remote counterpart).
     pub mirror_deletes: usize,
@@ -135,6 +131,9 @@ pub struct StagedExecutorReport {
     /// advance. The runtime holds the profile until the user signs in
     /// again; the intents involved went back to the queue.
     pub authentication_required: Option<String>,
+    /// An intent waits for the changes feed to say where a cloud
+    /// object went. The runtime polls the feed at once.
+    pub remote_change_expected: bool,
 }
 
 /// What the queue says about renames in flight, read at most once a
@@ -155,14 +154,23 @@ pub struct MoveHints {
     folder_respellings: std::collections::HashMap<PathBuf, Option<Respelling>>,
 }
 
-/// A local entry whose name changed only in spelling since its last
-/// sync (`Folder` to `FOLDER` on a volume that folds case): the sync
-/// index still holds its rows under `old`, and the device stores it
-/// as `new`.
+/// A local entry whose name goes to the cloud as one move of the cloud
+/// object: the sync index still holds its rows under `old`, and the
+/// device stores it as `new`.
+///
+/// Two cases give one. The name changed only in spelling since its
+/// last sync (`Folder` to `FOLDER` on a volume that folds case), which
+/// the index shows by itself. Or a row of `name_carries` says so: both
+/// sides gave the entry another name, or the cloud gave it one that
+/// this profile does not keep.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Respelling {
     old: PathBuf,
     new: PathBuf,
+    /// The local path that mirrors where the cloud object is, when a
+    /// row of `name_carries` gave this move. `None` when the object is
+    /// at the mirror of `old`.
+    owed_from: Option<PathBuf>,
 }
 
 impl MoveHints {
@@ -274,9 +282,6 @@ pub struct ExecutionEnv<'a> {
     pub local_echoes: &'a mut SelfWriteCache,
     /// Echo cache keyed by remote path (suppresses feed echoes).
     pub remote_echoes: &'a mut SelfWriteCache,
-    /// The deletion guard, consulted the moment a deletion would become
-    /// irreversible; `None` when the guard is disabled by configuration.
-    pub deletion_guard: Option<&'a mut crate::safeguards::MassChangeGuard>,
     /// Where a file Vapor removes on this device goes; `None` unlinks
     /// (the harness fixtures that have no runtime around them). Shared,
     /// because a discard that needs a copy runs on a worker.
@@ -289,6 +294,11 @@ pub struct ExecutionEnv<'a> {
     /// poll in flight, a page that was full). The create half of a
     /// rename made in the cloud may be among them.
     pub remote_changes_pending: bool,
+    /// The ignore rules of the scope. An intent that the executor
+    /// queues by itself (the upload of a file that a removal kept)
+    /// asks them first: an ignored name never syncs. `None` in a
+    /// fixture with no rules.
+    pub path_filter: Option<&'a crate::fs_events::SharedEventPathFilter>,
 }
 
 /// One row of [`StagedExecutor::active_stages`].
@@ -570,10 +580,6 @@ enum PlanOutcome {
     /// intent goes back to the queue, and the runtime checks the root
     /// at once.
     CloudRootSuspect,
-    /// The intent was parked behind a decision (already in the held
-    /// state); nothing else to do until the user answers. Carries what
-    /// the continuation recorded while holding (decisions opened).
-    Held(StagedExecutorReport),
     /// A keep-both conflict was detected and resolved during planning:
     /// the local loser moved to its conflict-copy path, the follow-up
     /// intents are durably enqueued, and the original intent completes.
@@ -873,6 +879,16 @@ impl StagedExecutor {
                         stage_started_inst: now_inst,
                     }));
                 }
+                if cloud_place_is_about_to_move(state_db, env, app, &intent) {
+                    app.release_work(permit);
+                    state_db.defer_leased(
+                        intent.id,
+                        now + RESPELL_WAIT,
+                        "waiting for the move of its folder in the cloud",
+                    )?;
+                    report.retried += 1;
+                    return Ok(None);
+                }
                 let outcome = plan_intent(env, state_db, &intent, now);
                 if let PlanOutcome::Probe { request, pending } = outcome {
                     // The planner permit stays held across the probe so
@@ -1093,11 +1109,6 @@ impl StagedExecutor {
                 self.hold_for_cloud_root(state_db, &intent, now, report)?;
                 Ok(None)
             }
-            PlanOutcome::Held(scratch) => {
-                report.held += scratch.held;
-                report.decisions_opened.extend(scratch.decisions_opened);
-                Ok(None)
-            }
             PlanOutcome::ConflictResolved => {
                 report.conflict_paths.push(intent.path.clone());
                 self.complete(state_db, &intent, report)?;
@@ -1126,16 +1137,6 @@ impl StagedExecutor {
                     )?;
                     report.retried += 1;
                     report.local_root_suspect = true;
-                    return Ok(None);
-                }
-                if hold_if_mass_deletion(
-                    state_db,
-                    env,
-                    &intent,
-                    DeletionDirection::LocalToCloud,
-                    now,
-                    report,
-                )? {
                     return Ok(None);
                 }
                 self.step_waiting_for_upload(
@@ -1275,97 +1276,134 @@ impl StagedExecutor {
             }
 
             ActiveStage::UploadPreflight { permit, plan } => match outcome {
-                ProviderJobOutcome::Probe(probe) => match probe.content_hash {
-                    Some(Ok(remote_hash)) if Some(&remote_hash) == plan.content_hash.as_ref() => {
-                        // Identical content converges silently.
-                        app.release_work(permit);
-                        let remote_modified_at = probe
-                            .stat
-                            .as_ref()
-                            .and_then(|stat| stat.as_ref().ok())
-                            .and_then(|entry| entry.as_ref())
-                            .map(|entry| entry.modified_at);
-                        record_upload_index(
-                            state_db,
-                            &plan,
-                            &remote_hash,
-                            local_size(&plan.local_path),
-                            remote_modified_at,
-                            now,
-                        );
-                        self.complete(state_db, &intent, report)?;
-                        Ok(None)
-                    }
-                    Some(Ok(remote_hash)) if plan.remote_unchanged_since_sync => {
-                        // The object is what this device last wrote (its
-                        // tag, size, and time say so), and the index had
-                        // no hash to guard with. The hash the object has
-                        // now is that guard.
-                        let mut plan = plan;
-                        plan.precondition = RemotePrecondition::HashEquals(remote_hash);
-                        self.dispatch_upload(app, env, intent, permit, plan, now_inst)
-                    }
-                    Some(Ok(remote_hash))
-                        if plan.last_synced_hash.is_some()
-                            && plan.content_hash == plan.last_synced_hash =>
-                    {
-                        // The local copy is exactly what was last synced,
-                        // so the change is remote-only: fetch it. Never
-                        // a conflict copy of an unchanged file.
-                        app.release_work(permit);
-                        crate::logging::info(
-                            "Remote changed while the local copy stayed at the last sync; downloading instead of uploading",
-                            &[
-                                ("path", intent.path.display().to_string()),
-                                ("remote_hash", remote_hash),
-                            ],
-                        );
-                        state_db.enqueue_intent(&intent.path, PendingIntentKind::Download, now)?;
-                        self.complete(state_db, &intent, report)?;
-                        Ok(None)
-                    }
-                    Some(Ok(remote_hash))
-                        if plan.last_synced_hash.is_some()
-                            && Some(&remote_hash) == plan.last_synced_hash.as_ref() =>
-                    {
-                        // The remote is exactly what was last synced, so
-                        // the change is local-only: a guarded overwrite.
-                        let mut plan = plan;
-                        plan.precondition = RemotePrecondition::HashEquals(remote_hash);
-                        self.dispatch_upload(app, env, intent, permit, plan, now_inst)
-                    }
-                    Some(Ok(_)) => {
-                        // Both copies moved away from the last sync (or
-                        // there was none): a genuine conflict.
-                        app.release_work(permit);
-                        self.finish_as_conflict(app, state_db, env, &intent, now, report)?;
-                        Ok(None)
-                    }
-                    Some(Err(error)) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
-                        // Remote vanished since planning: proceed as a
-                        // fresh create, guarded as such so a concurrent
-                        // re-creation is caught rather than overwritten.
-                        let mut plan = plan;
-                        plan.precondition = RemotePrecondition::Absent;
-                        self.dispatch_upload(app, env, intent, permit, plan, now_inst)
-                    }
-                    Some(Err(error)) => {
-                        app.release_work(permit);
-                        self.resolve_provider_failure(app, state_db, &intent, error, now, report)?;
-                        Ok(None)
-                    }
-                    None => {
-                        app.release_work(permit);
-                        self.fail_internal(
+                ProviderJobOutcome::Probe(probe) => {
+                    // Whatever the local file holds now: the object
+                    // may be an upload of this device that no index
+                    // row records.
+                    if let Some(Ok(remote_hash)) = &probe.content_hash {
+                        note_own_write_the_index_does_not_know(
                             app,
                             state_db,
-                            &intent,
-                            "upload preflight probe returned no content hash",
-                            now,
-                            report,
-                        )
+                            env,
+                            &plan,
+                            remote_hash,
+                            probe
+                                .stat
+                                .as_ref()
+                                .and_then(|stat| stat.as_ref().ok())
+                                .and_then(|entry| entry.as_ref())
+                                .and_then(|entry| entry.op_id.as_deref()),
+                        );
                     }
-                },
+                    match probe.content_hash {
+                        Some(Ok(remote_hash))
+                            if Some(&remote_hash) == plan.content_hash.as_ref() =>
+                        {
+                            // Identical content converges silently.
+                            app.release_work(permit);
+                            let remote_entry = probe
+                                .stat
+                                .as_ref()
+                                .and_then(|stat| stat.as_ref().ok())
+                                .and_then(|entry| entry.as_ref());
+                            // Nothing was written, so the row takes the
+                            // tag that the object carries.
+                            let op_id = op_id_of_an_object_left_as_it_is(
+                                state_db,
+                                &plan,
+                                remote_entry.map(|entry| entry.op_id.as_deref()),
+                            );
+                            record_upload_index(
+                                state_db,
+                                &plan,
+                                &remote_hash,
+                                local_size(&plan.local_path),
+                                remote_entry.map(|entry| entry.modified_at),
+                                &op_id,
+                                now,
+                            );
+                            self.complete(state_db, &intent, report)?;
+                            Ok(None)
+                        }
+                        Some(Ok(remote_hash)) if plan.remote_unchanged_since_sync => {
+                            // The object is what this device last wrote (its
+                            // tag, size, and time say so), and the index had
+                            // no hash to guard with. The hash the object has
+                            // now is that guard.
+                            let mut plan = plan;
+                            plan.precondition = RemotePrecondition::HashEquals(remote_hash);
+                            self.dispatch_upload(app, env, intent, permit, plan, now_inst)
+                        }
+                        Some(Ok(remote_hash))
+                            if plan.last_synced_hash.is_some()
+                                && plan.content_hash == plan.last_synced_hash =>
+                        {
+                            // The local copy is exactly what was last synced,
+                            // so the change is remote-only: fetch it. Never
+                            // a conflict copy of an unchanged file.
+                            app.release_work(permit);
+                            crate::logging::info(
+                                "Remote changed while the local copy stayed at the last sync; downloading instead of uploading",
+                                &[
+                                    ("path", intent.path.display().to_string()),
+                                    ("remote_hash", remote_hash),
+                                ],
+                            );
+                            state_db.enqueue_intent(
+                                &intent.path,
+                                PendingIntentKind::Download,
+                                now,
+                            )?;
+                            self.complete(state_db, &intent, report)?;
+                            Ok(None)
+                        }
+                        Some(Ok(remote_hash))
+                            if plan.last_synced_hash.is_some()
+                                && Some(&remote_hash) == plan.last_synced_hash.as_ref() =>
+                        {
+                            // The remote is exactly what was last synced, so
+                            // the change is local-only: a guarded overwrite.
+                            let mut plan = plan;
+                            plan.precondition = RemotePrecondition::HashEquals(remote_hash);
+                            self.dispatch_upload(app, env, intent, permit, plan, now_inst)
+                        }
+                        Some(Ok(_)) => {
+                            // Both copies moved away from the last sync (or
+                            // there was none): a genuine conflict.
+                            app.release_work(permit);
+                            self.finish_as_conflict(app, state_db, env, &intent, now, report)?;
+                            Ok(None)
+                        }
+                        Some(Err(error))
+                            if error.kind == vapor_shared::ProviderErrorKind::NotFound =>
+                        {
+                            // Remote vanished since planning: proceed as a
+                            // fresh create, guarded as such so a concurrent
+                            // re-creation is caught rather than overwritten.
+                            let mut plan = plan;
+                            plan.precondition = RemotePrecondition::Absent;
+                            self.dispatch_upload(app, env, intent, permit, plan, now_inst)
+                        }
+                        Some(Err(error)) => {
+                            app.release_work(permit);
+                            self.resolve_provider_failure(
+                                app, state_db, &intent, error, now, report,
+                            )?;
+                            Ok(None)
+                        }
+                        None => {
+                            app.release_work(permit);
+                            self.fail_internal(
+                                app,
+                                state_db,
+                                &intent,
+                                "upload preflight probe returned no content hash",
+                                now,
+                                report,
+                            )
+                        }
+                    }
+                }
                 other => {
                     app.release_work(permit);
                     self.fail_unexpected_outcome(
@@ -1422,6 +1460,8 @@ impl StagedExecutor {
                         now,
                     );
                     forget_deleted_path(state_db, &source.path);
+                    // The object is the same one, so its id is too.
+                    record_remote_id(state_db, &plan.local_path, source.remote_id.as_deref());
                     crate::logging::info(
                         "Moved the cloud object instead of re-uploading a renamed file",
                         &[
@@ -1432,6 +1472,28 @@ impl StagedExecutor {
                     );
                     report.moves += 1;
                     self.complete(state_db, &intent, report)?;
+                    Ok(None)
+                }
+                ProviderJobOutcome::Move(Err(error))
+                    if error.kind == vapor_shared::ProviderErrorKind::NotFound
+                        && source.remote_id.is_some()
+                        && intent.attempt_count < constants::engine::MOVE_SETTLE_MAX_DEFERRALS =>
+                {
+                    // The cloud has no object under the old name, and
+                    // the provider knows its objects by id: the object
+                    // may have another name there that the changes
+                    // feed has not said yet. An upload now would put
+                    // this device's name in the cloud as a second
+                    // object. The feed is read at once, and what it
+                    // says pairs the two names.
+                    app.release_work(permit);
+                    state_db.defer_leased(
+                        intent.id,
+                        now + Duration::from_secs(constants::engine::MOVE_SETTLE_DELAY_SECONDS),
+                        "the cloud object of the old name is not where the index holds it; waiting for the changes feed",
+                    )?;
+                    report.retried += 1;
+                    report.remote_change_expected = true;
                     Ok(None)
                 }
                 ProviderJobOutcome::Move(Err(error))
@@ -1515,6 +1577,15 @@ impl StagedExecutor {
                     Ok(()) => {
                         finish_respelling(env, state_db, &respelling, &to, &op_id, now)?;
                         report.moves += 1;
+                        if respelling.owed_from.is_some()
+                            && intent.kind == PendingIntentKind::Rename
+                            && intent.path == respelling.new
+                        {
+                            // This intent was queued to make the move,
+                            // and the move is made.
+                            self.complete(state_db, &intent, report)?;
+                            return Ok(None);
+                        }
                     }
                     Err(error)
                         if matches!(
@@ -1635,14 +1706,18 @@ impl StagedExecutor {
                         outcome.remote_modified_at,
                         now,
                     );
+                    // An upload records its own op-id: the tag that it
+                    // just put on the object.
                     record_upload_index(
                         state_db,
                         &plan,
                         &outcome.content_hash,
                         outcome.bytes_total,
                         outcome.remote_modified_at,
+                        &plan.op_id,
                         now,
                     );
+                    record_remote_id(state_db, &plan.local_path, outcome.remote_id.as_deref());
                     self.complete(state_db, &intent, report)?;
                     Ok(None)
                 }
@@ -1797,6 +1872,14 @@ impl StagedExecutor {
                             if applied == DownloadApply::KeptBoth {
                                 report.conflict_paths.push(plan.local_path.clone());
                             }
+                            note_own_write_the_index_does_not_know(
+                                app,
+                                state_db,
+                                env,
+                                &plan,
+                                &outcome.content_hash,
+                                plan.remote_op_id.as_deref(),
+                            );
                             // The size and the modification time of the
                             // file as applied: what the watcher's event
                             // for this write is checked against.
@@ -1817,6 +1900,11 @@ impl StagedExecutor {
                                 outcome.bytes_total,
                                 outcome.remote_modified_at,
                                 now,
+                            );
+                            record_remote_id(
+                                state_db,
+                                &plan.local_path,
+                                outcome.remote_id.as_deref(),
                             );
                             self.complete(state_db, &intent, report)?;
                             Ok(None)
@@ -2251,9 +2339,9 @@ impl StagedExecutor {
             // The cloud removed a file this device has not changed
             // since the last sync (a second event for an already
             // synced file arrived just as the cloud deleted it). That
-            // is a deletion to apply here, through the guard and into
-            // the trash, never a re-upload that would undo it. An
-            // approved upload is the user's own restore or merge and
+            // is a deletion to apply here, through the two-way deletion
+            // guard and into the trash, never a re-upload that would
+            // undo it. An approved upload is the user's own merge and
             // goes through.
             app.release_work(permit);
             crate::logging::info(
@@ -2286,12 +2374,16 @@ impl StagedExecutor {
                 .ok()
                 .flatten()
                 .and_then(|index| index.remote_modified_at);
+            // The object was not looked at here: the row keeps the
+            // tag it has.
+            let op_id = op_id_of_an_object_left_as_it_is(state_db, &plan, None);
             record_upload_index(
                 state_db,
                 &plan,
                 &hash,
                 local_size(&plan.local_path),
                 remote_modified_at,
+                &op_id,
                 now,
             );
             crate::logging::debug(
@@ -2804,8 +2896,50 @@ fn respelling_of(state_db: &DurableStateDb, path: &Path) -> Option<Respelling> {
     let folds = new
         .parent()
         .is_some_and(crate::name_collision::folds_case_at);
-    (differ && folds && !crate::name_collision::exactly_present(&old))
-        .then_some(Respelling { old, new })
+    (differ && folds && !crate::name_collision::exactly_present(&old)).then_some(Respelling {
+        old,
+        new,
+        owed_from: None,
+    })
+}
+
+/// The move that the cloud is owed for `path`: a row of `name_carries`
+/// for the path, or for a folder above it.
+fn owed_cloud_move(state_db: &DurableStateDb, path: &Path) -> Option<Respelling> {
+    state_db
+        .name_carries()
+        .ok()?
+        .into_iter()
+        .find(|carry| path.starts_with(&carry.new))
+        .map(|carry| Respelling {
+            old: carry.rows_at,
+            new: carry.new,
+            owed_from: Some(carry.cloud_at),
+        })
+}
+
+/// Whether `path` is at or under the place of a cloud object that is
+/// about to move to the name this device has for it. An intent for
+/// such a path waits a moment: what it would do there (a download into
+/// a folder that this device holds under another name) is settled by
+/// the comparison that follows the move.
+fn cloud_place_is_about_to_move(
+    state_db: &DurableStateDb,
+    env: &ExecutionEnv<'_>,
+    app: &DaemonApp,
+    intent: &DurableIntentRecord,
+) -> bool {
+    intent.kind != PendingIntentKind::ReconcileSubtree
+        && intent.attempt_count < constants::engine::MOVE_SETTLE_MAX_DEFERRALS
+        && env.sync_mode.allows_local_to_remote()
+        && app.provider().capabilities().supports_server_side_move
+        && state_db.name_carries().is_ok_and(|carries| {
+            carries.iter().any(|carry| {
+                carry.cloud_at != carry.new
+                    && intent.path.starts_with(&carry.cloud_at)
+                    && !intent.path.starts_with(&carry.new)
+            })
+        })
 }
 
 /// A rename that changed only the spelling of a name on this device,
@@ -2839,6 +2973,14 @@ fn respelling_to_carry(
         crate::name_collision::LocalSpelling::Other(stored) => stored,
         _ => intent.path.clone(),
     };
+    // A move that the cloud is owed goes before everything else at the
+    // path, also when the path has a row of its own: the row is right,
+    // and the cloud object is somewhere else.
+    if let Some(owed) = owed_cloud_move(state_db, &stored) {
+        let from = RemotePath::from_local(local_root, owed.owed_from.as_deref()?)?;
+        let to = RemotePath::from_local(local_root, &owed.new)?;
+        return Some((owed, from, to));
+    }
     if state_db.sync_index(&stored).ok()?.is_some() {
         return None;
     }
@@ -2867,9 +3009,42 @@ fn finish_respelling(
 ) -> Result<(), StateDbError> {
     state_db.rekey_sync_index_under(&respelling.old, &respelling.new)?;
     state_db.rekey_sync_index(&respelling.old, &respelling.new)?;
+    if respelling.owed_from.is_some() {
+        state_db.remove_name_carry(&respelling.new)?;
+        // The two sides are under one name again. What changed inside
+        // while the names differed is found by a comparison now, and
+        // not at the next scan of everything: the folder is walked,
+        // and a file gets the comparison of an upload. In `two-way`
+        // that comparison sends what this device changed, fetches what
+        // the cloud changed, and moves no bytes for a file that both
+        // sides left as it was. The upload of a mirror compares
+        // nothing and always sends, so it runs only for a file that
+        // this device changed.
+        let follow_up = match fs::symlink_metadata(&respelling.new) {
+            Ok(metadata) if metadata.is_dir() => Some(PendingIntentKind::ReconcileSubtree),
+            Ok(metadata)
+                if metadata.is_file()
+                    && env.sync_mode.allows_local_to_remote()
+                    && (env.sync_mode == vapor_shared::SyncMode::TwoWay
+                        || state_db.sync_index(&respelling.new)?.is_none_or(|row| {
+                            !row.matches_local(metadata.len(), metadata.modified().ok())
+                        })) =>
+            {
+                Some(PendingIntentKind::Upload)
+            }
+            _ => None,
+        };
+        if let Some(kind) = follow_up {
+            state_db.enqueue_intents_coalesced(
+                &[(respelling.new.clone(), kind, now)],
+                crate::safeguards::IntentSource::Fresh,
+            )?;
+        }
+    }
+    let cloud_was_at = respelling.owed_from.as_ref().unwrap_or(&respelling.old);
     if let Some(from) = env
         .local_root
-        .and_then(|root| RemotePath::from_local(root, &respelling.old))
+        .and_then(|root| RemotePath::from_local(root, cloud_was_at))
     {
         state_db.rekey_name_aliases_under(
             &respelling.old,
@@ -2893,9 +3068,9 @@ fn finish_respelling(
         );
     }
     crate::logging::info(
-        "Renamed in the cloud: the name changed only in spelling on this device",
+        "Moved the cloud object to the name that this device has for it",
         &[
-            ("from", respelling.old.display().to_string()),
+            ("from", cloud_was_at.display().to_string()),
             ("to", respelling.new.display().to_string()),
         ],
     );
@@ -2913,7 +3088,17 @@ fn abandon_respelling(
     error: &ProviderError,
     now: SystemTime,
 ) -> Result<(), StateDbError> {
-    let forgotten = state_db.remove_sync_index_tree(&respelling.old)?;
+    if respelling.owed_from.is_some() {
+        state_db.remove_name_carry(&respelling.new)?;
+    }
+    // Rows under the path of this device describe what this device
+    // holds: they stay, and the comparison reads the cloud against
+    // them.
+    let forgotten = if respelling.old == respelling.new {
+        0
+    } else {
+        state_db.remove_sync_index_tree(&respelling.old)?
+    };
     if let Some(folder) = respelling.new.parent() {
         state_db.enqueue_intents_coalesced(
             &[(
@@ -2925,7 +3110,7 @@ fn abandon_respelling(
         )?;
     }
     crate::logging::info(
-        "A rename by spelling could not be carried to the cloud as a move; comparing the folder instead",
+        "A name of this device could not be carried to the cloud as a move; comparing the folder instead",
         &[
             ("from", respelling.old.display().to_string()),
             ("to", respelling.new.display().to_string()),
@@ -3149,7 +3334,6 @@ fn plan_intent(
                     || env
                         .move_hints
                         .download_could_be_a_move(state_db, &intent.path))
-                && !mass_delete_question_is_open(state_db)
             {
                 return PlanOutcome::Defer {
                     delay: Duration::from_secs(constants::engine::MOVE_SETTLE_DELAY_SECONDS),
@@ -3260,7 +3444,6 @@ fn plan_delete(
         && intent.attempt_count < constants::engine::MOVE_SETTLE_MAX_DEFERRALS
         && ((intent.attempt_count == 0 && local_changes_pending)
             || move_hints.upload_of_size_is_queued(state_db, index.size_bytes))
-        && !mass_delete_question_is_open(state_db)
     {
         return PlanOutcome::Defer {
             delay: Duration::from_secs(constants::engine::MOVE_SETTLE_DELAY_SECONDS),
@@ -3422,10 +3605,7 @@ fn continue_plan_delete(
                 // No row: this device never compared the cloud object
                 // with anything, so it cannot know that the deletion
                 // was of this content. The object stays, unless the
-                // user's answer named this path. An answer about a
-                // burst of deletions does not: it lets the burst pass
-                // the guard, and a file that another device added to a
-                // deleted folder was never part of what the user saw.
+                // user's answer named this path.
                 None => intent.names_path,
             };
             if unchanged {
@@ -3629,187 +3809,6 @@ fn continue_plan_directory_delete(
         ],
     );
     PlanOutcome::Noop("directory delete expanded into per-entry deletes")
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DeletionDirection {
-    LocalToCloud,
-    CloudToLocal,
-}
-
-impl DeletionDirection {
-    fn label(self) -> &'static str {
-        match self {
-            DeletionDirection::LocalToCloud => "local-to-cloud",
-            DeletionDirection::CloudToLocal => "cloud-to-local",
-        }
-    }
-
-    fn origin(self) -> &'static str {
-        match self {
-            DeletionDirection::LocalToCloud => "this device",
-            DeletionDirection::CloudToLocal => "the cloud",
-        }
-    }
-
-    fn target(self) -> &'static str {
-        match self {
-            DeletionDirection::LocalToCloud => "the cloud",
-            DeletionDirection::CloudToLocal => "this device",
-        }
-    }
-
-    /// The queue kind that carries a deletion in this direction.
-    fn intent_kind(self) -> PendingIntentKind {
-        match self {
-            DeletionDirection::LocalToCloud => PendingIntentKind::Delete,
-            DeletionDirection::CloudToLocal => PendingIntentKind::ApplyRemoteDelete,
-        }
-    }
-}
-
-/// Paths listed in a mass-delete decision's evidence.
-const MASS_DELETION_EVIDENCE_PATHS: usize = 50;
-
-/// Whether a mass-delete question waits for its answer. While it
-/// does, a deletion does not wait out a move-settle window first: it
-/// goes to its probe and to the guard at once, and the guard holds it
-/// with the burst. A deletion that sat in that wait when the answer
-/// came was not covered by it: a `discard` restored the rest of the
-/// burst, and this one still ran a moment later.
-fn mass_delete_question_is_open(state_db: &DurableStateDb) -> bool {
-    matches!(
-        state_db.open_decision_id(constants::decision::KIND_MASS_DELETE),
-        Ok(Some(_))
-    )
-}
-
-/// Consults the deletion guard the moment a deletion would become
-/// irreversible. When the guard holds, the intent is parked behind the
-/// profile's open mass-delete decision (created on the first hold)
-/// and `true` is returned; the caller then stops working on it. An
-/// intent the user already approved through a decision passes.
-fn hold_if_mass_deletion(
-    state_db: &mut DurableStateDb,
-    env: &mut ExecutionEnv<'_>,
-    intent: &DurableIntentRecord,
-    direction: DeletionDirection,
-    now: SystemTime,
-    report: &mut StagedExecutorReport,
-) -> Result<bool, StateDbError> {
-    if intent.approved {
-        return Ok(false);
-    }
-    let Some(guard) = env.deletion_guard.as_deref_mut() else {
-        return Ok(false);
-    };
-    // A question that is open holds every deletion that reaches the
-    // guard until it is answered. The stored question says so, not the
-    // counter alone: a daemon that restarts starts with an empty one.
-    if let Some(decision_id) = state_db.open_decision_id(constants::decision::KIND_MASS_DELETE)? {
-        guard.hold_while_open(now);
-        state_db.hold_leased(intent.id, decision_id)?;
-        state_db.append_decision_evidence_path(
-            decision_id,
-            &intent.path,
-            MASS_DELETION_EVIDENCE_PATHS,
-        )?;
-        report.held += 1;
-        crate::logging::debug(
-            "Held a deletion behind the open mass-delete decision",
-            &[
-                ("decision_id", decision_id.to_string()),
-                ("path", intent.path.display().to_string()),
-                ("direction", direction.label().to_string()),
-            ],
-        );
-        return Ok(true);
-    }
-    let synced = state_db.sync_index_count()?;
-    let queued_behind = state_db.queued_deletions(direction.intent_kind(), intent.id)?;
-    if !guard.record_delete(now, synced, queued_behind) {
-        return Ok(false);
-    }
-    // The burst as the user will see it: what already landed inside
-    // the window plus what is still queued behind this one.
-    let count = guard.count(now).saturating_add(queued_behind);
-    let decision_id = {
-        let share = (count * 100)
-            .checked_div(synced)
-            .map_or(100, |share| share.min(100));
-        let question = format!(
-            "Vapor is holding a burst of deletions that arrived from {}: {count} of the {synced} \
-             files it syncs ({share}%) would be removed on {}. Apply them, or discard them and \
-             restore the files?",
-            direction.origin(),
-            direction.target()
-        );
-        let options = [
-            crate::state_db::DecisionOption {
-                key: constants::decision::OPTION_APPLY.to_string(),
-                label: "Apply the deletions".to_string(),
-            },
-            crate::state_db::DecisionOption {
-                key: constants::decision::OPTION_DISCARD.to_string(),
-                label: format!(
-                    "Discard them and restore the files from {}",
-                    direction.origin()
-                ),
-            },
-        ];
-        let evidence = serde_json::json!({
-            "direction": direction.label(),
-            "deletions_in_window": count,
-            "synced_files": synced,
-            "paths": Vec::<String>::new(),
-        });
-        let id = state_db.create_decision(
-            constants::decision::KIND_MASS_DELETE,
-            crate::state_db::DecisionScope::Batch,
-            None,
-            &question,
-            &options,
-            &evidence,
-            now,
-        )?;
-        crate::logging::warning(
-            "Mass-deletion guard tripped; holding the deletions behind a decision",
-            &[
-                ("decision_id", id.to_string()),
-                ("direction", direction.label().to_string()),
-                ("deletions_in_window", count.to_string()),
-                ("synced_files", synced.to_string()),
-            ],
-        );
-        report.decisions_opened.push(id);
-        id
-    };
-    state_db.hold_leased(intent.id, decision_id)?;
-    state_db.append_decision_evidence_path(
-        decision_id,
-        &intent.path,
-        MASS_DELETION_EVIDENCE_PATHS,
-    )?;
-    report.held += 1;
-    // The rest of the burst is still queued. It is held now, as one
-    // batch, so the answer covers what the question counted: an
-    // `apply` releases it whole and a `discard` restores it whole,
-    // instead of each straggler re-tripping the guard and asking again.
-    let queued = state_db.hold_pending_of_kind(direction.intent_kind(), decision_id)?;
-    for path in &queued {
-        state_db.append_decision_evidence_path(decision_id, path, MASS_DELETION_EVIDENCE_PATHS)?;
-    }
-    report.held += queued.len();
-    crate::logging::info(
-        "Held a deletion behind the mass-delete decision",
-        &[
-            ("decision_id", decision_id.to_string()),
-            ("path", intent.path.display().to_string()),
-            ("direction", direction.label().to_string()),
-            ("queued_held_with_it", queued.len().to_string()),
-        ],
-    );
-    Ok(true)
 }
 
 /// Plans an upload with the two-way conflict guard: two-way mode probes
@@ -4092,19 +4091,13 @@ fn continue_plan_download(
         // already read the swap and queued the removal of its files,
         // and this download waits for them to leave. Asking for the
         // walk again would make it queue this download again, a loop
-        // with no pause for as long as one file stays (a removal that
-        // waits for the answer to a mass-delete question does).
+        // with no pause for as long as one file stays.
         if state_db
             .sync_index_has_rows_under(&plan.local_path)
             .unwrap_or(false)
         {
-            let delay = if mass_delete_question_is_open(state_db) {
-                constants::engine::TYPE_CLASH_WAIT_HELD_SECONDS
-            } else {
-                constants::engine::TYPE_CLASH_WAIT_SECONDS
-            };
             return PlanOutcome::Defer {
-                delay: Duration::from_secs(delay),
+                delay: Duration::from_secs(constants::engine::TYPE_CLASH_WAIT_SECONDS),
                 reason: "waiting for the files of the folder that the cloud replaced to leave",
             };
         }
@@ -4414,6 +4407,7 @@ fn apply_local_move(
         now,
     );
     forget_deleted_path(state_db, &source.path);
+    record_remote_id(state_db, &plan.local_path, source.remote_id.as_deref());
     ask_about_emptied_folder(env, state_db, &source.path, now);
     crate::logging::info(
         "Renamed the local file instead of downloading a moved cloud object",
@@ -4490,30 +4484,6 @@ fn continue_apply_remote_delete(
             };
         }
     }
-    // Nothing local to remove is not a deletion the guard should count,
-    // and neither is a folder with nothing in it.
-    if fs::symlink_metadata(&intent.path).is_ok() && !is_empty_folder(&intent.path) {
-        let mut scratch = StagedExecutorReport::default();
-        match hold_if_mass_deletion(
-            state_db,
-            env,
-            intent,
-            DeletionDirection::CloudToLocal,
-            now,
-            &mut scratch,
-        ) {
-            Ok(true) => {
-                return PlanOutcome::Held(scratch);
-            }
-            Ok(false) => {}
-            Err(error) => {
-                return PlanOutcome::Fail {
-                    failure: RetryFailureKind::Transient,
-                    message: format!("cannot consult the deletion guard: {error}"),
-                };
-            }
-        }
-    }
     let cloud_holds_a_folder = matches!(probe.stat.as_ref(), Some(Ok(Some(_))));
     let outcome =
         match apply_remote_delete_locally(env, state_db, &intent.path, &probe.local_hashes, now) {
@@ -4554,27 +4524,71 @@ fn is_empty_folder(path: &Path) -> bool {
         && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
+/// Whether `path` is a file with one of the names that an OS writes
+/// into a folder by itself (`.DS_Store` and the like).
+fn is_os_folder_file(path: &Path, metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(constants::filtering::is_os_folder_file)
+}
+
+/// Whether the folder at `path` holds nothing that a user put there:
+/// it is empty, or every entry in it is a file that an OS writes into
+/// a folder by itself. A folder with any other entry (an ignored
+/// build tree, a file that is not synced yet, a link) holds something.
+fn holds_nothing_of_the_user(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && fs::read_dir(path).is_ok_and(|entries| {
+            entries.into_iter().all(|entry| {
+                entry.is_ok_and(|entry| {
+                    fs::symlink_metadata(entry.path())
+                        .is_ok_and(|metadata| is_os_folder_file(&entry.path(), &metadata))
+                })
+            })
+        })
+}
+
 /// A cloud-side move or removal just took `gone` out of its folder. If
-/// that left the folder empty, the folder may be gone from the cloud
-/// too (it was renamed there, or removed with what it held), and the
-/// file-only engine has no event of its own for that. The folder gets
-/// the question every cloud deletion gets: the planner asks the cloud,
-/// and removes the folder only when the cloud has none and nothing in
-/// it is unsynced. An empty folder the cloud still has stays, and so
-/// does one the user put a file into in the meantime.
+/// that left nothing of the user in the folder, the folder may be gone
+/// from the cloud too (it was renamed there, or removed with what it
+/// held), and the file-only engine has no event of its own for that.
+/// The folder gets the question every cloud deletion gets: the planner
+/// asks the cloud, and removes the folder only when the cloud has none
+/// and nothing in it is unsynced. A folder the cloud still has stays,
+/// and so does one the user put a file into in the meantime.
+///
+/// A folder that holds only files which an OS writes into a folder by
+/// itself is asked about like an empty one, and those files go to the
+/// trash with it. A folder with any other entry is not asked about:
+/// what is left in it is the user's, and it stays as it is.
 fn ask_about_emptied_folder(
     env: &ExecutionEnv<'_>,
     state_db: &mut DurableStateDb,
     gone: &Path,
     now: SystemTime,
 ) {
-    if env.sync_mode != vapor_shared::SyncMode::TwoWay {
+    ask_about_folder_that_lost(state_db, env.local_root, env.sync_mode, gone, now);
+}
+
+/// [`ask_about_emptied_folder`] for a caller with no execution
+/// environment: the rename of an entry that got another place in the
+/// cloud takes it out of its folder too.
+pub(crate) fn ask_about_folder_that_lost(
+    state_db: &mut DurableStateDb,
+    local_root: Option<&Path>,
+    sync_mode: vapor_shared::SyncMode,
+    gone: &Path,
+    now: SystemTime,
+) {
+    if sync_mode != vapor_shared::SyncMode::TwoWay {
         return;
     }
-    let (Some(folder), Some(root)) = (gone.parent(), env.local_root) else {
+    let (Some(folder), Some(root)) = (gone.parent(), local_root) else {
         return;
     };
-    if folder == root || !folder.starts_with(root) || !is_empty_folder(folder) {
+    if folder == root || !folder.starts_with(root) || !holds_nothing_of_the_user(folder) {
         return;
     }
     if let Err(error) = state_db.enqueue_intents_coalesced(
@@ -4863,6 +4877,60 @@ fn displaced_file_check(
     })
 }
 
+/// Tells the provider about a write of this device whose outcome the
+/// index never got. The cloud object at the path of `plan` holds
+/// `content_hash` and carries `cloud_op_id`, a tag that this device
+/// gave out for this profile, and the index row of the path records
+/// another tag and another hash: the upload landed in a daemon that
+/// stopped before it stored the outcome. A provider that owes work
+/// after a write owes it for that one
+/// (`Provider::note_unrecorded_write`).
+///
+/// The tag alone decides, so the call comes whatever the local file
+/// holds now. Bytes that another device put in the cloud carry the
+/// tag of that device, and bytes from a program that sets no tag carry
+/// none: no call (the same checkout on two devices is such a case). A
+/// row whose object was left as it was holds the tag of that object,
+/// so a later write of a program that keeps the tag gives no call
+/// either.
+///
+/// With no row, or a row with no hash, there is no base that a write
+/// could have replaced: no call. Until the row records the object, a
+/// plan that runs again makes the call again; the provider starts no
+/// second piece of work for one write.
+fn note_own_write_the_index_does_not_know(
+    app: &DaemonApp,
+    state_db: &DurableStateDb,
+    env: &ExecutionEnv<'_>,
+    plan: &TransferPlan,
+    content_hash: &str,
+    cloud_op_id: Option<&str>,
+) {
+    let Some(cloud_op_id) = cloud_op_id
+        .filter(|op_id| op_id.starts_with(&own_op_id_prefix(env.device_id, env.profile_id)))
+    else {
+        return;
+    };
+    let Ok(Some(index)) = state_db.sync_index(&plan.local_path) else {
+        return;
+    };
+    if index.last_op_id == cloud_op_id {
+        return;
+    }
+    let Some(base_hash) = known_hash(&index.content_hash) else {
+        return;
+    };
+    if base_hash == content_hash {
+        return;
+    }
+    crate::logging::debug(
+        "The cloud holds a write of this device that the sync index did not record; telling the provider",
+        &[("path", plan.local_path.display().to_string())],
+    );
+    app.provider()
+        .note_unrecorded_write(&plan.remote_path, base_hash, content_hash, cloud_op_id);
+}
+
 /// Records the post-upload sync-index entry; failures are logged, not
 /// fatal (the next transfer overwrites the entry, and a stale index
 /// resolves through the conflict-verification path).
@@ -4872,6 +4940,7 @@ fn record_upload_index(
     content_hash: &str,
     size_bytes: u64,
     remote_modified_at: Option<SystemTime>,
+    last_op_id: &str,
     now: SystemTime,
 ) {
     // The recorded content_hash is the bytes we hashed. If the local file
@@ -4901,10 +4970,31 @@ fn record_upload_index(
         size_bytes,
         local_modified_at,
         remote_modified_at,
-        // An upload records our own op-id (the tag we just wrote remotely).
-        &plan.op_id,
+        last_op_id,
         now,
     );
+}
+
+/// The op-id for the index row of a file whose cloud object this
+/// intent did not write: the content was there already. `seen` is the
+/// tag that a lookup of this intent found on the object (`Some(None)`
+/// for an object with no tag). With no lookup the row keeps the tag it
+/// has. The op-id of the intent itself is on no object, and a row that
+/// held it would never match the object again.
+fn op_id_of_an_object_left_as_it_is(
+    state_db: &DurableStateDb,
+    plan: &TransferPlan,
+    seen: Option<Option<&str>>,
+) -> String {
+    match seen {
+        Some(tag) => tag.unwrap_or("").to_string(),
+        None => state_db
+            .sync_index(&plan.local_path)
+            .ok()
+            .flatten()
+            .map(|row| row.last_op_id)
+            .unwrap_or_default(),
+    }
 }
 
 fn record_download_index(
@@ -4959,6 +5049,21 @@ fn write_sync_index_entry(
     ) {
         crate::logging::warning(
             "Could not record post-transfer sync index entry",
+            &[("error", error.to_string())],
+        );
+    }
+}
+
+/// Records the id that the provider has for the cloud object of the
+/// synced file `local_path`, when it has one. A failure is logged and
+/// not fatal: the next scan that lists the file writes the id.
+fn record_remote_id(state_db: &mut DurableStateDb, local_path: &Path, remote_id: Option<&str>) {
+    let Some(remote_id) = remote_id else {
+        return;
+    };
+    if let Err(error) = state_db.set_sync_index_remote_id(local_path, remote_id) {
+        crate::logging::warning(
+            "Could not record the id of a cloud object in the sync index",
             &[("error", error.to_string())],
         );
     }
@@ -5113,7 +5218,7 @@ fn local_size(path: &Path) -> u64 {
 /// let a remote `link/x` write into (or delete under) `/elsewhere`.
 /// Canonicalizes the deepest existing ancestor of the target's parent and
 /// confirms it is still inside the root.
-fn verify_within_local_root(local_root: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn verify_within_local_root(local_root: &Path, target: &Path) -> Result<(), String> {
     // Canonicalize the root itself so the containment comparison holds even
     // when the caller passed a not-yet-canonical root (tests, or a root
     // reached through a symlinked parent of its own).
@@ -5357,6 +5462,11 @@ fn remove_dir_preserving_unsynced(
     let entries = fs::read_dir(dir)
         .map_err(|error| format!("cannot read directory for remote-delete apply: {error}"))?;
     let mut all_removed = true;
+    // The files that an OS wrote into this folder by itself. They are
+    // not synced, so no index row vouches for them, and they are no
+    // content of the user either: they go with the folder, to the
+    // trash, when nothing else stays in it.
+    let mut os_files = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| format!("cannot read directory entry: {error}"))?;
         let child = entry.path();
@@ -5365,6 +5475,10 @@ fn remove_dir_preserving_unsynced(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(format!("cannot stat {}: {error}", child.display())),
         };
+        if is_os_folder_file(&child, &metadata) && matches!(state_db.sync_index(&child), Ok(None)) {
+            os_files.push(child);
+            continue;
+        }
         if metadata.is_dir() {
             if remove_dir_preserving_unsynced(env, state_db, &child, local_hashes, now)? {
                 match fs::remove_dir(&child) {
@@ -5407,6 +5521,14 @@ fn remove_dir_preserving_unsynced(
                         return Err(format!("cannot delete {}: {error}", child.display()));
                     }
                 }
+            } else if env
+                .path_filter
+                .is_some_and(|filter| filter.should_ignore_kind(&child, false))
+            {
+                // A file that an ignore rule hides is kept, and it is
+                // not sent: an ignored name never syncs. An upload of
+                // it would put the folder back in the cloud.
+                all_removed = false;
             } else {
                 all_removed = false;
                 if let Err(error) = state_db.enqueue_intents_coalesced(
@@ -5426,6 +5548,20 @@ fn remove_dir_preserving_unsynced(
             // Symlinks and special files are outside the sync contract;
             // never follow or delete them.
             all_removed = false;
+        }
+    }
+    if !all_removed {
+        // Something else stays, so the folder stays as it is.
+        return Ok(false);
+    }
+    for os_file in os_files {
+        match discard_local(env, &os_file, now) {
+            Ok(()) => env.local_echoes.record_delete(path_key(&os_file), now),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // The trash is on another volume and takes a copy, which a
+            // worker makes: the file stays for now, and the folder
+            // with it.
+            Err(_) => all_removed = false,
         }
     }
     Ok(all_removed)
@@ -5664,12 +5800,17 @@ fn allocate_op_id(env: &ExecutionEnv<'_>, intent: &DurableIntentRecord, now: Sys
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     format!(
-        "{}-{}-op{}-a{}-t{now_ms}",
-        env.device_id,
-        profile_tag(env.profile_id),
+        "{}{}-a{}-t{now_ms}",
+        own_op_id_prefix(env.device_id, env.profile_id),
         intent.id,
         intent.attempt_count
     )
+}
+
+/// What every op-id that this device gives out for this profile starts
+/// with, and no op-id of another device or another profile does.
+pub(crate) fn own_op_id_prefix(device_id: &str, profile_id: &str) -> String {
+    format!("{device_id}-{}-op", profile_tag(profile_id))
 }
 
 /// A profile id as it goes into an op-id: short and of a fixed length,
@@ -5934,10 +6075,10 @@ mod tests {
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
-                    deletion_guard: None,
                     trash: self.trash.as_ref(),
                     local_changes_pending: self.local_changes_pending,
                     remote_changes_pending: false,
+                    path_filter: None,
                 };
                 // Wall time sits past the move-settle window, so a
                 // delete under test is never mistaken for a rename in
@@ -6009,10 +6150,10 @@ mod tests {
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
-                    deletion_guard: None,
                     trash: None,
                     local_changes_pending: false,
                     remote_changes_pending: false,
+                    path_filter: None,
                 };
                 let report = self
                     .executor
@@ -8469,10 +8610,10 @@ mod tests {
             tags: &fixture.tags,
             local_echoes: &mut fixture.local_echoes,
             remote_echoes: &mut fixture.remote_echoes,
-            deletion_guard: None,
             trash: None,
             local_changes_pending: false,
             remote_changes_pending: false,
+            path_filter: None,
         };
         let made_copy = apply_downloaded_payload_keep_both(
             &mut env,
@@ -8494,5 +8635,393 @@ mod tests {
         let copies = fixture.conflict_copies_of("doc");
         assert_eq!(copies.len(), 1);
         assert_eq!(std::fs::read(&copies[0]).expect("copy"), b"user edit!");
+    }
+
+    /// What a test sees of a [`NotingProvider`]: each write with no
+    /// recorded outcome that the engine told it about, as the path,
+    /// the base, the content, and the tag; and how many uploads it was
+    /// asked to start.
+    #[derive(Clone, Default)]
+    struct Noted {
+        writes: Arc<std::sync::Mutex<Vec<[String; 4]>>>,
+        uploads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Noted {
+        fn writes(&self) -> Vec<[String; 4]> {
+            self.writes.lock().expect("noted").clone()
+        }
+
+        fn uploads(&self) -> usize {
+            self.uploads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// The filesystem provider, keeping what the engine tells it.
+    struct NotingProvider {
+        inner: FilesystemProvider,
+        noted: Noted,
+    }
+
+    impl vapor_providers::Provider for NotingProvider {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            self.inner.capabilities()
+        }
+        fn ensure_cloud_root(&self, dir: &str) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.ensure_cloud_root(dir)
+        }
+        fn enumerate(
+            &self,
+            directory: &RemotePath,
+        ) -> Result<Vec<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.inner.enumerate(directory)
+        }
+        fn stat(
+            &self,
+            path: &RemotePath,
+        ) -> Result<Option<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.inner.stat(path)
+        }
+        fn content_hash(
+            &self,
+            path: &RemotePath,
+        ) -> Result<String, vapor_providers::ProviderError> {
+            self.inner.content_hash(path)
+        }
+        fn begin_upload(
+            &self,
+            request: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.noted
+                .uploads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.begin_upload(request)
+        }
+        fn begin_download(
+            &self,
+            request: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.inner.begin_download(request)
+        }
+        fn delete(
+            &self,
+            path: &RemotePath,
+            op_id: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.delete(path, op_id)
+        }
+        fn poll_changes(
+            &self,
+            cursor: Option<&str>,
+            max: usize,
+        ) -> Result<vapor_providers::ChangesPoll, vapor_providers::ProviderError> {
+            self.inner.poll_changes(cursor, max)
+        }
+        fn note_unrecorded_write(
+            &self,
+            path: &RemotePath,
+            base_hash: &str,
+            content_hash: &str,
+            op_id: &str,
+        ) {
+            self.noted.writes.lock().expect("noted").push([
+                path.as_str().to_string(),
+                base_hash.to_string(),
+                content_hash.to_string(),
+                op_id.to_string(),
+            ]);
+        }
+    }
+
+    /// A tag as this device gives it out for the profile of the
+    /// fixture: the one of an upload whose outcome was never stored.
+    fn lost_op_id() -> String {
+        format!("{}7-a0-t1", own_op_id_prefix("testdev", "default"))
+    }
+
+    /// A fixture whose two sides hold `doc.txt` with the same content,
+    /// and whose cloud object carries `tag`. With [`lost_op_id`] that
+    /// is the state after an upload that landed in a daemon that
+    /// stopped before it stored the outcome.
+    fn fixture_with_the_same_content_on_both_sides(tag: Option<&str>) -> (Fixture, Noted, PathBuf) {
+        let noted = Noted::default();
+        let handle = noted.clone();
+        let fixture = Fixture::with_provider(move |cloud_root| {
+            Box::new(NotingProvider {
+                inner: FilesystemProvider::with_root(cloud_root).expect("provider"),
+                noted,
+            })
+        });
+        let local = fixture.local_root.join("doc.txt");
+        std::fs::write(&local, b"our edit").expect("local");
+        let object = fixture.cloud_root.join("doc.txt");
+        std::fs::write(&object, b"our edit").expect("remote");
+        if let Some(tag) = tag {
+            fixture.tags.write_op_id(&object, tag).expect("tag");
+        }
+        (fixture, handle, local)
+    }
+
+    /// Runs one intent of `kind` for `path` to its end.
+    fn run_intent(fixture: &mut Fixture, path: &Path, kind: PendingIntentKind) {
+        let intent = fixture.enqueue_and_lease(path, kind);
+        assert_eq!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0)),
+            StartDecision::Started
+        );
+        let report = fixture.run_to_quiescence(16);
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.failed, 0);
+    }
+
+    fn indexed_hash(fixture: &Fixture, path: &Path) -> String {
+        fixture
+            .state_db
+            .sync_index(path)
+            .expect("index")
+            .expect("an index row")
+            .content_hash
+    }
+
+    fn indexed_op_id(fixture: &Fixture, path: &Path) -> String {
+        fixture
+            .state_db
+            .sync_index(path)
+            .expect("index")
+            .expect("an index row")
+            .last_op_id
+    }
+
+    /// The one call that a test of a lost write expects.
+    fn the_lost_write() -> Vec<[String; 4]> {
+        vec![[
+            "doc.txt".to_string(),
+            hash_hex_of_bytes(b"base"),
+            hash_hex_of_bytes(b"our edit"),
+            lost_op_id(),
+        ]]
+    }
+
+    #[test]
+    fn an_upload_that_finds_its_own_unrecorded_write_in_the_cloud_tells_the_provider() {
+        let (mut fixture, noted, local) =
+            fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+        // The index still holds what was synced before the edit.
+        seed_synced_index(&mut fixture, &local, b"base");
+
+        run_intent(&mut fixture, &local, PendingIntentKind::Upload);
+
+        assert_eq!(
+            noted.writes(),
+            the_lost_write(),
+            "the provider gets the path, the base of the index, the content, and the tag"
+        );
+        assert_eq!(noted.uploads(), 0, "no bytes are sent");
+        assert_eq!(
+            indexed_hash(&fixture, &local),
+            hash_hex_of_bytes(b"our edit"),
+            "the file is recorded as in sync"
+        );
+        assert!(fixture.conflict_copies_of("doc").is_empty());
+        assert_eq!(
+            indexed_op_id(&fixture, &local),
+            lost_op_id(),
+            "the row takes the tag that the object carries"
+        );
+
+        // The index knows the write now: one more upload intent for
+        // the same file tells the provider nothing.
+        run_intent(&mut fixture, &local, PendingIntentKind::Upload);
+        assert_eq!(noted.writes().len(), 1);
+        assert_eq!(noted.uploads(), 0);
+    }
+
+    #[test]
+    fn a_row_keeps_the_tag_of_its_object_when_no_bytes_are_sent() {
+        // The outcome of the upload with this tag was recorded.
+        let (mut fixture, noted, local) =
+            fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+        fixture
+            .state_db
+            .set_sync_index(
+                &local,
+                &hash_hex_of_bytes(b"our edit"),
+                8,
+                None,
+                None,
+                &lost_op_id(),
+                timestamp_ms(0),
+            )
+            .expect("seed index");
+
+        // The file is saved again with the same bytes: nothing is
+        // sent, and the row must not take the op-id of an upload that
+        // never ran.
+        run_intent(&mut fixture, &local, PendingIntentKind::Upload);
+        assert_eq!(noted.uploads(), 0);
+        assert_eq!(indexed_op_id(&fixture, &local), lost_op_id());
+
+        // A program that keeps the tag writes other content, and this
+        // device takes it. With a row that held another op-id, this
+        // would read as a write of this device with no recorded
+        // outcome.
+        std::fs::write(fixture.cloud_root.join("doc.txt"), b"their edit").expect("remote");
+        run_intent(&mut fixture, &local, PendingIntentKind::Download);
+        assert!(noted.writes().is_empty(), "{:?}", noted.writes());
+        assert_eq!(std::fs::read(&local).expect("applied"), b"their edit");
+    }
+
+    #[test]
+    fn its_own_unrecorded_write_is_told_when_the_local_file_changed_again() {
+        // The user saved the file once more while no daemon ran. The
+        // two sides differ, so both are kept, and the write that
+        // landed still gets its check: what it replaced unseen is on
+        // no device.
+        for kind in [PendingIntentKind::Upload, PendingIntentKind::Download] {
+            let (mut fixture, noted, local) =
+                fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+            seed_synced_index(&mut fixture, &local, b"base");
+            std::fs::write(&local, b"a later edit").expect("local");
+
+            run_intent(&mut fixture, &local, kind);
+
+            let told = noted.writes();
+            assert!(!told.is_empty(), "{kind:?}: the provider is told");
+            assert!(
+                told.iter().all(|write| the_lost_write().contains(write)),
+                "{kind:?}: {told:?}"
+            );
+            // The later edit stays on the device, in the file or in a
+            // copy next to it, and the write that landed is not
+            // replaced in the cloud.
+            let mut on_the_device: Vec<Vec<u8>> = fixture
+                .conflict_copies_of("doc")
+                .iter()
+                .filter_map(|copy| std::fs::read(copy).ok())
+                .collect();
+            on_the_device.extend(std::fs::read(&local).ok());
+            assert!(
+                on_the_device.contains(&b"a later edit".to_vec()),
+                "{kind:?}: the later edit is on the device"
+            );
+            assert_eq!(
+                std::fs::read(fixture.cloud_root.join("doc.txt")).expect("the object"),
+                b"our edit",
+                "{kind:?}: the cloud keeps the write that landed"
+            );
+        }
+    }
+
+    #[test]
+    fn content_from_another_writer_tells_the_provider_nothing() {
+        // The same bytes came to both sides by another route: a
+        // checkout of one branch on two devices. The object carries
+        // the tag of the device that uploaded it, the tag of another
+        // profile of this device, or none. Nothing of this profile
+        // replaced anything, so no check is owed, for an upload and
+        // for a download alike.
+        let of_another_device = "otherdev-p00000000-op7-a0-t1".to_string();
+        let of_another_profile = format!("{}7-a0-t1", own_op_id_prefix("testdev", "second"));
+        for tag in [Some(of_another_device), Some(of_another_profile), None] {
+            for kind in [PendingIntentKind::Upload, PendingIntentKind::Download] {
+                let (mut fixture, noted, local) =
+                    fixture_with_the_same_content_on_both_sides(tag.as_deref());
+                seed_synced_index(&mut fixture, &local, b"base");
+                run_intent(&mut fixture, &local, kind);
+                assert!(noted.writes().is_empty(), "{tag:?}: {:?}", noted.writes());
+                assert_eq!(noted.uploads(), 0);
+                assert_eq!(
+                    indexed_hash(&fixture, &local),
+                    hash_hex_of_bytes(b"our edit"),
+                    "{tag:?}: the file is recorded as in sync"
+                );
+                assert!(fixture.conflict_copies_of("doc").is_empty());
+            }
+
+            // An edit of the other writer that this device takes.
+            let (mut fixture, noted, local) =
+                fixture_with_the_same_content_on_both_sides(tag.as_deref());
+            seed_synced_index(&mut fixture, &local, b"our edit");
+            std::fs::write(fixture.cloud_root.join("doc.txt"), b"their edit").expect("remote");
+            run_intent(&mut fixture, &local, PendingIntentKind::Download);
+            assert!(noted.writes().is_empty(), "{tag:?}: {:?}", noted.writes());
+            assert_eq!(std::fs::read(&local).expect("applied"), b"their edit");
+        }
+    }
+
+    #[test]
+    fn its_own_write_in_the_cloud_with_no_base_tells_the_provider_nothing() {
+        for kind in [PendingIntentKind::Upload, PendingIntentKind::Download] {
+            // No index row: there is no base, and nothing can have
+            // been replaced.
+            let (mut fixture, noted, local) =
+                fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+            run_intent(&mut fixture, &local, kind);
+            assert!(noted.writes().is_empty(), "{kind:?}");
+            assert_eq!(noted.uploads(), 0);
+            assert_eq!(
+                indexed_hash(&fixture, &local),
+                hash_hex_of_bytes(b"our edit")
+            );
+            assert!(fixture.conflict_copies_of("doc").is_empty());
+
+            // A row that holds no hash is no base either.
+            let (mut fixture, noted, local) =
+                fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+            fixture
+                .state_db
+                .set_sync_index(&local, "", 4, None, None, "op-mine", timestamp_ms(0))
+                .expect("seed index");
+            run_intent(&mut fixture, &local, kind);
+            assert!(noted.writes().is_empty(), "{kind:?}");
+            assert_eq!(noted.uploads(), 0);
+
+            // A row that already holds the content: the index knows it.
+            let (mut fixture, noted, local) =
+                fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+            seed_synced_index(&mut fixture, &local, b"our edit");
+            run_intent(&mut fixture, &local, kind);
+            assert!(noted.writes().is_empty(), "{kind:?}");
+            assert_eq!(noted.uploads(), 0);
+
+            // A row that holds the tag of the object: the outcome of
+            // the write with that tag was recorded. The content came
+            // later, from a program that keeps the tag when it writes.
+            let (mut fixture, noted, local) =
+                fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+            let base = hash_hex_of_bytes(b"base");
+            fixture
+                .state_db
+                .set_sync_index(&local, &base, 4, None, None, &lost_op_id(), timestamp_ms(0))
+                .expect("seed index");
+            run_intent(&mut fixture, &local, kind);
+            assert!(noted.writes().is_empty(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_download_of_its_own_unrecorded_write_tells_the_provider() {
+        // The change of the cloud reaches the device before the upload
+        // runs again: the download finds its payload at the path.
+        let (mut fixture, noted, local) =
+            fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+        seed_synced_index(&mut fixture, &local, b"base");
+
+        run_intent(&mut fixture, &local, PendingIntentKind::Download);
+
+        assert_eq!(noted.writes(), the_lost_write());
+        assert_eq!(std::fs::read(&local).expect("applied"), b"our edit");
+        assert!(fixture.conflict_copies_of("doc").is_empty());
+        assert_eq!(
+            indexed_hash(&fixture, &local),
+            hash_hex_of_bytes(b"our edit")
+        );
     }
 }

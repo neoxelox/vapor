@@ -104,6 +104,9 @@ fn enumerate_maps_files_with_op_ids_and_hashes() {
         .find(|e| e.path.as_str() == "sub")
         .expect("folder");
     assert_eq!(folder.kind, RemoteEntryKind::Directory);
+    // Each entry carries the id that stays with its object.
+    assert_eq!(file.id.as_deref(), Some("f1"));
+    assert_eq!(folder.id.as_deref(), Some("d1"));
 }
 
 #[test]
@@ -131,6 +134,11 @@ fn small_upload_goes_multipart_and_reports_the_drive_md5() {
         other => panic!("small upload completes in one step, got {other:?}"),
     };
     assert_eq!(outcome.content_hash, "served-md5");
+    assert_eq!(
+        outcome.remote_id.as_deref(),
+        Some("new-file"),
+        "the engine stores the id of the object it wrote"
+    );
 
     let requests = transport.recorded_requests();
     let upload = requests.last().expect("upload request");
@@ -828,7 +836,7 @@ fn a_second_file_under_one_name_never_reads_as_the_file_the_path_names() {
     assert_eq!(
         changes
             .iter()
-            .map(|change| (change.path.as_str(), change.kind))
+            .map(|change| (change.path.as_str(), change.kind.clone()))
             .collect::<Vec<_>>(),
         vec![("other.txt", RemoteChangeKind::CreatedOrModified)],
         "the rename gives the new name, and no removal of the name the kept file has"
@@ -976,14 +984,24 @@ fn provider_that_knows_two_folders(transport: &Arc<ScriptedHttpTransport>) -> Go
     provider
 }
 
+/// The kind of a change that says a folder is the one that was at
+/// `from`.
+fn folder_moved_from(from: &str) -> RemoteChangeKind {
+    RemoteChangeKind::Moved {
+        from: RemotePath::new(from).expect("path"),
+        entry_kind: RemoteEntryKind::Directory,
+    }
+}
+
 #[test]
-fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
+fn a_folder_that_gets_another_name_or_place_is_reported_as_one_move_or_for_a_walk() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = provider_that_knows_two_folders(&transport);
-    let moved = RemoteChangeKind::FolderMoved;
+    let moved = || RemoteChangeKind::FolderMoved;
 
     // Drive has one entry for a folder that got another name, and none
-    // for the files in it.
+    // for the files in it. The provider knows where the folder was, so
+    // the one change names both places.
     assert_eq!(
         poll_the_feed(
             &provider,
@@ -991,10 +1009,7 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
             &folder_entry("d1", "reports", "root-folder"),
             &[(200, &folder_listed("d1", "reports", "root-folder"))]
         ),
-        vec![
-            ("Reports".to_string(), moved),
-            ("reports".to_string(), moved)
-        ]
+        vec![("reports".to_string(), folder_moved_from("Reports"))]
     );
 
     // An entry for the folder where it is says nothing new, and costs
@@ -1046,7 +1061,7 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
             &folder_entry_made("d8", "Moved in", "root-folder", last_year),
             &[]
         ),
-        vec![("Moved in".to_string(), moved)]
+        vec![("Moved in".to_string(), moved())]
     );
     // And so is one with no date: a walk costs a request, a folder
     // that is missed costs a day.
@@ -1057,10 +1072,11 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
             &folder_entry("d7", "Undated", "root-folder"),
             &[]
         ),
-        vec![("Undated".to_string(), moved)]
+        vec![("Undated".to_string(), moved())]
     );
 
-    // The folder moves into another folder of the sync root.
+    // The folder moves into another folder of the sync root: one move
+    // again.
     assert_eq!(
         poll_the_feed(
             &provider,
@@ -1068,14 +1084,11 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
             &folder_entry("d1", "reports", "d2"),
             &[(200, &folder_listed("d1", "reports", "d2"))]
         ),
-        vec![
-            ("reports".to_string(), moved),
-            ("Archive/reports".to_string(), moved)
-        ]
+        vec![("Archive/reports".to_string(), folder_moved_from("reports"))]
     );
 
-    // It moves out of the synced folder: the place it had is all there
-    // is to walk.
+    // It moves out of the synced folder: no place in it names the
+    // folder now, and the place it had is all there is to walk.
     assert_eq!(
         poll_the_feed(
             &provider,
@@ -1086,7 +1099,7 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
                 r#"{"id":"elsewhere","name":"Other","mimeType":"application/vnd.google-apps.folder"}"#
             )]
         ),
-        vec![("Archive/reports".to_string(), moved)]
+        vec![("Archive/reports".to_string(), moved())]
     );
 
     // It comes back a moment later. The provider remembers that it was
@@ -1099,8 +1112,526 @@ fn a_folder_that_gets_another_name_or_place_is_reported_for_a_walk() {
             &folder_entry("d1", "reports", "root-folder"),
             &[]
         ),
-        vec![("reports".to_string(), moved)]
+        vec![("reports".to_string(), moved())]
     );
+}
+
+fn identity(path: &str, kind: RemoteEntryKind, id: &str) -> RemoteIdentity {
+    RemoteIdentity {
+        path: RemotePath::new(path).expect("path"),
+        kind,
+        id: id.to_string(),
+    }
+}
+
+/// A provider of a new run of the daemon: it listed nothing, and the
+/// engine handed it the ids of what was synced. `Reports` (`d1`) holds
+/// `q1.pdf` (`f1`), `Archive` (`d2`) is empty, and `notes.txt` (`f9`)
+/// is at the top.
+fn provider_that_got_its_ids_back(transport: &Arc<ScriptedHttpTransport>) -> GoogleDriveProvider {
+    let provider = ensured_provider(transport.clone());
+    provider.restore_remote_ids(vec![
+        identity("Reports", RemoteEntryKind::Directory, "d1"),
+        identity("Reports/q1.pdf", RemoteEntryKind::File, "f1"),
+        identity("Archive", RemoteEntryKind::Directory, "d2"),
+        identity("notes.txt", RemoteEntryKind::File, "f9"),
+    ]);
+    provider
+}
+
+fn file_entry(id: &str, name: &str, parent: &str, md5: &str) -> String {
+    format!(
+        r#"{{"fileId":"{id}","file":{{"id":"{id}","name":"{name}","mimeType":"text/plain","size":"3","md5Checksum":"{md5}","parents":["{parent}"],"modifiedTime":"2026-07-06T12:30:00.000Z"}}}}"#
+    )
+}
+
+fn file_listed(id: &str, name: &str, parent: &str) -> String {
+    format!(
+        r#"{{"files":[{{"id":"{id}","name":"{name}","mimeType":"text/plain","size":"3","parents":["{parent}"]}}]}}"#
+    )
+}
+
+#[test]
+fn after_a_restart_a_renamed_folder_is_reported_with_its_old_and_its_new_path() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // The folder got another name while no daemon ran. The provider
+    // of this run never listed it: the id that came back says where
+    // it was.
+    let before = transport.recorded_requests().len();
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "Quarterly", "root-folder"),
+            &[(200, &folder_listed("d1", "Quarterly", "root-folder"))]
+        ),
+        vec![("Quarterly".to_string(), folder_moved_from("Reports"))]
+    );
+    let asked: Vec<String> = transport.recorded_requests()[before..]
+        .iter()
+        .map(|request| request.url.clone())
+        .collect();
+    assert_eq!(
+        asked.len(),
+        2,
+        "the feed, and which folder the new name is: {asked:?}"
+    );
+    assert!(
+        asked[1].contains("name"),
+        "no folder is listed for it: {asked:?}"
+    );
+
+    // What the folder holds went along, with the ids that came back:
+    // a change of the file in it is at the new path, with no request.
+    let before = transport.recorded_requests().len();
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f1", "q1.pdf", "d1", "h1"),
+            &[]
+        ),
+        vec![(
+            "Quarterly/q1.pdf".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
+    );
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+
+    // A move into another folder that came back the same way.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d1", "Quarterly", "d2"),
+            &[(200, &folder_listed("d1", "Quarterly", "d2"))]
+        ),
+        vec![(
+            "Archive/Quarterly".to_string(),
+            folder_moved_from("Quarterly")
+        )]
+    );
+}
+
+#[test]
+fn after_a_restart_a_deletion_in_the_feed_is_applied_by_the_path_that_came_back() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // The feed names a removed object by its id alone.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f9","removed":true},{"fileId":"d1","removed":true}"#,
+            &[]
+        ),
+        vec![
+            ("notes.txt".to_string(), RemoteChangeKind::Removed),
+            ("Reports".to_string(), RemoteChangeKind::Removed)
+        ]
+    );
+    // It is said one time.
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f9","removed":true}"#,
+            &[]
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_provider_whose_root_is_another_folder_now_forgets_the_ids_of_the_folder_before() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // Another folder is at the path of the cloud root: the folder
+    // before it was moved away, or removed and made again.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"another-root","name":"Vapor","mimeType":"application/vnd.google-apps.folder"}]}"#,
+    );
+    provider.ensure_cloud_root("/Vapor").expect("ensure");
+
+    // The objects of the folder before keep their ids in Drive. A
+    // removal of one of them is no removal under this root: the path
+    // that the id had names another object here, or none.
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f9","removed":true},{"fileId":"d1","removed":true}"#,
+            &[]
+        )
+        .is_empty(),
+        "an id of the folder before names nothing of this root"
+    );
+}
+
+#[test]
+fn a_path_that_its_file_left_is_free_for_a_new_file_of_that_name() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // While no daemon ran, the folder `Reports` got the name
+    // `Quarterly`. A listing of this run finds its file under the new
+    // name, before the feed says anything about the folder.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"d1","name":"Quarterly","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}]}"#,
+    );
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"f1","name":"q1.pdf","mimeType":"application/pdf","size":"3","md5Checksum":"h1","parents":["d1"]}]}"#,
+    );
+    let listed = provider
+        .enumerate(&RemotePath::new("Quarterly").expect("path"))
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path.as_str(), "Quarterly/q1.pdf");
+
+    // Another device makes a new folder `Reports` with a new file
+    // `q1.pdf`. The path `Reports/q1.pdf` was the path of f1, which is
+    // elsewhere now: the new file is the file of that path, and no
+    // second file of one name.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("m1", "q1.pdf", "z1", "h2"),
+            &[
+                (
+                    200,
+                    r#"{"id":"z1","name":"Reports","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}"#
+                ),
+                (200, &file_listed("m1", "q1.pdf", "z1")),
+            ]
+        ),
+        vec![(
+            "Reports/q1.pdf".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )],
+        "the new file is reported"
+    );
+}
+
+#[test]
+fn a_folder_whose_old_path_another_folder_has_now_is_no_move_from_that_path() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // While no daemon ran, the folder `Reports` (d1) went into
+    // `Archive` under another name, and a new folder took the name
+    // `Reports`. The scan of the start lists the root before the feed
+    // is read, and finds the new folder at the path.
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"z1","name":"Reports","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]},
+            {"id":"d2","name":"Archive","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}
+        ]}"#,
+    );
+    let listed = provider.enumerate(&RemotePath::root()).expect("list");
+    assert_eq!(
+        listed
+            .iter()
+            .find(|entry| entry.path.as_str() == "Reports")
+            .and_then(|entry| entry.id.as_deref()),
+        Some("z1")
+    );
+
+    // The feed entry of the folder that left. `Reports` names the new
+    // folder now: a move from that path would tell the engine to
+    // rename the wrong folder on the device.
+    let reported = poll_the_feed(
+        &provider,
+        &transport,
+        &folder_entry("d1", "Quarterly", "d2"),
+        &[],
+    );
+    assert_eq!(
+        reported,
+        vec![(
+            "Archive/Quarterly".to_string(),
+            RemoteChangeKind::FolderMoved
+        )],
+        "no move from the path of another folder: the engine compares the folder that holds it now"
+    );
+
+    // The path still stands for the new folder: a change of a file in
+    // it is at that path, with no request.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f30", "plan.txt", "z1", "h30"),
+            &[]
+        ),
+        vec![(
+            "Reports/plan.txt".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
+    );
+}
+
+#[test]
+fn a_folder_that_this_device_moves_keeps_the_paths_of_what_it_holds() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+    let folder = |id: &str, name: &str, parent: &str| {
+        format!(
+            r#"{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["{parent}"]}}"#
+        )
+    };
+
+    // The engine carries a name of this device to the cloud: the
+    // folder `Reports` goes into `Archive` under another name.
+    let before = transport.recorded_requests().len();
+    let archive_listed = format!(
+        r#"{{"files":[{}]}}"#,
+        folder("d2", "Archive", "root-folder")
+    );
+    // The source by its id, the folder of the new path, the new name
+    // (free), the folder once more for the write, and the move.
+    transport.push_response(200, folder("d1", "Reports", "root-folder"));
+    transport.push_response(200, archive_listed.clone());
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, archive_listed);
+    transport.push_response(200, r#"{"id":"d1"}"#);
+    let moved = provider.move_object(
+        &RemotePath::new("Reports").expect("path"),
+        &RemotePath::new("Archive/Reports 2026").expect("path"),
+        "dev-op-move",
+    );
+    assert!(
+        moved.is_ok(),
+        "{moved:?} after {:?}",
+        transport.recorded_requests()[before..]
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.url))
+            .collect::<Vec<_>>()
+    );
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    let urls: Vec<&String> = work.iter().map(|request| &request.url).collect();
+    let moved = work.last().expect("the move");
+    assert_eq!(moved.method, "PATCH", "{urls:?}");
+    assert!(moved.url.contains("/files/d1?"), "{urls:?}");
+    assert!(
+        moved.url.contains("addParents=d2") && moved.url.contains("removeParents=root-folder"),
+        "the folder leaves the root and goes into `Archive`: {urls:?}"
+    );
+    let body = String::from_utf8_lossy(&moved.body);
+    assert!(
+        body.contains(r#""name":"Reports 2026""#) && body.contains("dev-op-move"),
+        "one request gives the new name and the tag: {body}"
+    );
+
+    // What the folder holds went along. The provider knows the file in
+    // it by its new path with no listing: a removal in the feed names
+    // that path.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f1","removed":true}"#,
+            &[]
+        ),
+        vec![(
+            "Archive/Reports 2026/q1.pdf".to_string(),
+            RemoteChangeKind::Removed
+        )]
+    );
+}
+
+#[test]
+fn a_file_that_gets_a_name_with_a_slash_leaves_its_path_and_is_no_move() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // The user gives `notes.txt` the name `10/2026 notes.txt` in
+    // Drive. No sync path can hold that name: read as a path, it is a
+    // file in a folder `10`, which the cloud does not have.
+    let before = transport.recorded_requests().len();
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f9", "10/2026 notes.txt", "root-folder", "h9"),
+            &[]
+        ),
+        vec![("notes.txt".to_string(), RemoteChangeKind::Removed)],
+        "the old path is left, and no path stands for the new name"
+    );
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+
+    // A new file with such a name has no path either: the feed says
+    // nothing, and a listing tells the user.
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f20", "2024/budget.txt", "root-folder", "h20"),
+            &[]
+        )
+        .is_empty()
+    );
+
+    // The name is judged again when it changes: a name that a path can
+    // hold brings the file back.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f9", "notes 2026.txt", "root-folder", "h9"),
+            &[(200, &file_listed("f9", "notes 2026.txt", "root-folder"))]
+        ),
+        vec![(
+            "notes 2026.txt".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
+    );
+}
+
+#[test]
+fn a_renamed_file_is_reported_as_one_move_with_the_state_of_the_file() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+    let file_moved_from = |from: &str| RemoteChangeKind::Moved {
+        from: RemotePath::new(from).expect("path"),
+        entry_kind: RemoteEntryKind::File,
+    };
+
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"newStartPageToken":"next","changes":[{}]}}"#,
+            file_entry("f9", "minutes.txt", "root-folder", "h9")
+        ),
+    );
+    transport.push_response(200, file_listed("f9", "minutes.txt", "root-folder"));
+    let changes = match provider.poll_changes(Some("token"), 100).expect("poll") {
+        ChangesPoll::Page(page) => page.changes,
+        other => panic!("expected a page, got {other:?}"),
+    };
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].path.as_str(), "minutes.txt");
+    assert_eq!(changes[0].kind, file_moved_from("notes.txt"));
+    // A file can get new content with its new name, so the change
+    // says what the file holds, and which object it is.
+    assert_eq!(changes[0].content_hash.as_deref(), Some("h9"));
+    assert_eq!(changes[0].size_bytes, Some(3));
+    assert!(changes[0].modified_at.is_some());
+    assert_eq!(changes[0].id.as_deref(), Some("f9"));
+
+    // The same file moves into a folder: one move again.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f9", "minutes.txt", "d2", "h9"),
+            &[(200, &file_listed("f9", "minutes.txt", "d2"))]
+        ),
+        vec![(
+            "Archive/minutes.txt".to_string(),
+            file_moved_from("minutes.txt")
+        )]
+    );
+}
+
+#[test]
+fn an_entry_for_an_id_that_the_provider_does_not_know_is_no_move() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // A file that is new to this provider: where it was is not known,
+    // so it is a new file, and the engine compares it as one.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f5", "new.txt", "root-folder", "h5"),
+            &[(200, &file_listed("f5", "new.txt", "root-folder"))]
+        ),
+        vec![("new.txt".to_string(), RemoteChangeKind::CreatedOrModified)]
+    );
+    // A removal of an object that never had a path here says nothing.
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f6","removed":true}"#,
+            &[]
+        )
+        .is_empty()
+    );
+    // A folder with no known old place is reported for a walk, as
+    // before: it may hold files that the feed never names.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry("d5", "Moved in", "root-folder"),
+            &[]
+        ),
+        vec![("Moved in".to_string(), RemoteChangeKind::FolderMoved)]
+    );
+}
+
+#[test]
+fn a_path_that_came_back_is_confirmed_before_it_is_used_and_a_listing_of_this_run_stands() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // This run listed the root and found `notes.txt` as `f-now`.
+    transport.push_response(200, file_listed("f-now", "notes.txt", "root-folder"));
+    provider.enumerate(&RemotePath::root()).expect("enumerate");
+
+    // The ids of the last run come after it: the file had another id
+    // then, and a file that is gone had a path.
+    provider.restore_remote_ids(vec![
+        identity("notes.txt", RemoteEntryKind::File, "f-then"),
+        identity("gone.txt", RemoteEntryKind::File, "f-gone"),
+    ]);
+
+    // What this run found stands.
+    transport.push_response(
+        200,
+        r#"{"id":"f-now","name":"notes.txt","mimeType":"text/plain","size":"3","parents":["root-folder"]}"#,
+    );
+    let entry = provider
+        .stat(&RemotePath::new("notes.txt").expect("path"))
+        .expect("stat")
+        .expect("the file");
+    assert_eq!(entry.id.as_deref(), Some("f-now"));
+
+    // A path that came back is asked about before it is trusted: the
+    // object is gone, and a lookup by name finds nothing.
+    let before = transport.recorded_requests().len();
+    transport.push_response(404, r#"{"error":{"code":404,"message":"File not found"}}"#);
+    transport.push_response(200, r#"{"files":[]}"#);
+    assert!(
+        provider
+            .stat(&RemotePath::new("gone.txt").expect("path"))
+            .expect("stat")
+            .is_none()
+    );
+    let asked = &transport.recorded_requests()[before..];
+    assert_eq!(asked.len(), 2);
+    assert!(asked[0].url.contains("files/f-gone"));
 }
 
 #[test]
@@ -1147,7 +1678,7 @@ fn a_file_judged_outside_is_judged_again_when_a_folder_comes_into_the_root() {
 fn a_young_folder_that_was_seen_outside_is_a_folder_that_moved_in() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = provider_that_knows_two_folders(&transport);
-    let moved = RemoteChangeKind::FolderMoved;
+    let moved = || RemoteChangeKind::FolderMoved;
     let now = SystemTime::now();
     let outside =
         r#"{"id":"top","name":"Elsewhere","mimeType":"application/vnd.google-apps.folder"}"#;
@@ -1179,7 +1710,7 @@ fn a_young_folder_that_was_seen_outside_is_a_folder_that_moved_in() {
             &folder_entry_made("d7", "Fresh", "root-folder", now),
             &[]
         ),
-        vec![("Fresh".to_string(), moved)]
+        vec![("Fresh".to_string(), moved())]
     );
 
     // A young folder of the sync root leaves it and comes back: the
@@ -1187,7 +1718,7 @@ fn a_young_folder_that_was_seen_outside_is_a_folder_that_moved_in() {
     let known = folder_entry_made("d1", "Reports", "top", now);
     assert_eq!(
         poll_the_feed(&provider, &transport, &known, &[(200, outside)]),
-        vec![("Reports".to_string(), moved)]
+        vec![("Reports".to_string(), moved())]
     );
     assert_eq!(
         poll_the_feed(
@@ -1196,7 +1727,7 @@ fn a_young_folder_that_was_seen_outside_is_a_folder_that_moved_in() {
             &folder_entry_made("d1", "Reports", "root-folder", now),
             &[]
         ),
-        vec![("Reports".to_string(), moved)]
+        vec![("Reports".to_string(), moved())]
     );
 }
 
@@ -2868,4 +3399,889 @@ fn a_large_replaced_version_is_copied_one_chunk_for_each_poll() {
     let before = transport.recorded_requests().len();
     provider.poll_changes(Some("t3"), 100).expect("third poll");
     assert_eq!(transport.recorded_requests().len(), before + 1);
+}
+
+/// The records that `provider` reported as started since the last
+/// call. A test that expects something else in the list fails here.
+fn started_records(provider: &GoogleDriveProvider) -> Vec<String> {
+    provider
+        .take_follow_up_changes()
+        .into_iter()
+        .map(|change| match change {
+            FollowUpChange::Started(record) => record,
+            FollowUpChange::Finished(record) => panic!("a record ended early: {record}"),
+        })
+        .collect()
+}
+
+/// A provider as the daemon builds it after a stop: nothing in memory,
+/// and the records that the stopped daemon had stored.
+fn provider_after_a_stop(
+    transport: &Arc<ScriptedHttpTransport>,
+    records: &[String],
+) -> GoogleDriveProvider {
+    let provider = provider_with(transport.clone());
+    assert_eq!(
+        provider.resume_follow_ups(records.to_vec()),
+        Vec::<String>::new(),
+        "every record is taken back"
+    );
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("ensure");
+    provider
+}
+
+/// The versions of `doc.txt` when another device wrote `their edit`
+/// between the look and the write of `landed_overwrite`.
+fn versions_with_their_edit(ours: &str, their_size: u64) -> String {
+    let theirs = md5_hex_of_bytes(b"their edit");
+    format!(
+        r#"{{"revisions":[
+            {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+            {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"{their_size}"}},
+            {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+        ]}}"#
+    )
+}
+
+#[test]
+fn a_check_that_a_stopped_daemon_left_runs_after_the_start_and_makes_the_copy() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    // The record is there when the step of the upload has returned,
+    // so the daemon stores it with the outcome of the transfer.
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1, "one check for one overwrite");
+    assert!(
+        !records[0].contains("ya29") && !records[0].contains("1//rt"),
+        "no token in what the daemon stores: {}",
+        records[0]
+    );
+    // The daemon stops before a poll made the check.
+    drop(provider);
+
+    let provider = provider_after_a_stop(&transport, &records);
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#); // no copy of that name yet
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    assert_eq!(
+        work.len(),
+        6,
+        "{:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(work[0].url.contains("/files/doc-id/revisions?"));
+    assert!(work[3].url.contains("/files/doc-id/revisions/r1?alt=media"));
+    assert_eq!(work[4].method, "POST");
+    let created = String::from_utf8_lossy(&work[4].body);
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005100.txt""#),
+        "the copy has the name it has with no stop: {created}"
+    );
+    assert!(
+        created.contains(r#""parents":["root-folder"]"#),
+        "{created}"
+    );
+    assert!(created.contains("their edit"));
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())],
+        "the daemon forgets the record when the copy is made"
+    );
+
+    // Nothing is left: the next poll reads the feed alone.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
+    assert_eq!(transport.recorded_requests().len(), requests.len() + 1);
+    assert!(provider.take_follow_up_changes().is_empty());
+}
+
+#[test]
+fn a_commit_whose_answer_is_lost_leaves_a_check_that_survives_a_stop() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = md5_hex_of_bytes(b"our edit");
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}]}"#,
+    );
+    transport.push_response(
+        200,
+        r#"{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}"#,
+    );
+    transport.push_response(503, "");
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, b"our edit").expect("seed");
+    let failed = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: "dev-op-doc".to_string(),
+            precondition: RemotePrecondition::HashEquals("base-md5".to_string()),
+        })
+        .expect("session")
+        .step(u64::MAX);
+    assert_eq!(
+        failed.expect_err("no answer").kind,
+        ProviderErrorKind::Transient
+    );
+    // The upload failed, and the write can have landed: the record is
+    // there for the daemon all the same.
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1);
+    drop(provider);
+
+    let provider = provider_after_a_stop(&transport, &records);
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert!(
+        transport.recorded_requests().iter().any(|request| {
+            request.method == "POST"
+                && request.url.contains("uploadType=multipart")
+                && String::from_utf8_lossy(&request.body).contains("their edit")
+        }),
+        "the version that the lost commit replaced is kept after the stop"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+}
+
+#[test]
+fn a_copy_that_a_stop_cut_is_finished_after_the_start_and_made_one_time() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let records = started_records(&provider);
+    let size = CHUNK_START + 1000;
+    let theirs = md5_hex_of_bytes(b"their edit");
+    let open_a_session = |transport: &ScriptedHttpTransport| {
+        transport.push_response(200, versions_with_their_edit(&ours, size));
+        transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+        transport.push_response(200, r#"{"files":[]}"#); // no copy under the name
+        transport.push_response_with_headers(
+            200,
+            "",
+            vec![(
+                "Location".to_string(),
+                "https://upload.example/copy-session".to_string(),
+            )],
+        );
+        transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    };
+
+    // The first daemon reads the versions, opens the session of the
+    // copy, and stops before a byte of it is in.
+    open_a_session(&transport);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert!(
+        provider.take_follow_up_changes().is_empty(),
+        "the work of the record has not ended, and the address of the session is not for the daemon to store"
+    );
+    assert!(!records[0].contains("upload.example"));
+    drop(provider);
+
+    // The second daemon starts the copy again, sends its first chunk,
+    // and stops too.
+    let provider = provider_after_a_stop(&transport, &records);
+    open_a_session(&transport);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    transport.push_response(206, vec![1_u8; CHUNK_START as usize]);
+    transport.push_response(308, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert!(provider.take_follow_up_changes().is_empty());
+    drop(provider);
+
+    // The third daemon makes the whole copy.
+    let provider = provider_after_a_stop(&transport, &records);
+    open_a_session(&transport);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    transport.push_response(206, vec![1_u8; CHUNK_START as usize]);
+    transport.push_response(308, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    transport.push_response(206, vec![1_u8; 1000]);
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+    drop(provider);
+
+    // A daemon that stopped after the copy was in and before it stored
+    // the end of the record gets the record once more. The copy is
+    // under its name, and no second one is made.
+    let provider = provider_after_a_stop(&transport, &records);
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, size));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain","md5Checksum":"{theirs}"}}]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t4"}"#);
+    provider.poll_changes(Some("t3"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        4,
+        "the versions, the head, the name, the feed"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+
+    // Over the four daemons, one session got its last chunk: one copy.
+    let last_chunk = format!("bytes {CHUNK_START}-{}/{size}", size - 1);
+    let copies_made = transport
+        .recorded_requests()
+        .iter()
+        .filter(|request| {
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Content-Range" && value == &last_chunk)
+        })
+        .count();
+    assert_eq!(copies_made, 1);
+}
+
+#[test]
+fn a_check_that_finds_nothing_to_keep_after_a_stop_ends_and_is_forgotten() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let records = started_records(&provider);
+    drop(provider);
+
+    // The file is gone, and its versions with it.
+    let provider = provider_after_a_stop(&transport, &records);
+    let before = transport.recorded_requests().len();
+    transport.push_response(404, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert_eq!(transport.recorded_requests().len() - before, 2);
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+    drop(provider);
+
+    // The versions hold the base and this upload: nothing was replaced
+    // unseen.
+    let provider = provider_after_a_stop(&transport, &records);
+    let before = transport.recorded_requests().len();
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert_eq!(transport.recorded_requests().len() - before, 2);
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+
+    // Each of the two is forgotten: the next poll reads the feed alone.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    let before = transport.recorded_requests().len();
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(transport.recorded_requests().len() - before, 1);
+    assert!(
+        !transport
+            .recorded_requests()
+            .iter()
+            .any(|request| request.method == "POST" && request.url.contains("uploadType=")),
+        "no copy was made"
+    );
+}
+
+#[test]
+fn a_check_that_can_never_be_made_does_not_stay() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    landed_overwrite(&provider, &transport);
+    let record = started_records(&provider).remove(0);
+    drop(provider);
+
+    // A record that this build cannot read, and one that is older than
+    // Drive keeps a version, are not taken back: the daemon forgets
+    // them at the start.
+    let FollowUpRecord::ReplacedCheck(check) = serde_json::from_str(&record).expect("a record")
+    else {
+        panic!("a landed overwrite leaves a check that knows its file by the id: {record}");
+    };
+    let old = serde_json::to_string(&FollowUpRecord::ReplacedCheck(ReplacedCheck {
+        landed_at_ms: check.landed_at_ms - (REPLACED_CHECK_MAX_AGE.as_millis() as u64 + 60_000),
+        ..check.clone()
+    }))
+    .expect("a record");
+    // So is one whose time is no time: a damaged entry must not stop
+    // the daemon at its start.
+    let no_time = serde_json::to_string(&FollowUpRecord::ReplacedCheck(ReplacedCheck {
+        landed_at_ms: u64::MAX,
+        ..check.clone()
+    }))
+    .expect("a record");
+    let provider = provider_with(transport.clone());
+    let unusable = vec![
+        "not a record".to_string(),
+        r#"{"anotherKind":{}}"#.to_string(),
+        old,
+        no_time,
+    ];
+    assert_eq!(provider.resume_follow_ups(unusable.clone()), unusable);
+
+    // A check for a file in a folder that is no longer the cloud root
+    // of the profile ends with no request and no copy there.
+    let elsewhere = serde_json::to_string(&FollowUpRecord::ReplacedCheck(ReplacedCheck {
+        root_id: "another-root".to_string(),
+        ..check
+    }))
+    .expect("a record");
+    // The account can no longer read the file of the last one: the
+    // check has its tries, and then it ends.
+    assert!(
+        provider
+            .resume_follow_ups(vec![elsewhere.clone(), record.clone()])
+            .is_empty()
+    );
+    transport.push_response(200, ROOT_LISTING);
+    provider.ensure_cloud_root("/Vapor").expect("ensure");
+    let mut ended = Vec::new();
+    for _ in 0..REPLACED_WORK_ATTEMPTS {
+        transport.push_response(403, r#"{"error":{"errors":[{"reason":"forbidden"}]}}"#);
+        transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+        provider.poll_changes(Some("t1"), 100).expect("poll");
+        ended.extend(provider.take_follow_up_changes());
+    }
+    assert_eq!(
+        ended,
+        vec![
+            FollowUpChange::Finished(elsewhere),
+            FollowUpChange::Finished(record),
+        ]
+    );
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+    assert!(
+        !transport
+            .recorded_requests()
+            .iter()
+            .any(|request| request.url.contains("another-root")),
+        "nothing was asked of the other folder"
+    );
+}
+
+#[test]
+fn the_next_saves_of_this_device_make_no_copies_after_a_stop() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // An editor saves two times, and the daemon stops before a poll.
+    let first = landed_overwrite(&provider, &transport);
+    let second = md5_hex_of_bytes(b"second save");
+    let step = overwrite_again(
+        &provider,
+        &transport,
+        &first,
+        b"second save",
+        "dev-op-next",
+        (
+            200,
+            format!(r#"{{"id":"doc-id","md5Checksum":"{second}"}}"#),
+        ),
+    );
+    assert!(matches!(step, Ok(TransferStep::Completed(_))));
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 2);
+    drop(provider);
+
+    let provider = provider_after_a_stop(&transport, &records);
+    let before = transport.recorded_requests().len();
+    // The second save is in the list, less than a second after the
+    // first: it is this device's own, also after the stop.
+    let versions = format!(
+        r#"{{"revisions":[
+            {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+            {{"id":"r1","md5Checksum":"{first}","modifiedTime":"2026-11-23T10:00:05.000Z","size":"8"}},
+            {{"id":"r2","md5Checksum":"{second}","modifiedTime":"2026-11-23T10:00:05.900Z","size":"11"}}
+        ]}}"#
+    );
+    transport.push_response(200, versions.clone());
+    transport.push_response(200, versions);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    assert_eq!(
+        work.len(),
+        3,
+        "two lists and the feed: {:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        records
+            .into_iter()
+            .map(FollowUpChange::Finished)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// What the daemon does when an upload that runs again finds its own
+/// content in the cloud under the tag `dev-op-lost`, which it gave out
+/// and never recorded: one lookup of `doc.txt`, on a worker, and then
+/// the call that says so, with the base `base-md5`. Returns the
+/// checksum of the content.
+fn the_daemon_finds_its_content_in_the_cloud(
+    provider: &GoogleDriveProvider,
+    transport: &ScriptedHttpTransport,
+) -> String {
+    let ours = md5_hex_of_bytes(b"our edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"{ours}","size":"8","parents":["root-folder"]}}]}}"#
+        ),
+    );
+    let path = RemotePath::new("doc.txt").expect("path");
+    let seen = provider.stat(&path).expect("stat").expect("the file");
+    assert_eq!(seen.content_hash.as_deref(), Some(ours.as_str()));
+    let before = transport.recorded_requests().len();
+    provider.note_unrecorded_write(&path, "base-md5", &ours, "dev-op-lost");
+    assert_eq!(
+        transport.recorded_requests().len(),
+        before,
+        "the call runs on the tick thread: it makes no request"
+    );
+    ours
+}
+
+/// How many requests created a file with the bytes `their edit`.
+fn copies_of_their_edit(transport: &ScriptedHttpTransport) -> usize {
+    transport
+        .recorded_requests()
+        .iter()
+        .filter(|request| {
+            request.method == "POST"
+                && request.url.contains("uploadType=multipart")
+                && String::from_utf8_lossy(&request.body).contains("their edit")
+        })
+        .count()
+}
+
+#[test]
+fn a_write_whose_outcome_no_daemon_recorded_gets_its_check_and_the_other_version_is_kept() {
+    // Two devices overwrote `doc.txt` in the same moment. The write of
+    // this one landed last and holds the name, and the daemon was
+    // killed before it stored the outcome: no record of a check is
+    // left. The provider of the next start has nothing in memory.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_after_a_stop(&transport, &[]);
+    let ours = the_daemon_finds_its_content_in_the_cloud(&provider, &transport);
+
+    // The check is owed from the call on, so the daemon stores it in
+    // the tick that records the file as in sync.
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1, "one check for one write");
+    assert!(
+        !records[0].contains("ya29") && !records[0].contains("1//rt"),
+        "no token in what the daemon stores: {}",
+        records[0]
+    );
+
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#); // no copy of that name yet
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    assert_eq!(
+        work.len(),
+        6,
+        "{:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(work[0].url.contains("/files/doc-id/revisions?"));
+    assert!(work[1].url.contains("/files/doc-id?fields="));
+    assert!(work[3].url.contains("/files/doc-id/revisions/r1?alt=media"));
+    assert_eq!(work[4].method, "POST");
+    let created = String::from_utf8_lossy(&work[4].body);
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005100.txt""#),
+        "the copy has the name it has for a recorded write: {created}"
+    );
+    assert!(
+        created.contains(r#""parents":["root-folder"]"#),
+        "{created}"
+    );
+    assert!(created.contains("their edit"));
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())],
+        "the daemon forgets the record when the copy is made"
+    );
+
+    // Nothing is left: the next poll reads the feed alone.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
+    assert_eq!(transport.recorded_requests().len(), requests.len() + 1);
+    assert_eq!(copies_of_their_edit(&transport), 1);
+}
+
+#[test]
+fn a_write_with_no_recorded_outcome_that_replaced_its_base_costs_one_request_and_no_copy() {
+    // The common case: the upload landed over the content it meant to
+    // replace, and the daemon stopped before it stored the outcome.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_after_a_stop(&transport, &[]);
+    let ours = the_daemon_finds_its_content_in_the_cloud(&provider, &transport);
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1);
+
+    // Nothing is between the base and the content. The versions that
+    // the base itself replaced are the history of the file.
+    let before = transport.recorded_requests().len();
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r-1","md5Checksum":"older-md5","modifiedTime":"2026-11-23T09:58:00.000Z","size":"6"}},
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    assert_eq!(
+        work.len(),
+        2,
+        "the versions and the feed: {:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    // A copy is the one thing this work warns about, and none is made:
+    // no version is read, and no file is created.
+    assert!(
+        !work
+            .iter()
+            .any(|request| request.method != "GET" || request.url.contains("alt=media")),
+        "nothing is read or written for a copy"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())],
+        "the check ends, and the daemon forgets it"
+    );
+}
+
+#[test]
+fn a_second_call_for_one_write_makes_no_second_check_and_no_second_copy() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_after_a_stop(&transport, &[]);
+    let ours = the_daemon_finds_its_content_in_the_cloud(&provider, &transport);
+    let path = RemotePath::new("doc.txt").expect("path");
+
+    // The call comes again while the check waits for its poll: a tick
+    // that the database did not save, and the upload that ran again.
+    provider.note_unrecorded_write(&path, "base-md5", &ours, "dev-op-lost");
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1, "one check is owed for one write");
+
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        6,
+        "one check, one copy, the feed"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+
+    // The call comes once more after the check has ended. The check
+    // is made again, finds the copy under its name, and makes no
+    // second one.
+    provider.note_unrecorded_write(&path, "base-md5", &ours, "dev-op-lost");
+    let again = started_records(&provider);
+    assert_eq!(again.len(), 1);
+    let theirs = md5_hex_of_bytes(b"their edit");
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain","md5Checksum":"{theirs}"}}]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        4,
+        "the versions, the head, the name, the feed"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(again[0].clone())]
+    );
+    assert_eq!(copies_of_their_edit(&transport), 1);
+}
+
+#[test]
+fn a_write_that_a_stored_check_names_gets_no_second_check_from_the_call() {
+    // The answer of the commit did not come, and the upload left its
+    // check with the daemon, which stored it and stopped.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}]}"#,
+    );
+    transport.push_response(
+        200,
+        r#"{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}"#,
+    );
+    transport.push_response(503, "");
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, b"our edit").expect("seed");
+    let failed = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: "dev-op-doc".to_string(),
+            precondition: RemotePrecondition::HashEquals("base-md5".to_string()),
+        })
+        .expect("session")
+        .step(u64::MAX);
+    assert_eq!(
+        failed.expect_err("no answer").kind,
+        ProviderErrorKind::Transient
+    );
+    let stored = started_records(&provider);
+    assert_eq!(stored.len(), 1);
+    drop(provider);
+
+    // The next daemon takes the check back. Its upload runs again,
+    // finds its content in the cloud, and says so: the stored check is
+    // the check for that write.
+    let provider = provider_after_a_stop(&transport, &stored);
+    let ours = the_daemon_finds_its_content_in_the_cloud(&provider, &transport);
+    assert!(
+        provider.take_follow_up_changes().is_empty(),
+        "no second check is owed for the write"
+    );
+
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        6,
+        "one check, one copy, the feed"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(stored[0].clone())]
+    );
+    assert_eq!(copies_of_their_edit(&transport), 1);
+}
+
+#[test]
+fn the_check_for_a_write_with_no_recorded_outcome_survives_the_next_stops() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_after_a_stop(&transport, &[]);
+    let ours = the_daemon_finds_its_content_in_the_cloud(&provider, &transport);
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1);
+    // The daemon stored the record, and stops before a poll.
+    drop(provider);
+
+    // The second daemon makes the copy, and stops before it stored the
+    // end of the record.
+    let provider = provider_after_a_stop(&transport, &records);
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+    assert_eq!(copies_of_their_edit(&transport), 1);
+    drop(provider);
+
+    // The third daemon gets the record once more. The copy is under
+    // its name, and no second one is made.
+    let provider = provider_after_a_stop(&transport, &records);
+    let theirs = md5_hex_of_bytes(b"their edit");
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, versions_with_their_edit(&ours, 10));
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain","md5Checksum":"{theirs}"}}]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        4,
+        "the versions, the head, the name, the feed"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+    assert_eq!(copies_of_their_edit(&transport), 1);
+}
+
+#[test]
+fn a_file_known_by_its_path_only_gets_its_check_when_the_poll_has_read_its_ids() {
+    // The feed took the file out of what the provider knows between
+    // the lookup of the daemon and its call: the call has no id to
+    // name the file by, and it makes no request to read one.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_after_a_stop(&transport, &[]);
+    let ours = md5_hex_of_bytes(b"our edit");
+    let path = RemotePath::new("notes/doc.txt").expect("path");
+    let before = transport.recorded_requests().len();
+    provider.note_unrecorded_write(&path, "base-md5", &ours, "dev-op-lost");
+    provider.note_unrecorded_write(&path, "base-md5", &ours, "dev-op-lost");
+    assert_eq!(transport.recorded_requests().len(), before, "no request");
+    let records = started_records(&provider);
+    assert_eq!(records.len(), 1, "one check for one write");
+    assert!(records[0].contains("notes/doc.txt"), "{}", records[0]);
+
+    // The poll reads the folder and the file by the path, and makes
+    // the check from there.
+    let folder = r#"{"files":[{"id":"notes-id","name":"notes","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}]}"#;
+    let file = format!(
+        r#"{{"files":[{{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"{ours}","size":"8","parents":["notes-id"]}}]}}"#
+    );
+    let script_the_check = |transport: &ScriptedHttpTransport, name_lookup: String| {
+        transport.push_response(200, folder);
+        transport.push_response(200, file.clone());
+        transport.push_response(200, versions_with_their_edit(&ours, 10));
+        transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+        transport.push_response(200, name_lookup);
+    };
+    script_the_check(&transport, r#"{"files":[]}"#.to_string());
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    assert_eq!(
+        work.len(),
+        8,
+        "{:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(work[2].url.contains("/files/doc-id/revisions?"));
+    assert!(work[5].url.contains("/files/doc-id/revisions/r1?alt=media"));
+    let created = String::from_utf8_lossy(&work[6].body);
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005100.txt""#),
+        "{created}"
+    );
+    assert!(
+        created.contains(r#""parents":["notes-id"]"#),
+        "the copy is next to the file: {created}"
+    );
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+    drop(provider);
+
+    // A daemon that stopped before it stored the end of the record
+    // reads the ids again, and finds the copy.
+    let provider = provider_after_a_stop(&transport, &records);
+    let theirs = md5_hex_of_bytes(b"their edit");
+    script_the_check(
+        &transport,
+        format!(
+            r#"{{"files":[{{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain","md5Checksum":"{theirs}"}}]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
+    assert_eq!(copies_of_their_edit(&transport), 1);
+
+    // No file is at the path any more: the check ends with nothing to
+    // read.
+    let provider = provider_after_a_stop(&transport, &records);
+    let before = transport.recorded_requests().len();
+    transport.push_response(200, r#"{"files":[]}"#); // no folder of that name
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t4"}"#);
+    provider.poll_changes(Some("t3"), 100).expect("poll");
+    assert_eq!(transport.recorded_requests().len() - before, 2);
+    assert_eq!(
+        provider.take_follow_up_changes(),
+        vec![FollowUpChange::Finished(records[0].clone())]
+    );
 }

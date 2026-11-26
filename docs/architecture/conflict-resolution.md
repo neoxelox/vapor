@@ -25,11 +25,26 @@ land in the same moment, each having checked the cloud before the other
 wrote. The later one then replaced a version that its device never saw.
 The provider keeps that version as `report~conflict-replaced-<ms>.md`:
 `replaced` stands where the device id goes (`data-flow.md` §Conflict
-handling). It is a version of the file like any other copy.
+handling). It is a version of the file like any other copy. On Google
+Drive the copy is made after the upload, at a later poll of the changes
+feed. A daemon that stops in between makes it after its next start,
+one time. So does a daemon that stopped before it stored the outcome of
+the upload: at its next start it knows its own write in the cloud by the
+tag on the file, and the check for a replaced version is made from
+there.
 
 The copies sync like any file, so every device ends up with the same
 three files under the same names. Which version holds the name does not
 depend on the device you look from.
+
+All of this is about the content of one file. A name is another
+matter. When both sides gave one file or one folder another name or
+another place before either synced, no copy is made and no time is
+compared: one side has priority by the sync mode, and in `two-way` the
+name on this device stays and goes to the cloud (`data-flow.md` §A
+name or a place that the cloud changed). A file that got another name
+and other content on both sides is settled in two steps: its name by
+that rule, its content by the rule above.
 
 ## Design position: the files are the record, the decision is the question
 
@@ -52,9 +67,9 @@ and the files themselves are the durable conflict record:
   A name that holds the marker twice (a copy of a copy) is read at its
   last marker.
 
-What the user answers is a decision, the same kind of question as a held
-mass delete or a missing root (`data-flow.md` §Decisions), so every
-surface lists and answers one thing: `vapor decisions`. A `conflict`
+What the user answers is a decision, the same kind of question as a
+missing root (`data-flow.md` §Decisions), so every surface lists and
+answers one thing: `vapor decisions`. A `conflict`
 decision covers one file and every version of it: the file under the
 name and all its copies. It opens while a copy exists and closes when
 none is left, whoever removed them.

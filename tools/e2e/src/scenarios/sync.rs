@@ -143,6 +143,14 @@ pub fn scenarios() -> Vec<Scenario> {
             expect: Expect::Pass,
             run: burst_starts_in_seconds,
         },
+        Scenario {
+            id: "S85",
+            name: "deletion-burst-needs-no-answer",
+            proves: "40 files that are removed one by one on this device leave the cloud, and 40 that are removed in the cloud leave this device: half of what the profile syncs each time, with no question to the user",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: deletion_burst_needs_no_answer,
+        },
     ]
 }
 
@@ -673,6 +681,67 @@ fn cloud_copy_keeps_the_original(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         read_string(&home.local.join("copy.bin"))? == "one body, two names\n",
         "the copy holds other bytes"
+    );
+    Ok(())
+}
+
+fn deletion_burst_needs_no_answer(ctx: &mut Ctx) -> Result<(), Failure> {
+    const FILES: usize = 40;
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    for folder in ["here", "there"] {
+        for index in 0..FILES {
+            write_file(
+                &home.local.join(folder).join(format!("file{index:02}.txt")),
+                "removed with the rest of its folder\n",
+            )?;
+        }
+    }
+    let files_in = |folder: &std::path::Path| {
+        fs::read_dir(folder).map_or(0, |entries| {
+            entries
+                .flatten()
+                .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        })
+    };
+    ctx.wait_until(CONVERGE_TIMEOUT, "both folders in the cloud", || {
+        files_in(&home.cloud.join("here")) == FILES && files_in(&home.cloud.join("there")) == FILES
+    })?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // Half of what the profile syncs goes on this device, file by
+    // file: 40 deletions and no removal of a folder that would stand
+    // for them. The cloud follows, and nobody is asked.
+    let remove_each = |folder: &std::path::Path| -> Result<(), Failure> {
+        for index in 0..FILES {
+            fs::remove_file(folder.join(format!("file{index:02}.txt")))?;
+        }
+        Ok(())
+    };
+    remove_each(&home.local.join("here"))?;
+    ctx.wait_until(CONVERGE_TIMEOUT, "the files to leave the cloud", || {
+        files_in(&home.cloud.join("here")) == 0
+    })?;
+
+    // The other half goes in the cloud. This device follows, with its
+    // files in the trash.
+    remove_each(&home.cloud.join("there"))?;
+    ctx.wait_until(
+        Duration::from_secs(90),
+        "the files to leave this device",
+        || files_in(&home.local.join("there")) == 0,
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    let report = ctx.cli().json(&["decisions", "list", "--json"])?;
+    let asked = report["decisions"]
+        .as_array()
+        .map(|decisions| decisions.len())
+        .ok_or_else(|| Failure::new("decisions list gave no list"))?;
+    ensure!(
+        asked == 0,
+        "the removal of the files asked the user something: {report}"
     );
     Ok(())
 }

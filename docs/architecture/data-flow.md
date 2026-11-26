@@ -14,18 +14,17 @@
 10. A SQLite durable queue/state DB (WAL, `synchronous = NORMAL`) persists pending and leased intents, recovers interrupted leases on startup (resetting `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS`) and sweeps stale leases periodically in-run, coalesces scheduler flushes per `(path, kind)` against already-pending rows inside one transaction, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays (with `attempt_count` incremented only by the retry path, not by leasing), durably finalizes terminal failures, and injects a whole-scope startup reconcile (bounded by `STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS` to avoid starving non-reconcile work) so volatile pre-DB intent loss is reconstructed conservatively after restart. Every write of one tick is one transaction, and so one write to the log of the database: under a burst of small files a write for each statement cost a fifth of the tick thread, and on macOS each one waits behind the flush of the drive that the transfers of the moment ask for. A daemon that is killed inside a tick loses the writes of that tick and nothing else; its intents are leased or pending again at the next start. A tick that fails or panics keeps what it wrote before. A command that writes to the same database (an answer to a decision) asks for the lock each millisecond, so it gets its turn between two ticks of a busy daemon within a third of a second.
 11. Provider selection is injected at runtime startup per profile, so daemon orchestration uses the provider trait boundary instead of hardcoding any cloud type in core engine state. `provider = "filesystem"` (default) selects the real filesystem provider; `provider = "gdrive"` selects `GoogleDriveProvider`. New backends onboard through the checklist in `provider-onboarding.md`.
 12. Non-reconcile work flows through a staged executor that leases durable intents into bounded planner, hash, transfer (upload/download), and apply-delete stages under workgate/throttle caps instead of finishing one leased intent at a time. Every blocking provider call (remote stats and hash probes during planning, `begin_upload`/`begin_download`, transfer-session steps, remote deletes) runs on a small provider-job worker pool, never on the tick thread. Hashing a local file runs on the same workers, and so does every other read of a local file's content: the probe of a cloud deletion reads the local files whose size is the indexed size and whose modification time is not, and a download job reads the local file its payload displaces when the size of that file could match. The tick thread uses such a hash only for a file that still has the size and the modification time the worker saw; a file with no usable hash (larger than one hash step, changed since, unreadable) counts as changed, which keeps it. The reads of a deletion's probe stop when the throttle puts hashing on hold, and a deletion whose check stopped part of the way is tried again; it is not decided on the files nobody read. A file that a transfer writes is durable before it gets its name: its bytes are flushed to the drive first (`vapor_platform::fs_ops::make_durable`). On macOS the costly part of that flush is for the whole drive, so the files that are written at the same moment share one flush; each still waits for a flush that started after its own bytes reached the drive. The same holds for a discard: when the volume of a file refuses a trash folder, a worker copies the file to the trash of the runtime directory and removes the original, and the tick thread only renames. The tick loop dispatches jobs and harvests their outcomes, so provider RTT and a large file stall neither fs-event draining nor debounce nor IPC status, and the upload/download concurrency caps buy real parallel transfers. The calls outside the executor follow the same rule with one thread per call: the changes poll, each directory listing of the reconcile walk, the walk's comparison of a file a crash left set aside with the file at its name, and the cloud-root retry start on one tick and are harvested on a later one (the walk resumes at the directory whose listing landed). An expired changes cursor is dropped, the whole-scope reconcile that repairs the gap is queued, and the next poll is the baseline. No reconcile walk starts while the feed waits for a cursor (the first poll after a start, the baseline after an expiry or after a root that came back), so each listing of a walk is newer than the cursor and a change is in the walk or in the feed. The wait ends with the answer of that poll, whatever it is, and it does not apply to a provider with no feed. When the answer is a failure (the device is offline at the start), a walk may start with no cursor; the baseline that answers later queues one more whole-scope reconcile, which finds a change made between that walk and the baseline. A daemon profile's first cloud-root check runs on a worker at its first tick, and the run state is `starting` until it answers, so IPC answers at once. Transfers remain chunked `TransferSession`s, and each provider owns its chunk size: workers re-check the throttle gates and draw a byte grant from the bandwidth token bucket between steps, so a `Suspended` throttle hands the session back at its checkpoint instead of aborting it, and an empty bucket holds the session until the bucket's wait is over. A step that moves more than its grant (a provider's chunk has a least size, 256 KiB for a Google Drive resumable upload) leaves the bucket in debt for the difference, and the next grant waits until the refill has paid it. Cheap stage transitions chain within one tick (lease → plan, permit-acquire → first hash chunk, hash-complete → transfer dispatch), so a small file no longer pays a fixed tick of latency per pipeline stage; durable leasing orders by priority class (`state-schema-migrations.md` §Current schema) so reconcile backlog never starves fresh edits.
-13. A file present on one side only is not always a file to transfer. When the sync index has a row for it and the surviving copy is exactly what was last synced (the rsync quick check on that side, or the provider's hash), the other side deleted it while no daemon was watching, and the walk propagates that deletion: a `Delete` for a file gone from this device, an `ApplyRemoteDelete` (into the trash) for a file gone from the cloud. A surviving copy that changed since the last sync is kept and transferred instead, and a pair the index cannot vouch for is transferred. The same evidence rule holds for a deletion that the watcher reports: with no index row for the path, the planner keeps the cloud object and downloads it again, because Vapor never deletes a cloud object that it did not compare, and a file that is back when the deletion is planned drops the deletion. A modification time never decides that a deletion wins; the sync index is the only evidence. Both deletion kinds still pass the executor's own guard and the mass-delete guard, so a wiped side becomes a question, never a mirror. An `apply` answer to that question lets the held deletions pass the guard and nothing more: a cloud file with no index row (another device added it to a folder that was deleted here) still stays. Only an answer that names the path itself (the side of a `type-mismatch` to remove) stands in for the row. A whole-scope walk after a `reattach` or `recreate` answer runs with `reconcile.merge_without_deletions` set and transfers every one-sided file. The walk also removes the index rows of names that neither side holds any more (a file that left both sides while no daemon watched, the old spelling of a name that both sides respelled), unless the row was written after the cloud listing was asked for. Left in place, such a row would later vouch for a deletion that never happened: the file put back on this device would read as deleted in the cloud and go to the trash.
-14. A rename is recognised from the sync index, not from the watcher, which reports it as a delete and a create (a `Rename` intent for the destination on macOS). At the upload gate, a new path whose hash and size match an index row whose local file is gone becomes one `Provider::move_object` of that cloud object, and the index row moves with it; the stale delete of the old path then converges as a no-op. In the download planner, a new cloud object with the size and remote mtime of an index row whose local file is present and untouched is confirmed by hash (the backend's, or one probe) and applied as a local rename with no transfer, but only when the cloud has no object under the old name any more: a copy that kept its time (`cp -p`, a Finder duplicate) has the same size, time, and content, and it is downloaded as a second file. So that the create half is seen first, the deletion of a synced file waits one settle window while the create may still come, at most `MOVE_SETTLE_MAX_DEFERRALS` times: on its first planning while changes of the same side are not in the queue yet (local events inside their quiet window, or a feed that has more to hand over), and on every planning while a transfer that could be the new name is queued. The two halves of a rename are seen at the same moment, so when neither holds, nothing can turn the deletion into a move, and it proceeds at once. An upload whose bytes the cloud already holds completes without transferring. A change in only the spelling of a name, on a volume that folds case, is a rename too and reaches the other side as a move (§Directory and symlink semantics).
+13. A file present on one side only is not always a file to transfer. When the sync index has a row for it and the surviving copy is exactly what was last synced (the rsync quick check on that side, or the provider's hash), the other side deleted it while no daemon was watching, and the walk propagates that deletion: a `Delete` for a file gone from this device, an `ApplyRemoteDelete` (into the trash) for a file gone from the cloud. A surviving copy that changed since the last sync is kept and transferred instead, and a pair the index cannot vouch for is transferred. The same evidence rule holds for a deletion that the watcher reports: with no index row for the path, the planner keeps the cloud object and downloads it again, because Vapor never deletes a cloud object that it did not compare, and a file that is back when the deletion is planned drops the deletion. A modification time never decides that a deletion wins; the sync index is the only evidence. Both deletion kinds still pass the executor's own guard. A cloud file with no index row (another device added it to a folder that was deleted here) stays. Only an answer that names the path itself (the side of a `type-mismatch` to remove) stands in for the row. A whole-scope walk after a `reattach` or `recreate` answer runs with `reconcile.merge_without_deletions` set and transfers every one-sided file. The walk also removes the index rows of names that neither side holds any more (a file that left both sides while no daemon watched, the old spelling of a name that both sides respelled), unless the row was written after the cloud listing was asked for. Left in place, such a row would later vouch for a deletion that never happened: the file put back on this device would read as deleted in the cloud and go to the trash.
+14. A rename is recognised from the sync index, not from the watcher, which reports it as a delete and a create (a `Rename` intent for the destination on macOS). At the upload gate, a new path whose hash and size match an index row whose local file is gone becomes one `Provider::move_object` of that cloud object, and the index row moves with it; the stale delete of the old path then converges as a no-op. In the download planner, a new cloud object with the size and remote mtime of an index row whose local file is present and untouched is confirmed by hash (the backend's, or one probe) and applied as a local rename with no transfer, but only when the cloud has no object under the old name any more: a copy that kept its time (`cp -p`, a Finder duplicate) has the same size, time, and content, and it is downloaded as a second file. So that the create half is seen first, the deletion of a synced file waits one settle window while the create may still come, at most `MOVE_SETTLE_MAX_DEFERRALS` times: on its first planning while changes of the same side are not in the queue yet (local events inside their quiet window, or a feed that has more to hand over), and on every planning while a transfer that could be the new name is queued. The two halves of a rename are seen at the same moment, so when neither holds, nothing can turn the deletion into a move, and it proceeds at once. An upload whose bytes the cloud already holds completes without transferring. A change in only the spelling of a name, on a volume that folds case, is a rename too and reaches the other side as a move (§Directory and symlink semantics). On a provider that has an id for each object, a rename made in the cloud is not found this way at all: the provider reports it as one move, and the device renames the same file or folder (§A name or a place that the cloud changed). The move at the upload gate has one more case there. When the cloud has no object at the old name and the index holds an id for it, the object may have another name in the cloud that the feed has not said yet. The upload then waits one settle window, at most `MOVE_SETTLE_MAX_DEFERRALS` times, and the feed is polled at once: an upload at that moment would put the name of this device in the cloud as a second object.
 15. The reconcile walk compares each file pair with the rsync quick check on **both** sides: a pair is converged when the sizes match, the local size and mtime are what the sync index recorded at the last transfer, and the remote size and mtime are what the index recorded from the provider at that transfer. A pair the index has no row for, or that fails either check, is verified once through the upload planner in two-way mode, which knows the last synced hash: identical content converges silently and records the row; a local copy still equal to the last synced hash means the change is remote-only and becomes a download; a remote copy still equal to it means the change is local-only and becomes a guarded overwrite; both moved is a keep-both conflict. The op-id tag on the remote is never taken as proof on its own that the remote is unchanged, because an in-place write keeps the tag on a filesystem; the remote quick check has to agree. The provider reports the remote mtime with every completed transfer (`TransferOutcome::remote_modified_at`).
 
 On macOS the throttle inputs are read from the host every second: system and daemon CPU load, power source, thermal state, Low Power Mode, resident and physical memory, and keyboard/pointer presence. On Linux they come from `/proc` and `/sys`: CPU load and memory, whether a battery is discharging, the hottest thermal zone against its trip points, and whether a graphical session exists at all (a headless host counts as idle). Disk pressure has no source on either OS yet and keeps its neutral default, as does Low Power Mode on Linux. The speed of the network interface is read on macOS only; it is the first estimate of the link capacity (§User resource budgets). Windows is not a shipping surface; its sampler returns static defaults and the daemon logs a warning at startup saying so. The daemon's startup log names the inputs the host feeds it.
 
 A throttle state makes sync slower. Only `Suspended` stops it, and only critical thermal pressure gives `Suspended`: a condition that can last (battery power, a user at the device, Low Power Mode) never stops sync. Battery power and fair thermal pressure give `Light`. Low Power Mode, keyboard or pointer input, serious thermal pressure, and system CPU at or above 60% give `Throttled`, which runs one planner, one hash worker, one upload, and one download. The daemon's own CPU above `resourceLimits.cpuPercent` first takes workers away (§User resource budgets) and gives `Throttled` only when one worker is left. Severe disk pressure also holds downloads and leaves uploads running. A provider that answers "slow down" narrows uploads, downloads, and planner probes to one each until its delay is over.
 
-## Local safeguards (optional advanced protections)
+## Queue priority and the reconcile boost
 
-- **Priority classes + reconcile boost.** Within one durable flush batch, key-config and code paths enqueue ahead of lockfile noise (reusing the debounce classification as the priority signal). `vapor reconcile` also opens a bounded 30s boost window: deferred reconciles release immediately (bypassing their not-before times) and the remote feed polls on the next tick. Execution still answers to the throttle ladder, so the boost speeds up scheduling, never resource impact.
-- **Mass-change / ransomware guard.** Counts deletions in both directions at the moment the executor would make them irreversible: a local deletion about to remove a cloud object, a cloud deletion about to remove a local file. A deletion that turns out to be a no-op (the other side is already gone) never counts, and neither do the engine's own echoed deletes. The burst is judged as a whole: the deletions still waiting in the queue count with the ones already applied inside the rolling window, so a large batch is held before its first member lands. The guard trips when the burst reaches `massDelete.threshold` (default 1000) or `massDelete.ratioPercent` of the synced tree (default 25%, never fewer than 10 deletions). A tripped guard parks the whole burst behind one `mass-delete` decision (§Decisions): the deletion that tripped it, every deletion of that direction still queued at that moment, and every further one while the question is open. The rest of the sync keeps flowing; the daemon is never paused for it. `apply` releases the held deletions as approved and resets the window; `discard` drops them and enqueues a restore for each path from the side that still has the file. Because the whole burst is held at once, one answer covers what the question counted, and an answer given the moment the question appears does not leave stragglers to ask again. A held deletion whose target the other side removes meanwhile (the cloud reports the path gone, or the user deletes the file here too) is dropped as moot, and a question left holding nothing is withdrawn on its own. While the question is open, a deletion does not wait out its move-settle window: it goes to its probe and to the guard at once, so an answer given in that window covers it too. A held deletion stands for every later one of its path: a scan that finds the same file gone again adds no row next to it, so a question that waits for days holds one row for each file. The open question is read from the state database, so a daemon that restarts while it is open keeps holding.
+Within one durable flush batch, key-config and code paths enqueue ahead of lockfile noise (reusing the debounce classification as the priority signal). `vapor reconcile` also opens a bounded 30s boost window: deferred reconciles release immediately (bypassing their not-before times) and the remote feed polls on the next tick. Execution still answers to the throttle ladder, so the boost speeds up scheduling, never resource impact.
 
 ## Remote to local (bidirectional MVP)
 
@@ -45,13 +44,20 @@ A throttle state makes sync slower. Only `Suspended` stops it, and only critical
    and no watcher reports the contents of a moved tree.
    Google Drive does the opposite: a folder that gets another name or
    another place is one entry of its feed, with none for the files in
-   it. For a folder the provider knows, it sends a `FolderMoved` change
-   with each path of the folder, the one it had and the one it has,
-   and the engine walks the folder that holds that path. The walk
-   finds what the change did: a name with another spelling, files
-   under a new path, files that left. It is a walk of everything under
-   that folder, so a folder at the top of the sync root costs a scan
-   of the whole root on each device. An entry for a folder that is
+   it. For a folder or a file whose old place the provider knows, it
+   sends one `Moved` change that names both places, and the engine
+   renames the same entry on this device in one step (§A name or a
+   place that the cloud changed). The provider knows the old place
+   from what it listed in this run, and from the ids that the sync
+   index stored: a start hands them back to it, so a rename that was
+   made while no daemon ran is reported the same way. When no one
+   place in the synced folder names the folder afterwards (it left the
+   synced folder, or another folder has the name it got), the provider
+   sends a `FolderMoved` change with each path of the folder, and the
+   engine walks the folder that holds that path. The walk finds what
+   the change did: a folder under a new name that the index knows by
+   its id, files under a new path, files that left. It is a walk of
+   everything under that folder. An entry for a folder that is
    where it was says nothing and costs no request. When the provider
    cannot read where a changed file or folder is (the cloud did not
    answer), it sends the change with the root as its path, and the
@@ -195,7 +201,7 @@ mechanics and the "why":
 | Item | How Vapor treats it |
 | ---- | ------------------- |
 | Regular files | Fully synced, byte-for-byte, in both directions (following the configured sync direction). |
-| Folders | Containers, not synced objects: each side creates them automatically as the files inside them sync, and deleting a folder propagates. An empty folder does not appear on the other side, and renaming a folder re-syncs its contents under the new name. |
+| Folders | Containers, not synced objects: each side creates them automatically as the files inside them sync, and deleting a folder propagates. An empty folder does not appear on the other side. A folder that is renamed on this device goes to the cloud file by file, as moves of the cloud objects. A folder that is renamed in the cloud is one rename on this device where the provider has an id for it (Google Drive), and is worked file by file where it has none (`filesystem`). |
 | Ignored files | Anything matching the ignore rules never syncs in either direction: it can't be pulled down from the cloud, and it never causes a conflict. |
 | Conflicting edits | When both sides change the same file, both versions are kept: the other device's version stays next to the local one as a `~conflict-` copy until resolved. Nothing is ever silently overwritten. |
 | Symlinks | Never followed and never synced: a link could pull content from outside the sync root into scope, and cloud providers can't represent them faithfully. |
@@ -210,15 +216,27 @@ downloads create local parent directories, and the executor no-ops a
 directory upload intent outright ("directories materialize through their
 children"). The reconcile walk descends into directories but never emits
 an intent for the directory itself. Consequences: an **empty folder does
-not sync** in either direction, and a **folder rename/move propagates as
-a recursive delete plus child-by-child re-upload** rather than one
-rename (data-safe, just not cheap). Directory *deletions* do propagate
+not sync** in either direction, and a **folder rename/move on this
+device goes to the cloud child by child** rather than as one rename
+(data-safe, just not cheap): each file as a move of its cloud object
+where the backend can move one, else as a delete and an upload. A
+folder that the cloud renamed is one rename on this device where the
+provider has ids (§A name or a place that the cloud changed).
+Directory *deletions* do propagate
 (both directions, including strict-mirror removals). A folder that a
 cloud-side move or removal leaves empty on this device in `two-way` is
 asked about like any cloud deletion: it goes when the cloud has no such
 folder any more (it was renamed or removed there), and it stays when the
-cloud still has it. An empty folder is no deletion for the deletion
-guard. First-class folder
+cloud still has it. A folder that holds only files which an OS writes into a folder
+by itself (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.directory`; the
+list is `OS_FOLDER_FILES` in `core/shared/src/constants.rs`) is asked
+about like an empty one. When the cloud has no such folder, those
+files go to the trash and the folder is removed. They go only when
+nothing else stays in the folder: a folder with any other entry (an
+ignored build tree, a file that is not synced yet) is not changed. The
+same holds when the cloud removed the folder, because the device
+cannot tell a folder that was renamed away from one that was removed.
+First-class folder
 sync was evaluated and rejected (project-owner decision, 2026-07-07):
 keeping every synced object content-shaped is what keeps the conflict,
 echo-suppression, and transfer machinery simple: folders cannot
@@ -283,8 +301,13 @@ ships on today.** Whether a root folds case is read from the volume
 case, a change in only the spelling of a name (`readme.md` to
 `README.md`) is a rename: the walk and the watcher path carry it to the
 other side as a move, with no conflict copy and no question. When both
-sides changed the spelling in different ways before a sync, the cloud's
-spelling stays and the local name follows it. Every comparison uses the
+sides changed the spelling in different ways before a sync, no time is
+compared: in `two-way` the spelling of this device stays and goes to
+the cloud, in `pull-only` the cloud's stays, and in `push-only` this
+device's stays. The index says that both sides changed: it holds the
+entry under a third spelling. A pair that never synced has no last
+spelling, so no side changed it, and the cloud's spelling stays; the
+same holds for the merge after an answer about a root. Every comparison uses the
 spelling the volume stores (`vapor_shared::paths::stored_spelling`), not
 the spelling of the request. Only the names below the sync root are
 compared: a folder above the root that changed its spelling (the root
@@ -370,6 +393,95 @@ sync scope, cloud providers have no faithful symlink representation, and
 Windows symlink creation requires elevated privileges, so the safe,
 portable contract is "symlinks are invisible to sync."
 
+## A name or a place that the cloud changed
+
+A file or a folder that gets another name, or moves into another
+folder, in the cloud becomes one rename of the same entry on this
+device. A folder keeps everything in it, ignored files included. No
+file is sent, fetched, or put in the trash, and the index rows follow.
+The decisions are in
+`docs/specs/2026-11-25-cloud-folder-rename.md`.
+
+**Ids.** The provider trait carries an optional opaque id on a listed
+entry, on a change, and on the outcome of a transfer
+(`RemoteEntry::id`). The id stays with the object under a new name.
+The engine stores it and compares two of them for equality; it never
+reads one. The sync index holds the id of each synced file
+(`sync_index.remote_id`) and of each synced folder (`sync_folders`).
+A file gets its id when a transfer of it ends; a folder gets it when
+a scan compares a folder that is on both sides. Before the first poll
+of a profile the runtime hands every stored id back to the provider
+(`Provider::restore_remote_ids`), which is how Google Drive knows the
+old path of an entry after a restart. The ids are those of one cloud
+root. The provider gets them when that root is ready and is the folder
+that the profile adopted: while the root is missing or another folder
+is at its path, the profile waits for an answer and hands over none.
+An answer that takes another folder as the cloud root forgets every
+stored id and every move that the cloud was owed, and the Drive
+provider drops the paths it knew. The `filesystem` provider has no
+ids, so nothing is paired there and a renamed folder is worked file by
+file.
+
+**The rename.** `remote_move::DeviceRenames` makes it, on the tick
+thread, as a metadata operation. The old path must be on this device,
+and nothing may be queued or in work under it; removals that a scan
+queued for the same move are withdrawn. The folders above the new path
+are made, and the rename is a call that fails when the new path is
+taken, so nothing is ever replaced. The index rows, the folder rows,
+and the name aliases move in the transaction of the tick. Two callers
+use it: the changes poll for a `Moved` change, and the reconcile walk
+for a cloud entry whose id the index holds under another path (a feed
+that lost its history). When a check fails, or the rename fails, one
+log line says why and the device works file by file: for a folder a
+walk of the folder that held it and of the one that holds it now, for
+a file the removal of the old name and the download of the new one,
+where the planner still turns a moved file into a local rename. A move
+to a name that an ignore rule hides, or from one, is a removal or a
+new entry. A file that the rename took out of its folder leaves the
+folder to the check of §Directory and symlink semantics.
+
+**Priority.** When both sides gave one entry another name or place
+before either synced, one side has priority and no time is compared.
+The side that changed is the side whose path is not the path of the
+index row.
+
+| What changed | `two-way` | `pull-only` | `push-only` |
+| --- | --- | --- | --- |
+| Only the cloud | Renamed on this device | Renamed on this device | The cloud object is moved back |
+| Only this device | The cloud follows | The local change is undone | The cloud follows |
+| Both | This device's name stays; the cloud object is moved to it | The cloud's name stays; the entry of this device is renamed to it | This device's name stays; the cloud object is moved to it |
+
+The engine finds the entry that this device renamed in the folder of
+the old path: one entry that is new to the index and holds what the
+index rows of the old path describe (for a file its size and time, for
+a folder the size and the time of its first 16 indexed files, each at
+the same place under it). Two candidates, or none, mean no pairing,
+and the device works file by file. An entry that this device moved
+into another folder is not paired either.
+
+A move of the cloud object is owed, not made at once, because no
+provider call runs on the tick thread. The engine writes a row in
+`name_carries` (where the index rows are, where the cloud object is,
+and the path on this device) and queues one intent for that path. The
+executor makes the move with one `Provider::move_object` before it
+plans any intent at or under the path, moves the index rows, removes
+the row, and queues a comparison of the folder. An intent for a path
+under the cloud's name waits for the move. While the row is there, the
+walk leaves the three paths out of its comparison, so the two names do
+not read as two entries. When the provider refuses the move (the
+object is gone, or the name is taken in the cloud), the row and the
+index rows of the old path go, and a walk compares the folder as one
+that never synced, which keeps the data of both sides. This is the
+mechanism that carries a change of spelling (§Directory and symlink
+semantics); it takes its three paths from the row.
+
+Content is not part of this. A file that got a new name and new
+content keeps both versions as before, a deletion follows the sync
+index, and a file where the other side has a folder asks. A cloud
+rename of a folder that this device removed brings the folder back
+under its new name, because the index row of the old path is no
+evidence for a deletion at the new one.
+
 ## Conflict handling
 
 This section describes the **`two-way`** policy. In the one-way `pull-only`
@@ -389,10 +501,10 @@ When local and remote versions of the same path diverge (both sides modified, or
 - **Device identifier.** Made at first run from the host name: the part before the first dot, normalized to `[a-z0-9-]`, then `-` and four random characters, so two devices with one host name still write different copies. The value is written to `vapor.json` as `deviceId` under the configuration lock and is never regenerated; a later change of the host name does not change it.
 - **Collision-avoidance fallback.** If the derived conflict path already exists (on either side), append `-{seq}` starting at `2` and increment until free. Fallback template becomes `{stem}~conflict-{device_id}-{timestamp_ms}-{seq}{ext}`.
 - **Rename-during-conflict.** If the loser is renamed by the user or remote during the conflict write, the conflict copy still lands at the resolved fallback path; the user-initiated rename becomes a separate follow-up intent through the normal scheduler.
-- **Deletion against a change.** If one side has deleted the path while the other side has a modified version, the modification wins and is written to the original canonical path (no conflict suffix). "Delete wins" is never the default: data preservation always wins over deletion, and no modification time is compared to decide it. A local copy that is exactly what the index last synced is not a modification: when its cloud object is found gone at upload time (a watcher reported the file again just as the cloud deleted it), the deletion applies here through the guard and the trash instead of a re-upload that would undo it and whose own events the feed would read as echoes. An upload the user asked for (the restore after `discard`, the merge after a root answer) carries `approved` and is never read that way.
+- **Deletion against a change.** If one side has deleted the path while the other side has a modified version, the modification wins and is written to the original canonical path (no conflict suffix). "Delete wins" is never the default: data preservation always wins over deletion, and no modification time is compared to decide it. A local copy that is exactly what the index last synced is not a modification: when its cloud object is found gone at upload time (a watcher reported the file again just as the cloud deleted it), the deletion applies here through the executor's own guard and the trash instead of a re-upload that would undo it and whose own events the feed would read as echoes. An upload the user asked for (the merge after a root answer) carries `approved` and is never read that way.
 - **Determinism.** All inputs to the suffix (device_id, timestamp_ms) must be derivable from durable state or event metadata, so the same conflict replayed on the same device produces the same conflict path across daemon restarts.
 - **A stop between the two steps.** The local version is first set aside under a temporary name that carries the original name, and the cloud's version is then downloaded under the name. A daemon that stops between the two loses nothing: the next reconcile walk finds the set-aside file and gives it its conflict-copy name.
-- **Two uploads that land in the same moment.** The guard of an upload is a check of what the cloud holds, then the write. A second device can write between the two, and both uploads then land: the later one replaced a version that its device never compared. That version is not lost. It stays next to the file as a copy named `{stem}~conflict-replaced-{timestamp_ms}{ext}`, where `replaced` stands in the place of a device id because no device chose to make the copy, and the time is when the replaced version was written. The copy syncs to every device like any file and joins the `conflict` decision of the file. The filesystem provider commits a guarded overwrite as an exchange of two files, so the file it replaced is in its hands at once; a volume with no such exchange keeps the check as its one protection. Version 3 of the Google Drive API has no conditional write of content: after a guarded overwrite lands, the next changes poll reads the versions of the file. A commit whose answer did not come gets the same check, because the write can have landed and the retry then finds its own bytes in the cloud and sends nothing. Drive lists the versions by their times, and it gives a version its time when its bytes are in, about a second before the write commits. Three things follow. A write that the upload did not see has a time near the time of the upload's own version: the check takes a version for one only from twice the time the commit took plus 30 seconds before that time to the time the commit took plus 1 second after it. The history of the file never becomes copies, whatever times its versions carry. The next saves of this device are in the list too, seconds after the upload: the provider remembers what it wrote, and none of its own versions counts as a write of another device. And of two writes of one moment, the one that holds the name can be listed first (2 of 10 runs against a real account), so when the list holds a version of that moment the poll also reads which content holds the name. That version is not lost. Each other version of another writer is kept as a copy, whichever device asks; a copy that is there already is not made twice. The upload's own version is kept by the device whose write holds the name, when that device runs Vapor: its upload put its own tag on the file. A file that still carries the tag of this upload was replaced by a program that does not look at what it replaces, and then this device keeps its own version as the copy. A writer can set the time of its version (Drive for desktop sets the time the file has on its disk): a write of that moment whose time is outside those bounds is not found and stays in the version history of the file in Google Drive (`docs/tasks/core.md`). A cloud that cannot be reached, a rate limit, and a missing sign-in spend none of the tries of that check, so it waits through an outage; each poll reads up to 8 checks and makes one step of one copy. That check is held in memory: a daemon that stops between the upload and the poll makes no copy, and the version is then only in the version history of the file in Google Drive (`docs/tasks/core.md`).
+- **Two uploads that land in the same moment.** The guard of an upload is a check of what the cloud holds, then the write. A second device can write between the two, and both uploads then land: the later one replaced a version that its device never compared. That version is not lost. It stays next to the file as a copy named `{stem}~conflict-replaced-{timestamp_ms}{ext}`, where `replaced` stands in the place of a device id because no device chose to make the copy, and the time is when the replaced version was written. The copy syncs to every device like any file and joins the `conflict` decision of the file. The filesystem provider commits a guarded overwrite as an exchange of two files, so the file it replaced is in its hands at once; a volume with no such exchange keeps the check as its one protection. Version 3 of the Google Drive API has no conditional write of content: after a guarded overwrite lands, the next changes poll reads the versions of the file. A commit whose answer did not come gets the same check, because the write can have landed and the retry then finds its own bytes in the cloud and sends nothing. Drive lists the versions by their times, and it gives a version its time when its bytes are in, about a second before the write commits. Three things follow. A write that the upload did not see has a time near the time of the upload's own version: the check takes a version for one only from twice the time the commit took plus 30 seconds before that time to the time the commit took plus 1 second after it. The history of the file never becomes copies, whatever times its versions carry. The next saves of this device are in the list too, seconds after the upload: the provider remembers what it wrote, and none of its own versions counts as a write of another device. And of two writes of one moment, the one that holds the name can be listed first (2 of 10 runs against a real account), so when the list holds a version of that moment the poll also reads which content holds the name. That version is not lost. Each other version of another writer is kept as a copy, whichever device asks; a copy that is there already is not made twice. The upload's own version is kept by the device whose write holds the name, when that device runs Vapor: its upload put its own tag on the file. A file that still carries the tag of this upload was replaced by a program that does not look at what it replaces, and then this device keeps its own version as the copy. A writer can set the time of its version (Drive for desktop sets the time the file has on its disk): a write of that moment whose time is outside those bounds is not found and stays in the version history of the file in Google Drive (`docs/tasks/core.md`). A cloud that cannot be reached, a rate limit, and a missing sign-in spend none of the tries of that check, so it waits through an outage; each poll reads up to 8 checks and makes one step of one copy. The check outlives the daemon. When the upload ends, also when its commit got no answer, the provider gives the engine one record of the check (the ids of the file and of its folder, its name, the two hashes, the time the commit took, the tag of the upload; no token). The engine saves the record in the state database of the profile in the same write as the outcome of that transfer, and at a clean stop it saves what the provider reported after the last tick. At the next start the provider gets back the records whose work did not end, and runs each check from its start. The versions of the file give the same answer, and a copy that is under its name already is not made twice, so a daemon that stopped in the middle of a copy leaves one copy. The provider also knows again what those uploads wrote, so the next saves of this device still do not count as writes of another one. The engine removes a record when its check and the copies that follow from it have ended. A check ends with no copy when the file is gone, when the list shows no write of that moment, when the profile syncs another cloud folder than the one the upload wrote into, and when it is older than 30 days, after which Drive can remove a version. A daemon can stop after Drive committed the write and before the record was saved: a kill before the tick that follows the answer ended, a tick whose writes the database did not take, or a clean stop while the commit was on its way. No record is left then. The tag of the write is what tells the engine at the next start. Each upload puts an op-id on the cloud object, and an op-id names the device and the profile that gave it out. When the engine looks at a cloud object for an upload or applies a download of it, and the object carries an op-id of this device and this profile that the index row of the path does not hold, a write of this device landed and its outcome was never stored. The engine tells the provider the path, the hash of the row, the hash of the object, and the op-id (`Provider::note_unrecorded_write`). The local file plays no part: the call comes when the file still holds what the upload sent, and also when the user saved it again while no daemon ran and both versions are kept. The Drive provider takes the call as a guarded overwrite of the first hash with the second, and owes the same check from that moment: the engine stores its record in that tick, so the check outlives the next stop too. The call makes no request. The provider names the file by the id that the lookup of the engine left with it; when it has no id any more, the record holds the path, and the poll reads the ids before the check. Nobody measured how long that commit took, so 10 seconds stand for it. A write that already has a check, from its upload or from an earlier run, gets no second one, and a check that runs twice finds the copy that is there. The same bytes from another writer give no call: a file that a checkout put on two devices carries the op-id of the device that uploaded it first, and a file from a program other than Vapor carries none. A path with no index row, or with a row that holds no hash, gives no call either: with no base, nothing can have been replaced. What stays open is in `docs/tasks/core.md`.
 - **A conflict that cannot finish yet.** A keep-both whose download fails (the cloud is away) puts the local version back under its name and is tried again; the local file is never left only under a temporary name.
 
 ## Decisions
@@ -402,31 +514,24 @@ rests on evidence that could be read two ways, and only the user can
 say which reading is right. The rules:
 
 - **Scope is the smallest thing that is ambiguous.** A decision holds
-  one path, one batch, or one profile. Everything outside the scope
-  keeps syncing. The daemon is never paused because a question is open.
+  one path or one profile. Everything outside the scope keeps syncing.
+  The daemon is never paused because a question is open.
 - **Durable and listable.** A decision lives in the profile's state DB
   (`pending_decisions`), with its kind, scope, question, a short option
   list, and JSON evidence. `vapor decisions list|show` read it with or
   without a daemon; the app drives the same command. `vapor status`
   reports the open count (`decisions`), and a `decision` timeline entry
   marks both the opening and the outcome.
-- **Held intents.** The intents the decision holds move to the `held`
-  queue state, tied to the decision by `decision_id`. Held rows are not
-  queued work: they are not leased, not counted in the queue depth, and
-  they survive restarts. `vapor diagnostics` shows them in the `held`
-  stage with the decision number as the reason.
 - **Answering.** `vapor decisions resolve <id> --choose <key>` records
   the answer in the DB; the daemon applies it on its next tick, or at
   its next start, and marks it applied. Each kind has one applier; an
   answer a build cannot apply is logged and left answered-but-unapplied,
   never silently consumed. An answer whose apply fails (the cloud is
   away, a file is locked) is tried again after 5 seconds, 60 seconds,
-  and then each 10 minutes, with one warning for each reason. Released intents carry `approved`, which the
-  guard that held them respects.
-- **Kinds today.** `mass-delete` (batch scope, options `apply` and
-  `discard`; see the guard under Local safeguards); `root-missing`
-  (profile scope, option `recreate`) and `root-replaced` (profile
-  scope, option `reattach`), both under Root identity below;
+  and then each 10 minutes, with one warning for each reason.
+- **Kinds today.** `root-missing` (profile scope, option `recreate`)
+  and `root-replaced` (profile scope, option `reattach`), both under
+  Root identity below;
   `type-mismatch` (path scope) for a name that is a file on one side
   and a directory on the other, with `keep-both` (the local side moves
   to a conflict name and the cloud side comes down under the original
@@ -445,8 +550,8 @@ say which reading is right. The rules:
   The same holds for a name in the cloud folder, which the provider's
   listing reports (`enumerate_with_unsyncable`): those two in a cloud
   folder on a drive, and a `/` in a Google Drive name. The question
-  says on which side the file is. Nothing is held: the file stays on
-  its side only and the
+  says on which side the file is. Nothing waits for the answer: the
+  file stays on its side only and the
   question is the user's notice. A rename fixes it, after which the
   next whole-scope walk finds the name gone and withdraws the
   question (a walk decides that when it has seen the whole scope, not
@@ -456,8 +561,8 @@ say which reading is right. The rules:
   such a path are dropped at the callback bridge, since the durable
   queue is UTF-8. `conflict` (path scope, the conflicted file) for a
   file with keep-both copies, with one option per version keyed by its
-  file name; the versions not kept go to the trash. Nothing is held, the
-  files are the record, the decision is rewritten in place when a
+  file name; the versions not kept go to the trash. Nothing waits for
+  the answer, the files are the record, the decision is rewritten in place when a
   version arrives or goes, and it closes when no copy is left however
   they went. `vapor decisions resolve` applies a conflict answer itself,
   since it is local file operations (`conflict-resolution.md`). Further
@@ -466,8 +571,8 @@ say which reading is right. The rules:
 ### What stops a whole profile
 
 Only conditions under which no file can be synced correctly stop a
-profile. Everything else is file- or batch-scoped and leaves the rest of
-the sync running.
+profile. Everything else is file-scoped and leaves the rest of the sync
+running.
 
 | Condition | Effect | Way out |
 |---|---|---|
@@ -486,8 +591,8 @@ the sync running.
 | The user pauses (`vapor pause`, for one profile with `--profile`) | every profile stops, or the one that was named; a profile that is composed later starts paused when the pause covers it; a hold that comes and goes meanwhile (a root that went away, a full cloud) does not end the pause; ingest keeps capturing intent durably | `vapor resume` (for one profile with `--profile`), after which the state says what still stops work, if anything does |
 
 Never a whole-profile stop: a conflict, a name collision, a type
-mismatch, a deletion burst, a single failed transfer. Those hold their
-own path or batch and, when a person has to choose, open a decision.
+mismatch, a single failed transfer. Those hold their own path and, when
+a person has to choose, open a decision.
 
 ### A file that keeps failing
 
@@ -608,6 +713,7 @@ Bidirectional sync must prevent the daemon from re-uploading changes it just app
 - **Record on every provider write.** On completion of any `upload`, `download`, `delete`, or `rename` issued by the daemon, record `(remote_path, op_id, content_hash, expiry_monotonic_ms)` into the cache.
 - **Match on every inbound provider event.** Provider changes-feed events are matched against the cache before becoming intents. Primary correlator is the provider's `op_id` tag (xattr on filesystems that support it; a side-file fallback at `{path}.vapor-meta.json` when xattr is unavailable or write-failed). Content-hash is the fallback correlator when `op_id` is absent (e.g., third-party tool wrote the same bytes). A hit suppresses intent creation and records the suppression in diagnostics. An op-id match alone is not proof: the tag survives an in-place edit (an append, a same-size rewrite), so the change's size and mtime, which every feed reports when the backend has them, must still agree with what the transfer recorded; the durable sync index applies the same rule once the cache record has expired. Content-hash equality is positive proof on its own, and a change that carries another hash than the index is a change whatever else agrees. A change whose size and mtime are the ones the index recorded is no change, with or without an op-id: an object that no Vapor wrote has none, and a `chmod` of it changes no bytes.
 - **A download asks whether there is anything to download.** A change that passes the echo check can still carry the bytes of the last sync (a `touch`, a rewrite with the same content). When the object has the size the index recorded and a local file is at the path, the planner compares the object's hash with the index before it transfers anything. Equal content means nothing is downloaded and the local file is not rewritten; the index takes the object's new time, and a local file that changed since the last sync gets its upload queued, because that edit is the one change there is. The apply step makes the same check on the payload it holds, so an edit that waits for its upload never becomes a conflict copy under the old bytes.
+- **A rename of the daemon is recorded as a pair of paths.** A watcher reports a renamed folder as the folder that left and the folder that came, and some report each file in it. For the life of a record, an event for a path that is gone, at or under the old path, is the daemon's own. An event at or under the new path is the daemon's own when it names the renamed folder, a synced folder in it, or a file that still has the size and the time of its index row. A file under the new path that differs from its row is a change of the user and syncs. So does a folder that is new to the index. An event for an old path whose file changed around the moment of the rename queues the upload of that file under its new path.
 - **Local watcher echoes verify the current file, never the tag alone.** The local-side twin of the cache (suppressing watcher echoes of download-applies) requires the file's *current* size and modification time to match what the daemon wrote, with no hash on the tick thread: the op-id tag survives later writes, so a tag-only match would keep suppressing genuine user edits for the record's whole TTL after a download. The record of a deletion matches by the state of the path: it suppresses the echo while the path is gone and is dropped when the path is seen again.
 - **Eviction and bounds.** TTL and max-entries are defined in `core/shared/src/constants.rs`, module `self_write_cache`, with `DEFAULT_TTL_MILLIS: u64 = 30_000`, `MIN_TTL_MILLIS: u64 = 5_000`, `MAX_ENTRIES: usize = 10_000`, `MIN_ENTRIES: usize = 1_000`. Eviction policy is LRU-on-insert; TTL expiry runs on the same 1s tick as throttle sampling. Memory-pressure floor: under memory pressure the cache may shorten TTL toward `MIN_TTL_MILLIS` and trim toward `MIN_ENTRIES`, but never below those floors (loop-prevention is a safety guarantee, not an opportunistic feature).
 - **xattr vs side-file precedence.** Writes attempt xattr first; on `ENOTSUP`/`EACCES`/`EROFS` the fallback side-file is written atomically alongside the payload. The filesystem provider writes both before the payload is renamed into place: nothing that can fail (a full disk) runs after the commit, so an object never lands untagged. Reads check xattr first, then the side-file; if both are present the xattr wins. The filesystem provider is responsible for hiding side-files from enumeration so they do not surface as independent intents.

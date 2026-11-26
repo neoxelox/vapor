@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use vapor_shared::constants;
@@ -40,10 +41,27 @@ struct SelfWriteRecord {
     expires_at: SystemTime,
 }
 
+/// A rename that the daemon made on this device: a file or a folder
+/// that went from `from` to `to` in one step.
+#[derive(Clone, Debug)]
+struct OwnRename {
+    from: PathBuf,
+    to: PathBuf,
+    expires_at: SystemTime,
+}
+
+/// The most renames of the daemon that are remembered at one time. A
+/// rename is one record however many files the folder holds.
+const OWN_RENAMES_MAX: usize = 256;
+
 #[derive(Debug)]
 pub struct SelfWriteCache {
     entries: BTreeMap<String, SelfWriteRecord>,
     insertion_order: VecDeque<String>,
+    /// The renames the daemon made on this device, oldest first. A
+    /// watcher reports a rename of a folder as the folder that left
+    /// and the folder that came, and some report each file in it.
+    renames: VecDeque<OwnRename>,
     ttl: Duration,
     max_entries: usize,
     recorded_count: u64,
@@ -61,6 +79,7 @@ impl SelfWriteCache {
         Self {
             entries: BTreeMap::new(),
             insertion_order: VecDeque::new(),
+            renames: VecDeque::new(),
             ttl: Duration::from_millis(constants::self_write_cache::DEFAULT_TTL_MILLIS),
             max_entries: constants::self_write_cache::MAX_ENTRIES,
             recorded_count: 0,
@@ -255,8 +274,63 @@ impl SelfWriteCache {
         }
     }
 
+    /// Records that the daemon renamed the file or the folder `from`
+    /// to `to` on this device.
+    pub fn record_rename(&mut self, from: &Path, to: &Path, now: SystemTime) {
+        self.recorded_count += 1;
+        if self.renames.len() >= OWN_RENAMES_MAX {
+            self.renames.pop_front();
+        }
+        self.renames.push_back(OwnRename {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+            expires_at: now + self.ttl,
+        });
+    }
+
+    /// Whether the daemon made a rename that is still remembered.
+    pub fn remembers_a_rename(&self) -> bool {
+        !self.renames.is_empty()
+    }
+
+    /// Where `path` is now, when a rename of the daemon took it away:
+    /// `path` is the old path of such a rename, or lies under it. The
+    /// newest rename answers.
+    pub fn new_path_after_own_rename(&self, path: &Path, now: SystemTime) -> Option<PathBuf> {
+        self.renames
+            .iter()
+            .rev()
+            .filter(|rename| rename.expires_at > now)
+            .find_map(|rename| {
+                let below = path.strip_prefix(&rename.from).ok()?;
+                Some(if below.as_os_str().is_empty() {
+                    rename.to.clone()
+                } else {
+                    rename.to.join(below)
+                })
+            })
+    }
+
+    /// The new path of a rename of the daemon that `path` is, or lies
+    /// under. The caller decides whether what is there now is still
+    /// what the rename put there.
+    pub fn own_rename_that_made(&self, path: &Path, now: SystemTime) -> Option<&Path> {
+        self.renames
+            .iter()
+            .rev()
+            .find(|rename| rename.expires_at > now && path.starts_with(&rename.to))
+            .map(|rename| rename.to.as_path())
+    }
+
+    /// Counts one event that was dropped as the report of a rename the
+    /// daemon made.
+    pub fn note_suppressed(&mut self) {
+        self.suppressed_count += 1;
+    }
+
     /// TTL sweep; runs on the 1s throttle-sampling cadence.
     pub fn purge_expired(&mut self, now: SystemTime) {
+        self.renames.retain(|rename| rename.expires_at > now);
         let expired: Vec<String> = self
             .entries
             .iter()
@@ -508,6 +582,41 @@ mod tests {
             None,
             ts(constants::self_write_cache::MIN_TTL_MILLIS - 1)
         ));
+    }
+
+    #[test]
+    fn a_rename_of_the_daemon_answers_for_its_two_paths_until_it_expires() {
+        let mut cache = SelfWriteCache::new();
+        let (old_path, new_path) = (Path::new("/root/Photos"), Path::new("/root/Pictures"));
+        cache.record_rename(old_path, new_path, ts(0));
+
+        assert_eq!(
+            cache.new_path_after_own_rename(old_path, ts(1)),
+            Some(new_path.to_path_buf())
+        );
+        assert_eq!(
+            cache.new_path_after_own_rename(Path::new("/root/Photos/2026/a.jpg"), ts(1)),
+            Some(PathBuf::from("/root/Pictures/2026/a.jpg"))
+        );
+        assert_eq!(
+            cache.own_rename_that_made(Path::new("/root/Pictures/2026/a.jpg"), ts(1)),
+            Some(new_path)
+        );
+        // A name that only starts like the folder is another entry.
+        assert_eq!(
+            cache.new_path_after_own_rename(Path::new("/root/Photos.txt"), ts(1)),
+            None
+        );
+        assert_eq!(
+            cache.own_rename_that_made(Path::new("/root/Pictures.txt"), ts(1)),
+            None
+        );
+
+        let past_ttl = ts(constants::self_write_cache::DEFAULT_TTL_MILLIS + 1);
+        assert_eq!(cache.new_path_after_own_rename(old_path, past_ttl), None);
+        assert_eq!(cache.own_rename_that_made(new_path, past_ttl), None);
+        cache.purge_expired(past_ttl);
+        assert!(cache.renames.is_empty());
     }
 
     #[test]

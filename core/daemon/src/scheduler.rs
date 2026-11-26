@@ -87,9 +87,9 @@ impl KeyedSupersedingScheduler {
         self.upsert_stabilized_event_as(event, kind)
     }
 
-    /// Upserts with a caller-computed kind, so the runtime's safeguard
-    /// taps and the scheduled intent are guaranteed to agree on one
-    /// classification (the existence probe must not run twice).
+    /// Upserts with a caller-computed kind, so the runtime's checks of
+    /// the event and the scheduled intent are guaranteed to agree on
+    /// one classification (the existence probe must not run twice).
     pub(crate) fn upsert_stabilized_event_as(
         &mut self,
         event: StabilizedEvent,

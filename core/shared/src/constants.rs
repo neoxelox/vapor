@@ -167,8 +167,6 @@ pub mod config {
     /// Idle-boost group; object with the `idle_boost::KEY_*`
     /// fields.
     pub const KEY_IDLE_BOOST: &str = "idleBoost";
-    /// Safeguards group; object with the `safeguards::KEY_*` fields.
-    pub const KEY_SAFEGUARDS: &str = "safeguards";
     /// Trash group; object with the `trash::KEY_*` fields.
     pub const KEY_TRASH: &str = "trash";
 
@@ -183,7 +181,6 @@ pub mod config {
         KEY_TIMELINE_LIMIT,
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
-        KEY_SAFEGUARDS,
         KEY_TRASH,
     ];
 
@@ -220,7 +217,6 @@ pub mod config {
         KEY_PROFILES,
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
-        KEY_SAFEGUARDS,
         KEY_TRASH,
     ];
 
@@ -269,6 +265,14 @@ pub mod provider {
     /// Durable state key prefix for provider changes-feed cursors; the
     /// profile id is appended (`provider.changes_cursor.<profile_id>`).
     pub const CHANGES_CURSOR_STATE_KEY_PREFIX: &str = "provider.changes_cursor.";
+    /// Durable state key prefix for the work a provider still owes
+    /// after a write (`Provider::take_follow_up_changes`). One entry
+    /// holds one record; a hash of the record is appended.
+    pub const FOLLOW_UP_STATE_KEY_PREFIX: &str = "provider.follow_up.";
+    /// The most follow-up records one profile stores. A record over
+    /// this number is not stored: its work still runs, and a stop of
+    /// the daemon loses it.
+    pub const FOLLOW_UPS_STORED_MAX: usize = 10_000;
     /// Prefix of the hidden temp files the filesystem provider (and the
     /// engine's local apply path) write before an atomic rename. Both
     /// enumeration and every changes feed hide these; the local ingest
@@ -412,46 +416,6 @@ pub mod idle_boost {
     pub const DEFAULT_RAMP_DOWN_SECONDS: u64 = 10;
 }
 
-pub mod safeguards {
-    /// Keys of the `safeguards` config group. Each safeguard is its own
-    /// object inside the group.
-    pub const KEY_MASS_DELETE: &str = "massDelete";
-    pub const ALL_KEYS: &[&str] = &[KEY_MASS_DELETE];
-
-    /// Keys of `safeguards.massDelete`. The guard holds a burst of
-    /// deletes (in either direction) behind a decision when the burst
-    /// reaches the threshold or the ratio inside a rolling window; the
-    /// rest of the sync keeps flowing. The ransomware / bulk-mistake
-    /// backstop, configurable because a workflow that legitimately
-    /// unlinks many files (`rm -rf` of large trees, big build cleans)
-    /// may need a higher threshold.
-    pub const KEY_ENABLED: &str = "enabled";
-    /// Deletes inside the window that trip the guard.
-    pub const KEY_THRESHOLD: &str = "threshold";
-    pub const KEY_WINDOW_SECONDS: &str = "windowSeconds";
-    /// Share of the synced files (percent) whose deletion inside the
-    /// window is held for a decision even when the threshold is not
-    /// reached, so a small tree is protected too.
-    pub const KEY_RATIO_PERCENT: &str = "ratioPercent";
-    pub const MASS_DELETE_KEYS: &[&str] = &[
-        KEY_ENABLED,
-        KEY_THRESHOLD,
-        KEY_WINDOW_SECONDS,
-        KEY_RATIO_PERCENT,
-    ];
-    pub const DEFAULT_MASS_DELETE_ENABLED: bool = true;
-    pub const DEFAULT_MASS_DELETE_THRESHOLD: usize = 1_000;
-    pub const DEFAULT_MASS_DELETE_WINDOW_SECONDS: u64 = 60;
-    pub const DEFAULT_MASS_DELETE_RATIO_PERCENT: u8 = 25;
-    /// Floor clamps: a threshold/window too low would trip the guard on
-    /// ordinary work and train users to blind-approve it.
-    pub const MIN_MASS_DELETE_THRESHOLD: usize = 10;
-    pub const MIN_MASS_DELETE_WINDOW_SECONDS: u64 = 5;
-    /// The ratio rule never holds fewer deletes than this, so a tree of
-    /// three files does not prompt on every second delete.
-    pub const MIN_MASS_DELETE_RATIO_COUNT: usize = 10;
-}
-
 pub mod trash {
     /// Keys of the `trash` config group. Every file Vapor itself
     /// removes on this device (a delete that arrived from the cloud,
@@ -555,8 +519,6 @@ pub mod intent {
 
     pub const STAGE_QUEUED: &str = "queued";
     pub const STAGE_RETRYING: &str = "retrying";
-    /// Held behind an open decision.
-    pub const STAGE_HELD: &str = "held";
     pub const STAGE_PLANNING: &str = "planning";
     pub const STAGE_WAITING_TO_HASH: &str = "waiting-to-hash";
     pub const STAGE_HASHING: &str = "hashing";
@@ -570,8 +532,6 @@ pub mod intent {
 /// kind lists the option keys `vapor decisions resolve --choose`
 /// accepts for it.
 pub mod decision {
-    /// A burst of deletes reached the `safeguards.massDelete` limits.
-    pub const KIND_MASS_DELETE: &str = "mass-delete";
     /// A sync root is gone.
     pub const KIND_ROOT_MISSING: &str = "root-missing";
     /// A sync root is present but is not the folder the profile adopted.
@@ -594,9 +554,6 @@ pub mod decision {
     /// try on every tick only fills the log.
     pub const APPLY_RETRY_SECONDS: [u64; 3] = [5, 60, 10 * 60];
 
-    /// `mass-delete`: let the deletes through, or put the files back.
-    pub const OPTION_APPLY: &str = "apply";
-    pub const OPTION_DISCARD: &str = "discard";
     /// `root-missing`: create the root again, empty, and let the other
     /// side fill it.
     pub const OPTION_RECREATE: &str = "recreate";
@@ -617,7 +574,6 @@ pub mod decision {
 
     /// What a decision covers.
     pub const SCOPE_PATH: &str = "path";
-    pub const SCOPE_BATCH: &str = "batch";
     pub const SCOPE_PROFILE: &str = "profile";
 }
 
@@ -924,11 +880,45 @@ pub mod filtering {
     /// Deliberately NOT ignored: `.git/` (repositories sync whole) and
     /// dotenv files (a personal sync root is exactly where a backup of
     /// local secrets belongs: project owner decision, 2026-07-13).
-    pub const DEFAULT_PRE_IGNORE_RULES: &[&str] = &[
-        // OS junk
-        ".DS_Store",
-        "Thumbs.db",
-        "desktop.ini",
+    pub const DEFAULT_PRE_IGNORE_RULES: &[&str] = &joined::<
+        { OS_FOLDER_FILES.len() + OTHER_PRE_IGNORE_RULES.len() },
+    >(OS_FOLDER_FILES, OTHER_PRE_IGNORE_RULES);
+
+    /// The files that an OS writes into a folder by itself, for the
+    /// view of that folder: Finder, Windows Explorer, and KDE. They are
+    /// ignored by default. A folder that the cloud no longer has, and
+    /// that holds nothing but files with these names, is removed with
+    /// them; a folder with any other entry stays.
+    pub const OS_FOLDER_FILES: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini", ".directory"];
+
+    /// Whether `name` is the name of a file that an OS writes into a
+    /// folder by itself ([`OS_FOLDER_FILES`]).
+    pub fn is_os_folder_file(name: &str) -> bool {
+        OS_FOLDER_FILES.contains(&name)
+    }
+
+    /// `first` followed by `rest`, as one list. `N` is the length of
+    /// the two together; another value does not compile.
+    const fn joined<const N: usize>(
+        first: &[&'static str],
+        rest: &[&'static str],
+    ) -> [&'static str; N] {
+        assert!(first.len() + rest.len() == N);
+        let mut all = [""; N];
+        let mut index = 0;
+        while index < first.len() {
+            all[index] = first[index];
+            index += 1;
+        }
+        while index < N {
+            all[index] = rest[index - first.len()];
+            index += 1;
+        }
+        all
+    }
+
+    /// The built-in rules after [`OS_FOLDER_FILES`].
+    const OTHER_PRE_IGNORE_RULES: &[&str] = &[
         // What an OS keeps at the root of a volume, for a sync root that
         // is a whole external drive
         ".fseventsd/",
@@ -1304,9 +1294,6 @@ pub mod engine {
     /// replaced with a file still holds files here: their removals are
     /// queued and run in this time.
     pub const TYPE_CLASH_WAIT_SECONDS: u64 = 3;
-    /// The same wait while a mass-delete question holds those removals:
-    /// nothing moves until the user answers, so the look is rare.
-    pub const TYPE_CLASH_WAIT_HELD_SECONDS: u64 = 60;
     /// Minimum dwell time before the throttle controller may down-shift to
     /// or out of `Light`. Pairs with `MIN_DWELL_THROTTLED_SECONDS` to keep
     /// state stable under oscillating CPU / network samples.
