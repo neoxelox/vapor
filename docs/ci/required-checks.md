@@ -29,6 +29,13 @@ Linux and Windows run only the Rust workspace (Swift wrappers skip on
 non-Darwin); macOS runs both stacks. A regression on any host fails the PR
 because `fail-fast` is disabled in the matrix.
 
+Each of the nine checks reports on every pull request, and a job runs
+only what the change touches: with nothing to check, it passes in
+seconds (`scripts/scope.sh`; `overview.md`, "What a job runs for a
+change"). The gate is a condition on the steps of a job. A workflow
+with a `paths` filter, or a matrix job with an `if`, would leave a
+required check with no report, and that blocks every merge.
+
 When a matrix leg is renamed (for example a runner label change), update
 the ruleset in the same change set. A required check that no workflow
 reports any more blocks every merge until an admin bypasses it.

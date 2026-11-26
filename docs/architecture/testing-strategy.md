@@ -433,7 +433,8 @@ value", the test is not worth writing.
 - **Tier 1**: `./scripts/test.sh` in `test.yml` (and through
   `workflow_call` in a release). Runs unit + integration +
   platform-trait contract + property + shape-lock tests and the script
-  tests under `scripts/tests/`. Runs on every PR. Required check on
+  tests under `scripts/tests/`. Runs on every PR that changes what it
+  covers (`docs/ci/overview.md`). Required check on
   `main`. Budget: under **5 minutes** per OS in the matrix for the run
   itself. The script builds the tests first and times only the run, so
   a cold cache cannot fail the budget and a warm one cannot hide a slow
@@ -465,7 +466,8 @@ value", the test is not worth writing.
   runner is a virtual machine and cannot run a macOS guest. It runs on
   a contributor's Mac: required for a change to the Mac app or its
   install, and a leg of `./scripts/release.sh`. Tier 1 still
-  compiles the harness and its driver on every pull request, and runs
+  compiles the harness and its driver on every pull request that
+  changes code, and runs
   the harness's own unit tests.
 
 ## Per-surface scope

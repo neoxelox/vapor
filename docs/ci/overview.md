@@ -37,6 +37,37 @@ GitHub Actions workflows are defined in `.github/workflows/`:
   platform's environment, then one `publish` job that assembles the
   GitHub Release.
 
+## What a job runs for a change
+
+`lint`, `test`, and `build` run only what a change touches (owner,
+2026-11-26). The first step of each job asks `scripts/scope.sh`, which
+reads the changed files and prints one mode for the job:
+
+| Changed files | Mode of each job |
+|---|---|
+| Any file of the core: `core/`, `tools/`, `scripts/`, `.github/`, the Cargo and toolchain files, and every path that the script does not name | `full` in all nine jobs |
+| The Mac app only: `apps/macos/`, `assets/`, `tools/vm/driver/` | `full` in the three macOS jobs; `docs` in `lint (ubuntu-latest)`; `skip` in the other five |
+| Documents only: Markdown anywhere, `docs/`, `.agents/`, `.claude/`, `LICENSE` | `docs` in `lint (ubuntu-latest)`; `skip` in the other eight |
+
+- `full` runs every step. `docs` runs the text checks of lint
+  (`./scripts/lint.sh docs`: the locale catalogs parse, and no tracked
+  file holds an em dash). `skip` runs nothing.
+- A job always starts and always reports. The ruleset of `main`
+  requires the nine checks by name, and a check that does not report
+  blocks the merge. So the gate is a condition on each step. Never give
+  one of these workflows a `paths` filter, and never put an `if` on the
+  matrix job: a job that is left out reports under no leg's name.
+- The changed files of a pull request are the difference between the
+  merge that the job checks out and the first parent of that merge,
+  the base. For a push to `main` they are what came after the commit
+  before the push. The checkout fetches two commits deep for that.
+- Whenever the changed files are not known, the mode is `full`: a
+  release (`workflow_call` on a tag), a run by hand, a checkout that is
+  no merge. A wrong `full` costs minutes, and a wrong `skip` lets a
+  break through.
+- A new top-level path is `core` until `scripts/scope.sh` names it.
+  `scripts/tests/scope.sh` holds the cases, and Tier 1 runs it.
+
 ## Toolchain defaults in CI
 
 - Runners: `macos-latest` (full Rust + Swift), `ubuntu-latest` (Rust only),

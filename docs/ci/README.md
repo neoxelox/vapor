@@ -34,7 +34,8 @@ triggers them, and which ones gate a release.
 Testing runs in five tiers. Authoritative definition:
 `docs/architecture/testing-strategy.md §CI tier execution`.
 
-- **Tier 1**: `./scripts/test.sh` in `test.yml` (runs on every PR; a
+- **Tier 1**: `./scripts/test.sh` in `test.yml` (runs on every PR that
+  changes what it covers, see `overview.md`; a
   required check on `main` via the `main` ruleset, next to `lint.yml`
   and `build.yml`). Unit + integration + platform-trait contract +
   property + shape-lock + guard-rail timing tests. **Budget: under

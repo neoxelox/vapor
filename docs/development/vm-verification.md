@@ -326,7 +326,7 @@ that waits for a state on the screen waits up to one read.
 ## Relationship to the other tiers
 
 Tier 1 tests the logic of the app and of the core in process. Tier E2E
-tests the real daemon and CLI on the host, on every pull request. Tier
+tests the real daemon and CLI on the host, on every pull request that changes code. Tier
 VM tests the installed product on a Mac that is not the contributor's,
 for a change to the Mac app or its install and before a release. A behaviour of the daemon belongs in
 Tier E2E even when the app shows it; Tier VM proves that the app shows

@@ -440,7 +440,7 @@ Discipline rules:
   and the project owner judges the look.
 - **The Windows daemon.** Its scenarios skip until the native
   platform traits ship; the harness itself builds and runs `S01` there
-  on every PR. Linux runs the daemon scenarios; what it skips is the
+  on every PR that changes code. Linux runs the daemon scenarios; what it skips is the
   launchd round-trip and the disk-image scenarios; a systemd
   round-trip of its own is still to be written.
 
