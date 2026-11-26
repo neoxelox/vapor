@@ -55,6 +55,7 @@ in its pull request and in the documents under `docs/`.
 
 - The findings of a session of heavy use: a cloud event that changes no bytes no longer makes a conflict copy of a local edit, two uploads of one file in the same moment keep both versions, a burst of files starts to sync in 2 seconds and not 30, a crashed daemon is back in a second and one that hangs is ended, a sign-in from a terminal is read by the daemon, a folder renamed or moved in Google Drive reaches the other devices in seconds, and `vapor status` lists the files that cannot sync.
 - A rename that changes only the case of a name no longer removes the file from the cloud.
+- A folder that you remove always leaves the cloud. Before, when a subfolder left at the moment Vapor listed the folder, the empty folder could stay in the cloud, and a file that took its name got a question.
 - After a conflict with a slow download, the version that won is no longer deleted from the cloud.
 - A file removed and put back within seconds stays in the cloud, and a file put back with an old date is not deleted again.
 - A file that looks deleted because its sync folder was swapped is not removed from the cloud.
@@ -88,6 +89,8 @@ in its pull request and in the documents under `docs/`.
 - The pre-commit hook runs lint and Tier 1.
 - Tier VM (`./scripts/vm.sh`) installs the packaged app in a macOS virtual machine and acts on it as a user does, with screenshots of each scenario. The controls in the windows of the Mac app have accessibility identifiers, which the tier finds them by.
 - A manual Tier VM guest can run next to the app scenarios (`--guest --second`) and can have the Internet to test a real cloud provider (`--guest --internet`). `tools/vm/workloads/` holds the workloads of a heavy-user session.
+- An agent can run a project as one coordinator thread with one worker thread for each stage (the `vapor-coordinate` skill, in T3 Code). The adversarial review of a pull request runs on a model family other than the one that wrote the change.
+- CI runs only what a change touches: a change to documents runs the text checks, a change to the app of one system runs the jobs of that system, and a change to the core runs everything. `./scripts/lint.sh docs` runs the text checks alone.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

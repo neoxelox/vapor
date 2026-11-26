@@ -27,6 +27,7 @@
 - Version helper: `./scripts/version.sh`
 - Release gate (format check, lint, Tier 1, the e2e suite once per provider, and the Tier VM suite; the Google Drive leg needs the test account, and the Tier VM leg needs Tart and the guest image): `./scripts/release.sh`
 - Release body for a version (the changelog section, cut at GitHub's limit): `./scripts/notes.sh <version>`
+- What a CI job runs for a change (`docs/ci/overview.md`): `./scripts/scope.sh <lint|test|build> <macos|linux|windows>`
 - Performance gate (the property tests at 4 000 cases each, then one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_PROPERTY_CASES`, `VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
 - Soak verification (Tier S): `./scripts/soak.sh` (`--duration`, `--seed`, `--mode`, `--load`, `--faults`, `--throttle`, `--release`, `--status`, `--verify`; see `docs/development/soak-testing.md`)
 - Verification of the installed Mac app in a macOS virtual machine (Tier VM): `./scripts/vm.sh` (`--only Vxx`, `--keep`, `--video`, `--skip-build`, `--json`, `--list`, `--guest`, `--guest-stop`, `--setup`, `--clean`; needs Tart; see `docs/development/vm-verification.md`)
@@ -94,7 +95,7 @@ Operational notes:
   are left alone.
 - The hook never runs `clean.sh`: that removes `.vapor`, and with it
   a preserved or running e2e sandbox (`e2e.sh --keep`/`--sandbox`). CI
-  checks out fresh and builds cold on every PR, which is the gate
+  checks out fresh and builds cold on every PR that changes code, which is the gate
   against a stale artifact that hides a regression. Skip the hook with
   `--no-verify` only with the project owner's explicit approval (see
   the commit policy in `AGENTS.md` §10).

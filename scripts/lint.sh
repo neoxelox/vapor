@@ -7,15 +7,30 @@ export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 export VAPOR_ENV="${VAPOR_ENV:-dev}"
 mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
-"$ROOT_DIR/scripts/rust/lint.sh"
+# usage: lint.sh [docs]
+#   (none) every check
+#   docs   the text checks only: what a change to documents needs, and
+#          what CI runs when a change touches no code (scripts/scope.sh)
+MODE="${1:-all}"
+case "$MODE" in
+  all | docs) ;;
+  *)
+    echo "usage: $0 [docs]" >&2
+    exit 2
+    ;;
+esac
 
-if [[ "$(uname -s 2>/dev/null || echo unknown)" == "Darwin" ]]; then
-  "$ROOT_DIR/scripts/swift/lint.sh"
-else
-  echo "[lint] Host is not macOS. Skipping Swift lint (apps/macos is macOS-only)."
+if [[ "$MODE" == "all" ]]; then
+  "$ROOT_DIR/scripts/rust/lint.sh"
+
+  if [[ "$(uname -s 2>/dev/null || echo unknown)" == "Darwin" ]]; then
+    "$ROOT_DIR/scripts/swift/lint.sh"
+  else
+    echo "[lint] Host is not macOS. Skipping Swift lint (apps/macos is macOS-only)."
+  fi
+
+  "$ROOT_DIR/scripts/rust/format.sh" check
 fi
-
-"$ROOT_DIR/scripts/rust/format.sh" check
 
 # The locale catalogs parse as JSON: a broken catalog fails here, not
 # at the first build of the app.
@@ -36,3 +51,5 @@ if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     exit 1
   fi
 fi
+
+echo "[lint] text checks passed"

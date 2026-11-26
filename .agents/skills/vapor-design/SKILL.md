@@ -101,7 +101,9 @@ decision.
 After each round, write the answers into the spec before asking the
 next round. The spec is `docs/specs/YYYY-MM-DD-<slug>.md`, dated the
 day the design starts, with a short kebab-case slug. Add its row to
-`docs/specs/README.md` in the same change.
+`docs/specs/README.md` in the same change. A coordinator writes the
+spec as a draft outside the repository until a stage carries it in
+(`vapor-coordinate`).
 
 ```md
 # <Feature name>

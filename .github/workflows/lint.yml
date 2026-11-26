@@ -46,20 +46,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge of the pull request and its two parents:
+          # scripts/scope.sh reads the changed files from them.
+          fetch-depth: 2
+
+      # A job runs only what the change touches (scripts/scope.sh). It
+      # always starts and reports, because the ruleset of main requires
+      # this check by name; with nothing to run it passes in seconds.
+      - name: Decide what this job runs
+        id: scope
+        shell: bash
+        env:
+          VAPOR_SCOPE_BEFORE: ${{ github.event.before }}
+        run: ./scripts/scope.sh lint "${{ matrix.os }}" >> "$GITHUB_OUTPUT"
 
       - name: Select Xcode
-        if: matrix.scope == 'full'
+        if: steps.scope.outputs.mode == 'full' && matrix.scope == 'full'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
 
       - name: Set up Rust toolchain
+        if: steps.scope.outputs.mode == 'full'
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: clippy,rustfmt
           cache: false
 
       - name: Cache Rust dependencies
+        if: steps.scope.outputs.mode == 'full'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
@@ -73,7 +89,7 @@ jobs:
             ${{ runner.os }}-cargo-lint-deny${{ env.CARGO_DENY_VERSION }}-
 
       - name: Cache SwiftPM dependencies
-        if: matrix.scope == 'full'
+        if: steps.scope.outputs.mode == 'full' && matrix.scope == 'full'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: apps/macos/.build
@@ -82,6 +98,7 @@ jobs:
       # A cargo subcommand built from crates.io, not an action. The
       # binary lands in ~/.cargo/bin, which the Rust cache above keeps.
       - name: Install cargo-deny
+        if: steps.scope.outputs.mode == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -91,5 +108,11 @@ jobs:
           fi
 
       - name: Run lint checks
+        if: steps.scope.outputs.mode == 'full'
         shell: bash
         run: ./scripts/lint.sh
+
+      - name: Run the text checks
+        if: steps.scope.outputs.mode == 'docs'
+        shell: bash
+        run: ./scripts/lint.sh docs

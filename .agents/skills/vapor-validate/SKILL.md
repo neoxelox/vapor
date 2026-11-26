@@ -28,7 +28,7 @@ nothing.
 
 | Change | Tiers |
 |---|---|
-| Docs only, `assets/locales` only | `lint`: it checks that the locale catalogs parse, and that no tracked file holds an em dash |
+| Docs only, `assets/locales` only | `./scripts/lint.sh docs`, the text checks of `lint`: the locale catalogs parse, and no tracked file holds an em dash |
 | Tests only | `format`, `lint`, `test` |
 | Anything under `core/*` or `scripts/*` that a user could observe through the daemon or CLI, including startup, shutdown, IPC, schema, config and build changes to the shipping binaries | `format`, `lint`, `test`, `e2e` |
 | `apps/macos`, the packaging scripts, or the installer | `format`, `lint`, `test`, `vm`; hand the owner the screenshots of the run and a list of what to judge, since an agent verifies behaviour and never the look |
@@ -46,6 +46,11 @@ nothing.
   `TempDir`, no network, never `~/.vapor`.
 - A flaky test blocks merging until fixed or removed; removing one needs
   an issue naming the invariant it covered.
+- A script test under `scripts/tests/` that makes a git repository
+  first drops git's hook variables (`GIT_DIR`, `GIT_INDEX_FILE`, and
+  the others at the head of `scripts/tests/version.sh`). The
+  pre-commit hook runs Tier 1 with them set, and with them every git
+  command of the test acts on the real repository.
 - Every `vapor … --json` command keeps an explicit shape test, and a
   new command or flag that changes the shell contract (exit code,
   stdout versus stderr) gets a case in `core/cli/tests/binary.rs`.

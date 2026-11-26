@@ -53,5 +53,7 @@ license: GPL-3.0-only
 
 - Never commit on `main` outside the release flow (`vapor-release`).
 - Never push unless the project owner asks. A request to open a PR
-  covers that PR's branch (`vapor-pr`). A release request authorises
-  exactly one push (`vapor-release`). Nothing else is covered.
+  covers that PR's branch (`vapor-pr`). The owner's approval of a
+  coordinator's plan covers the branch of each stage of that project
+  (`vapor-coordinate`). A release request authorises exactly one push
+  (`vapor-release`). Nothing else is covered.
