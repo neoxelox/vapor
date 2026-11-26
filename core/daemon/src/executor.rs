@@ -3674,7 +3674,16 @@ fn continue_plan_directory_delete(
         .is_ok_and(|metadata| metadata.is_dir())
         && crate::name_collision::exactly_present(&plan.local_path);
     let subtree = match probe.subtree.as_ref() {
-        Some(Ok(entries)) => entries,
+        Some(Ok(crate::provider_jobs::SubtreeListing::Settled(entries))) => entries,
+        Some(Ok(crate::provider_jobs::SubtreeListing::Unsettled)) => {
+            // Other work renamed or removed folders while the listing
+            // ran. What it saw decides nothing, so look again. A wait
+            // and not a failure, as below.
+            return PlanOutcome::Defer {
+                delay: Duration::from_secs(constants::engine::FOLDER_DELETE_WAIT_SECONDS),
+                reason: "the folder changed while it was listed",
+            };
+        }
         Some(Err(error)) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
             // The directory went between the stat and the listing (a
             // sibling delete or move emptied and removed it): the

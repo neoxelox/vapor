@@ -191,15 +191,30 @@ pub(crate) struct ProbeResult {
     /// The stat of `stat_also`, when the request named one.
     pub also_stat: Option<Result<Option<RemoteEntry>, ProviderError>>,
     /// `Some` only when a subtree listing was requested and the stat
-    /// reported a directory. Entries are ordered parents before
-    /// children; the listing is capped at [`SUBTREE_LISTING_CAP`].
-    pub subtree: Option<Result<Vec<RemoteEntry>, ProviderError>>,
+    /// reported a directory.
+    pub subtree: Option<Result<SubtreeListing, ProviderError>>,
     /// What `local_hashes_if_absent` asked for; empty otherwise.
     pub local_hashes: crate::local_hash::LocalHashes,
     /// `Some` when `cloud_root_identity_of` asked and the identity was
     /// read.
     pub cloud_root_identity: Option<CloudRootIdentity>,
 }
+
+/// What the walk over a cloud folder found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SubtreeListing {
+    /// Every entry under the folder, parents before children, capped
+    /// at [`SUBTREE_LISTING_CAP`]. Empty only when the cloud listed
+    /// the folder itself as empty.
+    Settled(Vec<RemoteEntry>),
+    /// The folder changed under every pass of the walk, so what the
+    /// walk saw says nothing sure about what the folder holds.
+    Unsettled,
+}
+
+/// How many times a subtree probe walks a folder that changes while
+/// it is walked, before it says [`SubtreeListing::Unsettled`].
+const SUBTREE_LISTING_PASSES: usize = 3;
 
 /// Upper bound on entries one subtree probe collects. A directory
 /// delete larger than this is expanded in slices: each expansion
@@ -848,22 +863,38 @@ fn run_probe(
 fn list_subtree(
     provider: &dyn vapor_providers::Provider,
     root: &RemotePath,
-) -> Result<Vec<RemoteEntry>, ProviderError> {
+) -> Result<SubtreeListing, ProviderError> {
     list_subtree_with(root, |directory| provider.enumerate(directory))
 }
 
 /// The walk of [`list_subtree`] over any listing of one directory.
 ///
-/// The listing is not one call: other work removes entries while it
-/// runs. A folder below `root` that is gone when its turn comes has
-/// left the subtree, so it is taken out of the result and the walk
-/// goes on. Only a `root` that is gone makes the listing `NotFound`:
-/// the caller reads that as "the folder itself is absent", and a
-/// folder that lost one subfolder is not absent.
+/// The walk is one call for each folder, and other work renames and
+/// removes entries between the calls. A folder below `root` that is
+/// gone at its turn means the walk saw a tree that no longer is: the
+/// folder may have left, or it may be under another name with its
+/// files in it. Nothing follows from such a pass, least of all that
+/// `root` is empty, so the walk starts again. Only a `root` that is
+/// gone itself is `NotFound`, which the caller reads as "the folder
+/// is absent".
 fn list_subtree_with(
     root: &RemotePath,
     mut enumerate: impl FnMut(&RemotePath) -> Result<Vec<RemoteEntry>, ProviderError>,
-) -> Result<Vec<RemoteEntry>, ProviderError> {
+) -> Result<SubtreeListing, ProviderError> {
+    for _ in 0..SUBTREE_LISTING_PASSES {
+        if let Some(entries) = list_subtree_pass(root, &mut enumerate)? {
+            return Ok(SubtreeListing::Settled(entries));
+        }
+    }
+    Ok(SubtreeListing::Unsettled)
+}
+
+/// One pass of the walk. `None` when a folder below `root` was gone at
+/// its turn.
+fn list_subtree_pass(
+    root: &RemotePath,
+    enumerate: &mut impl FnMut(&RemotePath) -> Result<Vec<RemoteEntry>, ProviderError>,
+) -> Result<Option<Vec<RemoteEntry>>, ProviderError> {
     let mut collected = Vec::new();
     let mut pending = std::collections::VecDeque::from([root.clone()]);
     while let Some(directory) = pending.pop_front() {
@@ -873,8 +904,7 @@ fn list_subtree_with(
                 if error.kind == vapor_shared::ProviderErrorKind::NotFound
                     && directory != *root =>
             {
-                collected.retain(|entry: &RemoteEntry| entry.path != directory);
-                continue;
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
@@ -884,11 +914,11 @@ fn list_subtree_with(
             }
             collected.push(entry);
             if collected.len() >= SUBTREE_LISTING_CAP {
-                return Ok(collected);
+                return Ok(Some(collected));
             }
         }
     }
-    Ok(collected)
+    Ok(Some(collected))
 }
 
 /// A transfer that waits for bandwidth resumes when the bucket holds
@@ -1457,30 +1487,124 @@ mod tests {
         )
     }
 
-    #[test]
-    fn a_subfolder_that_leaves_during_the_listing_is_not_the_folder_itself() {
-        use vapor_providers::RemoteEntryKind::{Directory, File};
+    /// What the cloud answers for one folder: its path, then the path
+    /// and the kind of each entry in it.
+    type FolderAnswer<'a> = (&'a str, &'a [(&'a str, vapor_providers::RemoteEntryKind)]);
+
+    /// Walks `tree` over a cloud that changes: `passes[n]` is what the
+    /// cloud answers during the walk number `n`, by folder. A folder
+    /// with no answer is gone. A walk starts at each listing of `tree`.
+    fn walk_changing_tree(
+        passes: &[&[FolderAnswer<'_>]],
+    ) -> (Result<SubtreeListing, ProviderError>, usize) {
         let root = RemotePath::new("tree").expect("root");
-        // Another job removes `tree/deeper` between the listing of
-        // `tree` and the listing of `tree/deeper`.
-        let listing = list_subtree_with(&root, |directory| match directory.as_str() {
-            "tree" => Ok(vec![
-                listed("tree/deeper", Directory),
-                listed("tree/one.txt", File),
-            ]),
-            _ => Err(gone(directory)),
-        })
-        .expect("the folder is there, so its listing is");
-        let paths: Vec<&str> = listing.iter().map(|entry| entry.path.as_str()).collect();
-        assert_eq!(paths, vec!["tree/one.txt"]);
+        let mut pass = 0usize;
+        let mut started = false;
+        let result = list_subtree_with(&root, |directory| {
+            if directory.as_str() == "tree" {
+                if started {
+                    pass += 1;
+                }
+                started = true;
+            }
+            let answers = passes.get(pass).copied().unwrap_or(&[]);
+            answers
+                .iter()
+                .find(|(folder, _)| *folder == directory.as_str())
+                .map(|(_, entries)| {
+                    entries
+                        .iter()
+                        .map(|(path, kind)| listed(path, *kind))
+                        .collect()
+                })
+                .ok_or_else(|| gone(directory))
+        });
+        (result, pass + usize::from(started))
+    }
+
+    fn paths(listing: &SubtreeListing) -> Vec<&str> {
+        match listing {
+            SubtreeListing::Settled(entries) => {
+                entries.iter().map(|entry| entry.path.as_str()).collect()
+            }
+            SubtreeListing::Unsettled => panic!("the walk did not settle"),
+        }
+    }
+
+    #[test]
+    fn a_folder_whose_only_subfolder_got_another_name_is_not_listed_as_empty() {
+        use vapor_providers::RemoteEntryKind::{Directory, File};
+        // `tree/sub` is renamed to `tree/renamed` between the listing
+        // of `tree` and the listing of `tree/sub`. The file in it is
+        // still in the cloud, so `tree` must not look empty.
+        let (listing, walks) = walk_changing_tree(&[
+            &[("tree", &[("tree/sub", Directory)])],
+            &[
+                ("tree", &[("tree/renamed", Directory)]),
+                ("tree/renamed", &[("tree/renamed/doc.txt", File)]),
+            ],
+        ]);
+        let listing = listing.expect("the folder is there");
+        assert_eq!(
+            paths(&listing),
+            vec!["tree/renamed", "tree/renamed/doc.txt"]
+        );
+        assert_eq!(walks, 2);
+    }
+
+    #[test]
+    fn a_subfolder_that_left_during_the_walk_does_not_make_the_folder_gone() {
+        use vapor_providers::RemoteEntryKind::{Directory, File};
+        // Another delete removes `tree/deeper` during the walk. The
+        // second walk lists what is left.
+        let (listing, _) = walk_changing_tree(&[
+            &[(
+                "tree",
+                &[("tree/deeper", Directory), ("tree/one.txt", File)],
+            )],
+            &[("tree", &[("tree/one.txt", File)])],
+        ]);
+        assert_eq!(
+            paths(&listing.expect("the folder is there")),
+            vec!["tree/one.txt"]
+        );
+    }
+
+    #[test]
+    fn a_folder_is_empty_only_when_the_cloud_lists_it_as_empty() {
+        use vapor_providers::RemoteEntryKind::Directory;
+        let (listing, walks) =
+            walk_changing_tree(&[&[("tree", &[("tree/sub", Directory)])], &[("tree", &[])]]);
+        assert_eq!(
+            listing.expect("the folder is there"),
+            SubtreeListing::Settled(Vec::new())
+        );
+        assert_eq!(walks, 2);
+    }
+
+    #[test]
+    fn a_folder_that_changes_under_every_walk_is_unsettled() {
+        use vapor_providers::RemoteEntryKind::Directory;
+        let changing: &[FolderAnswer<'_>] = &[("tree", &[("tree/sub", Directory)])];
+        let (listing, walks) = walk_changing_tree(&[changing; SUBTREE_LISTING_PASSES]);
+        assert_eq!(listing.expect("no failure"), SubtreeListing::Unsettled);
+        assert_eq!(walks, SUBTREE_LISTING_PASSES);
     }
 
     #[test]
     fn a_folder_that_is_gone_itself_makes_the_listing_not_found() {
-        let root = RemotePath::new("tree").expect("root");
-        let error = list_subtree_with(&root, |directory| Err(gone(directory)))
-            .expect_err("the folder is gone");
-        assert_eq!(error.kind, vapor_shared::ProviderErrorKind::NotFound);
+        use vapor_providers::RemoteEntryKind::Directory;
+        let (listing, _) = walk_changing_tree(&[&[]]);
+        assert_eq!(
+            listing.expect_err("the folder is gone").kind,
+            vapor_shared::ProviderErrorKind::NotFound
+        );
+        // Also when it goes between two walks.
+        let (listing, _) = walk_changing_tree(&[&[("tree", &[("tree/sub", Directory)])], &[]]);
+        assert_eq!(
+            listing.expect_err("the folder is gone").kind,
+            vapor_shared::ProviderErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -291,9 +291,12 @@ delete that still finds children waits while any of them has queued
 work, and keeps the directory once the children that remain exist
 locally again, which is what stops an expansion loop. An empty remote
 directory is removed outright. The listing of the subtree is not one
-call, and other deletes run while it does: a subfolder that is gone
-when its turn comes has left the subtree, and the listing goes on.
-Only a folder that is gone itself counts as removed. The reconcile walk takes the same route
+call, and other work renames and removes entries while it runs. A
+subfolder that is gone when its turn comes may have left, or may be
+under another name with its files in it, so that pass decides nothing
+and the listing starts again. A folder counts as empty only when the
+cloud lists it as empty, and as removed only when it is gone itself.
+A folder that changes under every pass is looked at again later. The reconcile walk takes the same route
 for a folder it finds gone from this device while the index holds rows
 under it: one `Delete` of the folder, not a walk into it, which would
 delete the files and leave every folder behind in the cloud.
