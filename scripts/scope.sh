@@ -20,17 +20,23 @@ set -euo pipefail
 #
 # Each changed file is of one class, and the classes decide:
 #
-#   docs  Markdown anywhere, `docs/`, the agent files, `LICENSE`.
-#         No test reads them. The text checks do.
+#   docs  Markdown, `docs/`, the agent files, `LICENSE`. No test and no
+#         build reads them. The text checks do.
 #   mac   `apps/macos/`, `assets/`, `tools/vm/driver/`: the Mac app,
 #         what it bundles, and the Swift driver of Tier VM. Only the
-#         macOS jobs build them.
+#         macOS jobs build them. Everything in the targets of the app
+#         is of this class, Markdown too: the build reads its
+#         resources.
 #   core  everything else: the Rust workspace, the scripts, the
 #         workflows, and any path this file does not name.
 #
+# A Markdown file that a build or a test starts to read is no longer
+# docs: name it here in the same change.
+#
 # The answer is `full` whenever the changed files are not known: a
-# release, a run by hand, a checkout with no history. A wrong `full`
-# costs minutes, and a wrong `skip` lets a break through.
+# release, a checkout with no history, an event that is neither a pull
+# request nor a push to `main`. A wrong `full` costs minutes, and a
+# wrong `skip` lets a break through.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -52,19 +58,35 @@ case "$2" in
   *) usage ;;
 esac
 
+# The class of one changed file. `status` is the letter of
+# `git diff --name-status`: M for a change of the content, A and D for
+# a file that came or went. A file under another name is both.
 class_of() {
-  case "$1" in
+  local file="$1" status="$2"
+  case "$file" in
+    # Two files of the Mac app that a test of the Rust workspace reads
+    # on every system (`tools/vm/src/scenario.rs`). The macOS jobs run
+    # that test, so they check a change of the content. They do not
+    # check a change of the name: macOS folds case and Linux does not,
+    # so a new spelling passes there and breaks here.
+    apps/macos/Sources/VaporCore/AccessibilityID.swift | assets/locales/en.json)
+      if [[ "$status" == M ]]; then echo mac; else echo core; fi
+      ;;
+    apps/macos/Sources/* | apps/macos/Tests/*) echo mac ;;
     *.md | docs/* | .agents/* | .claude/* | LICENSE) echo docs ;;
     apps/macos/* | assets/* | tools/vm/driver/*) echo mac ;;
     *) echo core ;;
   esac
 }
 
-# Prints the changed files, one on a line. Fails when they are not
-# known. `--no-renames` lists both names of a moved file, so a file
-# that leaves a class still counts for it.
+# Prints the changed files, one on a line, as `<status><tab><path>`.
+# Fails when they are not known. `--no-renames` lists both names of a
+# moved file, so a file that leaves a class still counts for it. With
+# `core.quotePath` off, a name with a letter outside ASCII is printed
+# as it is; a name that git still quotes matches no class and is core.
 changed_files() {
-  # The tests of this script give the list.
+  # The tests of this script give the list. A line with no status is a
+  # change of the content.
   if [[ -n "${VAPOR_SCOPE_FILES+set}" ]]; then
     printf '%s\n' "$VAPOR_SCOPE_FILES"
     return 0
@@ -74,7 +96,7 @@ changed_files() {
       # The checkout of a pull request is the merge of its head into
       # the base, and the first parent of that merge is the base.
       git -C "$ROOT_DIR" rev-parse --verify --quiet 'HEAD^2' >/dev/null || return 1
-      git -C "$ROOT_DIR" diff --name-only --no-renames 'HEAD^1' HEAD
+      git -C "$ROOT_DIR" -c core.quotePath=false diff --name-status --no-renames 'HEAD^1' HEAD
       ;;
     push)
       # A tag is a release, and a release runs everything.
@@ -82,7 +104,7 @@ changed_files() {
       local before="${VAPOR_SCOPE_BEFORE:-}"
       [[ "$before" =~ ^[0-9a-f]{40}$ ]] || return 1
       git -C "$ROOT_DIR" cat-file -e "${before}^{commit}" 2>/dev/null || return 1
-      git -C "$ROOT_DIR" diff --name-only --no-renames "$before" HEAD
+      git -C "$ROOT_DIR" -c core.quotePath=false diff --name-status --no-renames "$before" HEAD
       ;;
     *)
       return 1
@@ -91,15 +113,22 @@ changed_files() {
 }
 
 decide() {
-  local files core=0 mac=0 docs=0 file
+  local files core=0 mac=0 docs=0 line status file tab=$'\t'
   if ! files="$(changed_files)"; then
     echo "[scope] the changed files are not known: full" >&2
     echo full
     return 0
   fi
-  while IFS= read -r file; do
-    [[ -n "$file" ]] || continue
-    case "$(class_of "$file")" in
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$line" == *"$tab"* ]]; then
+      status="${line%%"$tab"*}"
+      file="${line#*"$tab"}"
+    else
+      status=M
+      file="$line"
+    fi
+    case "$(class_of "$file" "$status")" in
       core) core=$((core + 1)) ;;
       mac) mac=$((mac + 1)) ;;
       docs) docs=$((docs + 1)) ;;

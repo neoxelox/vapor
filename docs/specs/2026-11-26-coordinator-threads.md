@@ -137,9 +137,27 @@ the change did not need. Each decision is the owner's.
   daemon, and D21 asked for the fix. The listing of a cloud folder
   that is being removed failed when a subfolder left during the
   listing, the planner read that as "the folder is gone", and the
-  empty folder stayed in the cloud. `list_subtree_with` in
-  `core/daemon/src/provider_jobs.rs` now takes such a subfolder out of
-  the listing and goes on. Three unit tests cover it.
+  empty folder stayed in the cloud. The listing in
+  `core/daemon/src/provider_jobs.rs` now starts again when a subfolder
+  is gone at its turn, and a folder that changes under every pass is
+  looked at again later. Six unit tests cover it.
+- The second review, under D19, covered only the fix and the CI gate:
+  two reviewers on the latest Gemini Neon model at `xhigh`, one sized
+  as small and one as normal. It found that the first version of the
+  fix was unsafe: it took the subfolder out of the listing and went
+  on, so a folder whose only subfolder got another name looked empty,
+  and on a provider that removes a folder with its content the
+  planner would have removed a file that it never compared. The
+  listing now decides nothing from such a pass. The review of the gate
+  gave five findings, all fixed: a path check that failed on Windows,
+  git variables that the test did not drop, a file of the Mac app
+  whose name changes only in its capitals, a name outside ASCII, and
+  Markdown inside the targets of the app.
+- The test of `scripts/scope.sh` makes git repositories of its own.
+  Its first version did not drop the variables that git sets for a
+  hook, and in the pre-commit hook its `git init` set `core.bare` in
+  the local repository. The setting was restored. The test now drops
+  every such variable and stops when git looks at another repository.
 - `scripts/tests/scope.sh` checks the mode of each of the nine jobs
   for each class of change, and the changed files of a pull request
   and of a push in real repositories. Tier 1 runs it.

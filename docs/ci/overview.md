@@ -46,8 +46,8 @@ reads the changed files and prints one mode for the job:
 | Changed files | Mode of each job |
 |---|---|
 | Any file of the core: `core/`, `tools/`, `scripts/`, `.github/`, the Cargo and toolchain files, and every path that the script does not name | `full` in all nine jobs |
-| The Mac app only: `apps/macos/`, `assets/`, `tools/vm/driver/` | `full` in the three macOS jobs; `docs` in `lint (ubuntu-latest)`; `skip` in the other five |
-| Documents only: Markdown anywhere, `docs/`, `.agents/`, `.claude/`, `LICENSE` | `docs` in `lint (ubuntu-latest)`; `skip` in the other eight |
+| The Mac app only: `apps/macos/`, `assets/`, `tools/vm/driver/`. Everything in the targets of the app counts, Markdown too: the build reads its resources. | `full` in the three macOS jobs; `docs` in `lint (ubuntu-latest)`; `skip` in the other five |
+| Documents only: Markdown outside those targets, `docs/`, `.agents/`, `.claude/`, `LICENSE` | `docs` in `lint (ubuntu-latest)`; `skip` in the other eight |
 
 - `full` runs every step. `docs` runs the text checks of lint
   (`./scripts/lint.sh docs`: the locale catalogs parse, and no tracked
@@ -62,9 +62,18 @@ reads the changed files and prints one mode for the job:
   the base. For a push to `main` they are what came after the commit
   before the push. The checkout fetches two commits deep for that.
 - Whenever the changed files are not known, the mode is `full`: a
-  release (`workflow_call` on a tag), a run by hand, a checkout that is
-  no merge. A wrong `full` costs minutes, and a wrong `skip` lets a
-  break through.
+  release (`workflow_call` on a tag), a checkout that is no merge, an
+  event that is neither a pull request nor a push to `main`. A wrong
+  `full` costs minutes, and a wrong `skip` lets a break through.
+- Two files of the Mac app are read by a test of the Rust workspace on
+  every system: `AccessibilityID.swift` and `assets/locales/en.json`
+  (`tools/vm/src/scenario.rs`). The macOS jobs run that test, so a
+  change of their content stays a change of the Mac app. A change of
+  their name, or of the name of a folder above them, runs everything:
+  macOS folds case and Linux does not, so only the Linux job sees that
+  the old name is gone.
+- A Markdown file that a build or a test starts to read is no longer
+  a document. Name it in `scripts/scope.sh` in the same change.
 - A new top-level path is `core` until `scripts/scope.sh` names it.
   `scripts/tests/scope.sh` holds the cases, and Tier 1 runs it.
 

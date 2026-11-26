@@ -11,8 +11,13 @@ SOURCE_SCRIPT="$ROOT_DIR/scripts/version.sh"
 # "re-init" the parent repo instead of the temp dir, which breaks every
 # fixture-based assertion. Drop them so child `git` invocations resolve
 # their repo from the cwd / -C path like a fresh shell would.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-  GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+# Git has the list of those variables; the names after it are for a
+# git that has none.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars 2>/dev/null || true) \
+  GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX GIT_CONFIG_PARAMETERS \
+  GIT_CONFIG_COUNT
 
 # Isolate config-driven git behavior too: a contributor's global
 # `commit.gpgsign = true` (without a usable key) or a `core.hooksPath`

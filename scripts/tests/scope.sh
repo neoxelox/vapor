@@ -8,9 +8,13 @@ SCOPE="$ROOT_DIR/scripts/scope.sh"
 # hook, git exports GIT_DIR, GIT_INDEX_FILE, and others for the
 # repository of the hook, and they win over `git -C`: every command
 # below would then act on that repository, and `git init` would mark
-# it as bare. Drop them, as `scripts/tests/version.sh` does.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-  GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+# it as bare. Drop every variable that ties git to a repository. Git
+# has the list; the names after it are for a git that has none.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars 2>/dev/null || true) \
+  GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX GIT_CONFIG_PARAMETERS \
+  GIT_CONFIG_COUNT
 
 # The settings of the contributor (a signing key, a hooks path) must
 # not decide whether a commit of a fixture works.
@@ -85,10 +89,24 @@ for core_file in \
     full full full
 done
 
-# Markdown is docs wherever it is; a locale catalog is not docs.
+# Markdown is docs, but not inside the targets of the app: the build
+# reads the resources there. A locale catalog is not docs.
 expect skip test macos "apps/macos/README.md"
+expect full build macos "apps/macos/Sources/VaporCore/Resources/NOTES.md"
+expect skip build linux "apps/macos/Sources/VaporCore/Resources/NOTES.md"
 expect full test macos "assets/locales/en.json"
 expect skip test linux "assets/locales/en.json"
+
+# The two files of the app that a test of the Rust workspace reads on
+# every system. A change of the content stays with the macOS jobs. A
+# file that came or went, which is what another spelling of the name
+# or of a folder above it is, runs everything: macOS folds case, and
+# only Linux sees the old name gone.
+tab=$'\t'
+expect skip test linux "M${tab}apps/macos/Sources/VaporCore/AccessibilityID.swift"
+expect full test linux "D${tab}apps/macos/Sources/VaporCore/AccessibilityID.swift"$'\n'"A${tab}apps/macos/Sources/VaporCore/AccessibilityId.swift"
+expect full test windows "D${tab}assets/locales/en.json"$'\n'"A${tab}assets/Locales/en.json"
+expect skip test linux "A${tab}apps/macos/Sources/VaporCore/NewView.swift"
 
 # No changed file is no knowledge: everything runs.
 expect full build windows ""
@@ -125,8 +143,12 @@ new_repo() {
   mkdir -p "$repo/scripts" "$repo/core" "$repo/docs"
   cp "$SCOPE" "$repo/scripts/scope.sh"
   git_in "$repo" init --quiet
-  # Never go on with a git that looks at another repository.
-  [[ "$(cd "$repo" && git rev-parse --absolute-git-dir)" == "$(cd "$repo" && pwd -P)/.git" ]] ||
+  # Never go on with a git that looks at another repository: from the
+  # fixture, the repository is `.git` right here, and the fixture is
+  # the top of the work tree. Both answers are relative, so they read
+  # the same on every system.
+  [[ "$(cd "$repo" && git rev-parse --git-dir)" == ".git" &&
+    -z "$(cd "$repo" && git rev-parse --show-cdup)" ]] ||
     fail "git does not use the fixture at $repo"
   echo "fn main() {}" >"$repo/core/main.rs"
   echo "# Guide" >"$repo/docs/guide.md"
@@ -172,6 +194,19 @@ git_in "$repo" checkout --quiet main
 git_in "$repo" merge --quiet --no-ff -m merge change
 got="$(scope_in "$repo" GITHUB_EVENT_NAME=pull_request)"
 [[ "$got" == "mode=full" ]] || fail "a file moved out of core: want mode=full, got $got"
+
+# A name with a letter outside ASCII keeps its class.
+repo="$(new_repo pull-request-accent)"
+git_in "$repo" checkout --quiet -b change
+# The name is written as bytes, so that it is the same on every system.
+accent_name="$(printf 'caf\303\251.md')"
+echo "Texto." >"$repo/docs/$accent_name"
+git_in "$repo" add -A
+git_in "$repo" commit --quiet -m "docs with an accent"
+git_in "$repo" checkout --quiet main
+git_in "$repo" merge --quiet --no-ff -m merge change
+got="$(scope_in "$repo" GITHUB_EVENT_NAME=pull_request)"
+[[ "$got" == "mode=skip" ]] || fail "a document with an accent in its name: want mode=skip, got $got"
 
 # A checkout that is not a merge says nothing about the change.
 repo="$(new_repo pull-request-no-merge)"
