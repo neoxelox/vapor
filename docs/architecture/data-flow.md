@@ -290,7 +290,10 @@ downloaded, when the remote changed since the last sync). A directory
 delete that still finds children waits while any of them has queued
 work, and keeps the directory once the children that remain exist
 locally again, which is what stops an expansion loop. An empty remote
-directory is removed outright. The reconcile walk takes the same route
+directory is removed outright. The listing of the subtree is not one
+call, and other deletes run while it does: a subfolder that is gone
+when its turn comes has left the subtree, and the listing goes on.
+Only a folder that is gone itself counts as removed. The reconcile walk takes the same route
 for a folder it finds gone from this device while the index holds rows
 under it: one `Delete` of the folder, not a walk into it, which would
 delete the files and leave every folder behind in the cloud.

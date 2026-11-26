@@ -54,22 +54,6 @@ are never reused.
       of one row (2026-11-24). What the runtime does after the failed
       lease was not checked. The rename waits stop after
       `MOVE_SETTLE_MAX_DEFERRALS`.
-- [ ] E-56 A folder that is removed on this device, and whose name
-      comes back as a file a few seconds later, can become a file
-      against folder question. The planner puts off the removal of the
-      top cloud folder while the entries under it leave, 2 s each
-      time. When the file appears in that time, the cloud still holds
-      the empty folder, and the reconcile opens a `type-mismatch`
-      decision. The empty folder is what is left of a deletion that
-      this device made, so no question is needed: remove it, then
-      upload the file. Seen one time in CI on macOS (2026-11-26).
-      Scenario S26 of Tier E2E timed out on "the cloud 'tree' entry to
-      become a file", on a commit that changed documents only, and the
-      commit before it passed with the same product code. The log of
-      the daemon shows the removal of the two inner cloud folders and
-      none of the top one before the intent of the file ran. Until
-      this is fixed, S26 can fail by timing, which `AGENTS.md` §9.6
-      calls a flaky test.
 ### Left open by the rename in one step (2026-11-25)
 
 A file or a folder that gets another name or place in the cloud is one

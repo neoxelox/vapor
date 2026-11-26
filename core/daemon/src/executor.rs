@@ -3678,7 +3678,8 @@ fn continue_plan_directory_delete(
         Some(Err(error)) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
             // The directory went between the stat and the listing (a
             // sibling delete or move emptied and removed it): the
-            // deletion converged.
+            // deletion converged. The listing says `NotFound` only for
+            // the directory itself, never for an entry below it.
             forget_deleted_path(state_db, &plan.local_path);
             return PlanOutcome::Noop("remote directory already absent; deletion converged");
         }

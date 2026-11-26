@@ -849,10 +849,36 @@ fn list_subtree(
     provider: &dyn vapor_providers::Provider,
     root: &RemotePath,
 ) -> Result<Vec<RemoteEntry>, ProviderError> {
+    list_subtree_with(root, |directory| provider.enumerate(directory))
+}
+
+/// The walk of [`list_subtree`] over any listing of one directory.
+///
+/// The listing is not one call: other work removes entries while it
+/// runs. A folder below `root` that is gone when its turn comes has
+/// left the subtree, so it is taken out of the result and the walk
+/// goes on. Only a `root` that is gone makes the listing `NotFound`:
+/// the caller reads that as "the folder itself is absent", and a
+/// folder that lost one subfolder is not absent.
+fn list_subtree_with(
+    root: &RemotePath,
+    mut enumerate: impl FnMut(&RemotePath) -> Result<Vec<RemoteEntry>, ProviderError>,
+) -> Result<Vec<RemoteEntry>, ProviderError> {
     let mut collected = Vec::new();
     let mut pending = std::collections::VecDeque::from([root.clone()]);
     while let Some(directory) = pending.pop_front() {
-        for entry in provider.enumerate(&directory)? {
+        let entries = match enumerate(&directory) {
+            Ok(entries) => entries,
+            Err(error)
+                if error.kind == vapor_shared::ProviderErrorKind::NotFound
+                    && directory != *root =>
+            {
+                collected.retain(|entry: &RemoteEntry| entry.path != directory);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
             if entry.kind == vapor_providers::RemoteEntryKind::Directory {
                 pending.push_back(entry.path.clone());
             }
@@ -1410,5 +1436,62 @@ mod tests {
         );
         let completed = pool.harvest();
         assert!(matches!(completed[0].outcome, ProviderJobOutcome::Probe(_)));
+    }
+
+    fn listed(path: &str, kind: vapor_providers::RemoteEntryKind) -> RemoteEntry {
+        RemoteEntry {
+            path: RemotePath::new(path).expect("remote path"),
+            kind,
+            size_bytes: 0,
+            modified_at: std::time::SystemTime::UNIX_EPOCH,
+            content_hash: None,
+            op_id: None,
+            id: None,
+        }
+    }
+
+    fn gone(path: &RemotePath) -> ProviderError {
+        ProviderError::new(
+            vapor_shared::ProviderErrorKind::NotFound,
+            format!("{} is gone", path.as_str()),
+        )
+    }
+
+    #[test]
+    fn a_subfolder_that_leaves_during_the_listing_is_not_the_folder_itself() {
+        use vapor_providers::RemoteEntryKind::{Directory, File};
+        let root = RemotePath::new("tree").expect("root");
+        // Another job removes `tree/deeper` between the listing of
+        // `tree` and the listing of `tree/deeper`.
+        let listing = list_subtree_with(&root, |directory| match directory.as_str() {
+            "tree" => Ok(vec![
+                listed("tree/deeper", Directory),
+                listed("tree/one.txt", File),
+            ]),
+            _ => Err(gone(directory)),
+        })
+        .expect("the folder is there, so its listing is");
+        let paths: Vec<&str> = listing.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(paths, vec!["tree/one.txt"]);
+    }
+
+    #[test]
+    fn a_folder_that_is_gone_itself_makes_the_listing_not_found() {
+        let root = RemotePath::new("tree").expect("root");
+        let error = list_subtree_with(&root, |directory| Err(gone(directory)))
+            .expect_err("the folder is gone");
+        assert_eq!(error.kind, vapor_shared::ProviderErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_failure_below_the_folder_that_is_not_an_absence_stops_the_listing() {
+        use vapor_providers::RemoteEntryKind::Directory;
+        let root = RemotePath::new("tree").expect("root");
+        let error = list_subtree_with(&root, |directory| match directory.as_str() {
+            "tree" => Ok(vec![listed("tree/deeper", Directory)]),
+            _ => Err(ProviderError::transient("the listing timed out")),
+        })
+        .expect_err("a listing that failed says nothing about the entries");
+        assert_ne!(error.kind, vapor_shared::ProviderErrorKind::NotFound);
     }
 }
