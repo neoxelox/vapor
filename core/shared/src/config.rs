@@ -73,9 +73,6 @@ pub struct VaporConfig {
     /// `resourceLimits` ceiling are clamped up at daemon budget-resolve
     /// time (same place as `resource_limits`), not at config load.
     pub idle_boost: IdleBoostConfig,
-    /// Safeguards group (mass-delete guard tuning). Clamped to floors at
-    /// daemon resolve time, not at config load.
-    pub safeguards: SafeguardsConfig,
     /// Trash group: where a file Vapor removes on this device goes.
     pub trash: TrashConfig,
 }
@@ -149,55 +146,6 @@ impl Default for ResourceLimitsConfig {
             memory_percent: default_memory_percent(),
             bandwidth_percent: default_bandwidth_percent(),
             concurrent_transfers: None,
-        }
-    }
-}
-
-/// The `safeguards` config group: one object per safeguard. Values are
-/// clamped to their floors at daemon resolve time
-/// (`core/daemon/src/safeguards.rs`), not at load, so non-daemon
-/// consumers see the raw values.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SafeguardsConfig {
-    #[serde(default)]
-    pub mass_delete: MassDeleteConfig,
-}
-
-/// `safeguards.massDelete`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MassDeleteConfig {
-    #[serde(default = "default_mass_delete_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_mass_delete_threshold")]
-    pub threshold: u64,
-    #[serde(default = "default_mass_delete_window_seconds")]
-    pub window_seconds: u64,
-    #[serde(default = "default_mass_delete_ratio_percent")]
-    pub ratio_percent: u8,
-}
-
-fn default_mass_delete_ratio_percent() -> u8 {
-    constants::safeguards::DEFAULT_MASS_DELETE_RATIO_PERCENT
-}
-fn default_mass_delete_enabled() -> bool {
-    constants::safeguards::DEFAULT_MASS_DELETE_ENABLED
-}
-fn default_mass_delete_threshold() -> u64 {
-    constants::safeguards::DEFAULT_MASS_DELETE_THRESHOLD as u64
-}
-fn default_mass_delete_window_seconds() -> u64 {
-    constants::safeguards::DEFAULT_MASS_DELETE_WINDOW_SECONDS
-}
-
-impl Default for MassDeleteConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_mass_delete_enabled(),
-            threshold: default_mass_delete_threshold(),
-            window_seconds: default_mass_delete_window_seconds(),
-            ratio_percent: default_mass_delete_ratio_percent(),
         }
     }
 }
@@ -358,7 +306,6 @@ impl Default for VaporConfig {
             profiles: Vec::new(),
             resource_limits: ResourceLimitsConfig::default(),
             idle_boost: IdleBoostConfig::default(),
-            safeguards: SafeguardsConfig::default(),
             trash: TrashConfig::default(),
         }
     }
@@ -475,17 +422,6 @@ pub fn unknown_nested_keys(key: &str, value: &serde_json::Value) -> Vec<String> 
             unknown_in(key, value, constants::idle_boost::ALL_KEYS, &mut unknown)
         }
         keys::KEY_TRASH => unknown_in(key, value, constants::trash::ALL_KEYS, &mut unknown),
-        keys::KEY_SAFEGUARDS => {
-            unknown_in(key, value, constants::safeguards::ALL_KEYS, &mut unknown);
-            if let Some(mass_delete) = value.get(constants::safeguards::KEY_MASS_DELETE) {
-                unknown_in(
-                    &format!("{key}.{}", constants::safeguards::KEY_MASS_DELETE),
-                    mass_delete,
-                    constants::safeguards::MASS_DELETE_KEYS,
-                    &mut unknown,
-                );
-            }
-        }
         keys::KEY_PROFILES => {
             for (index, profile) in value.as_array().into_iter().flatten().enumerate() {
                 let prefix = format!("{key}[{index}]");
@@ -532,7 +468,6 @@ impl VaporConfig {
             keys::KEY_PROFILES => self.profiles = other.profiles.clone(),
             keys::KEY_RESOURCE_LIMITS => self.resource_limits = other.resource_limits.clone(),
             keys::KEY_IDLE_BOOST => self.idle_boost = other.idle_boost.clone(),
-            keys::KEY_SAFEGUARDS => self.safeguards = other.safeguards.clone(),
             keys::KEY_TRASH => self.trash = other.trash.clone(),
             _ => {}
         }
@@ -621,7 +556,6 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
             v,
         ),
         idle_boost: field(map, keys::KEY_IDLE_BOOST, defaults.idle_boost, i, v),
-        safeguards: field(map, keys::KEY_SAFEGUARDS, defaults.safeguards, i, v),
         trash: field(map, keys::KEY_TRASH, defaults.trash, i, v),
     };
 
@@ -649,13 +583,12 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn safeguards_group_and_transfer_ceiling_parse_with_partial_values() {
+    fn trash_group_and_transfer_ceiling_parse_with_partial_values() {
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join("vapor.json");
         std::fs::write(
             &path,
             r#"{
-                "safeguards": { "massDelete": { "threshold": 1000 } },
                 "resourceLimits": { "concurrentTransfers": 2 },
                 "trash": { "retentionDays": 7 }
             }"#,
@@ -664,10 +597,8 @@ mod tests {
 
         let result = load_from(&path);
         assert!(result.load_issue.is_none(), "{:?}", result.load_issue);
-        assert_eq!(result.config.safeguards.mass_delete.threshold, 1_000);
-        // Unset group members keep their defaults.
-        assert!(result.config.safeguards.mass_delete.enabled);
         assert_eq!(result.config.trash.retention_days, 7);
+        // Unset group members keep their defaults.
         assert!(result.config.trash.enabled);
         assert!(!result.config.trash.use_system);
         assert_eq!(result.config.resource_limits.concurrent_transfers, Some(2));

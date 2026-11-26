@@ -169,6 +169,22 @@ pub struct RemoteEntry {
     /// The engine op-id tag if this object was written by Vapor and the
     /// provider supports tags.
     pub op_id: Option<String>,
+    /// The id that the backend has for this object, when it has ids: a
+    /// text that stays with the object when the object gets another
+    /// name or another place, and that no other object under the root
+    /// has. The engine stores it and never reads it. `None` on a
+    /// backend without ids, for every object.
+    pub id: Option<String>,
+}
+
+/// One id that the engine stored for a synced object, handed back to
+/// the provider at a start ([`Provider::restore_remote_ids`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteIdentity {
+    /// Where the object was when the engine last saw it.
+    pub path: RemotePath,
+    pub kind: RemoteEntryKind,
+    pub id: String,
 }
 
 /// A name in a remote directory that cannot be a sync path, so the
@@ -242,6 +258,9 @@ pub struct TransferOutcome {
     /// a remote edit that kept the byte count from an untouched
     /// object. `None` when the provider cannot say.
     pub remote_modified_at: Option<SystemTime>,
+    /// The id of the remote object that the transfer wrote or read
+    /// ([`RemoteEntry::id`]). `None` on a backend without ids.
+    pub remote_id: Option<String>,
 }
 
 /// A chunked upload or download in flight. Sessions hold whatever
@@ -278,18 +297,36 @@ pub trait TransferSession: Send {
     fn abort(&mut self);
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteChangeKind {
     CreatedOrModified,
     Removed,
-    /// A folder got another name or another place, and the feed says so
+    /// One object, a file or a folder, got another name or another
+    /// place. The `path` of the change is where it is now, and `from`
+    /// is where it was. For a folder this one entry stands for
+    /// everything in it. For a file the change also carries what a
+    /// `CreatedOrModified` carries, because a file can get a new name
+    /// and new content in one step.
+    ///
+    /// A backend sends it only when it knows both places, and only
+    /// when the object is the one that each of the two paths names.
+    /// The engine then renames the same object on the device. A backend
+    /// that cannot say where the object was sends `Removed` and
+    /// `CreatedOrModified` for a file, and `FolderMoved` for a folder.
+    Moved {
+        from: RemotePath,
+        entry_kind: RemoteEntryKind,
+    },
+    /// A folder got another name or another place, the feed says so
     /// with one entry for the folder and none for the files in it
-    /// (Google Drive). `path` is a path of the folder: the one it has
-    /// now, or the one it had. The engine walks the folder that holds
-    /// that path, and the walk finds what the change did. With the root
-    /// as its path it says that the place of something that changed
-    /// could not be read, and the engine walks everything. A feed that
-    /// reports each file under such a folder never sends this.
+    /// (Google Drive), and the backend does not know both places (it
+    /// would send [`Self::Moved`] then). `path` is a path of the
+    /// folder: the one it has now, or the one it had. The engine walks
+    /// the folder that holds that path, and the walk finds what the
+    /// change did. With the root as its path it says that the place of
+    /// something that changed could not be read, and the engine walks
+    /// everything. A feed that reports each file under such a folder
+    /// never sends this.
     FolderMoved,
 }
 
@@ -313,6 +350,9 @@ pub struct RemoteChange {
     /// The object's mtime as the feed reports it, the second half of
     /// that quick check.
     pub modified_at: Option<SystemTime>,
+    /// The id of the changed object ([`RemoteEntry::id`]). `None` on a
+    /// backend without ids.
+    pub id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,6 +373,22 @@ pub enum ChangesPoll {
     /// caller must schedule a whole-scope reconcile and re-baseline by
     /// polling with `cursor = None`.
     CursorExpired,
+}
+
+/// One entry of [`Provider::take_follow_up_changes`].
+///
+/// A follow-up is work that a provider still owes after a write, and
+/// that must not be lost when the daemon stops: Google Drive reads the
+/// versions of a file after a guarded overwrite of it landed. The
+/// record is text that only the provider reads. The engine stores it
+/// and hands it back at the next start. It holds no secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FollowUpChange {
+    /// The provider owes this work from now on.
+    Started(String),
+    /// The work of this record ended: it is done, or it can never be
+    /// done. The engine forgets the record.
+    Finished(String),
 }
 
 /// The provider trait every cloud backend implements.
@@ -464,6 +520,102 @@ pub trait Provider: Send + Sync {
         cursor: Option<&str>,
         max_changes: usize,
     ) -> Result<ChangesPoll, ProviderError>;
+
+    /// The follow-ups that started or ended since the last call, in
+    /// the order they happened. The engine calls this on its tick
+    /// thread and writes the answer to its state database, so the call
+    /// reads memory only: no request, no file, no lock that a request
+    /// is made under.
+    ///
+    /// The follow-up of a transfer is in this list before the step
+    /// that ends the transfer returns, whether the step succeeds or
+    /// fails. The engine then stores the record in the write that
+    /// stores the outcome of the transfer, and a stop of the daemon
+    /// between the two cannot lose it.
+    ///
+    /// The default is for a backend that owes nothing after a write.
+    fn take_follow_up_changes(&self) -> Vec<FollowUpChange> {
+        Vec::new()
+    }
+
+    /// Takes back the records that an earlier run of the daemon stored
+    /// and that no run reported as finished. Called one time for a
+    /// provider, before its first transfer, on the tick thread: it
+    /// reads memory only. The answer holds the records the provider
+    /// does not take (it cannot read them, or their work can no longer
+    /// be done), and the engine forgets those at once. A record that
+    /// the provider takes is reported as finished through
+    /// [`Self::take_follow_up_changes`] when its work ends.
+    ///
+    /// The work of a record can have run in part before the stop, so
+    /// the provider does it in a way that is safe to do twice.
+    ///
+    /// The default takes none, so a backend that owes nothing leaves
+    /// no record of another backend in the database.
+    fn resume_follow_ups(&self, records: Vec<String>) -> Vec<String> {
+        records
+    }
+
+    /// Tells the provider about a write of this device whose outcome
+    /// the engine never recorded. The object at `path` holds
+    /// `content_hash`, the content of the local file, and carries the
+    /// tag `op_id`, which this device gave out for this profile. The
+    /// sync index still records `base_hash` and another tag: the
+    /// upload landed in a daemon that stopped before it stored the
+    /// outcome. The engine moves no bytes for such a file and records
+    /// it as in sync.
+    ///
+    /// The follow-up of that write was never stored
+    /// ([`Self::take_follow_up_changes`]), and the upload that runs
+    /// again sends nothing. A backend that owes work after a write
+    /// takes this call as that write: an overwrite of `base_hash` with
+    /// `content_hash`, tagged `op_id`, whose outcome nobody recorded.
+    ///
+    /// The engine makes no call for content that another device or
+    /// another program put there, and none for a path whose index row
+    /// is missing or holds no hash: with no base, nothing can have
+    /// been replaced. A second call for one write starts no second
+    /// piece of work.
+    ///
+    /// The engine calls this on its tick thread, in the tick that
+    /// records the file as in sync. The call reads and writes memory
+    /// only: no request, no file. What needs a request waits for a
+    /// worker. A follow-up that the call starts is in the answer of
+    /// the next [`Self::take_follow_up_changes`], so the engine stores
+    /// it with the index row of that tick.
+    ///
+    /// Both hashes are in [`Self::content_hash_algorithm`].
+    ///
+    /// The default is for a backend that owes nothing after a write.
+    fn note_unrecorded_write(
+        &self,
+        path: &RemotePath,
+        base_hash: &str,
+        content_hash: &str,
+        op_id: &str,
+    ) {
+        let _ = (path, base_hash, content_hash, op_id);
+    }
+
+    /// Takes back the ids that the engine stored for the synced files
+    /// and folders ([`RemoteEntry::id`]), each with the path it had
+    /// when the engine last saw it. Called one time for a provider,
+    /// before its first transfer, on the tick thread: it reads memory
+    /// only.
+    ///
+    /// A backend whose feed names a changed object by its id needs
+    /// this to say which path the entry is about after a stop of the
+    /// daemon: the old path of an object that got another name, the
+    /// path of one that was removed. A path that comes back is what
+    /// the engine believed at its last write. The object can be
+    /// somewhere else by now, so the backend confirms it with a
+    /// request before it writes through it, as it does for a path it
+    /// cached itself.
+    ///
+    /// The default is for a backend without ids: it keeps nothing.
+    fn restore_remote_ids(&self, known: Vec<RemoteIdentity>) {
+        let _ = known;
+    }
 }
 
 pub use filesystem::FilesystemProvider;
@@ -582,6 +734,14 @@ impl Provider for SuspendedProvider {
     ) -> Result<ChangesPoll, ProviderError> {
         Self::refuse()
     }
+
+    /// The records stay where they are: this stand-in runs in place of
+    /// the provider that owes their work, on the state database of the
+    /// profile, and that provider takes them when the profile runs
+    /// again.
+    fn resume_follow_ups(&self, _records: Vec<String>) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Inert provider for engine composition tests: every mutation
@@ -684,6 +844,7 @@ impl TransferSession for NoopTransferSession {
             bytes_total: 0,
             content_hash: filesystem::hash_hex_of_bytes(b""),
             remote_modified_at: None,
+            remote_id: None,
         }))
     }
 

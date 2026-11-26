@@ -37,6 +37,26 @@ pub fn scenarios() -> Vec<Scenario> {
             run: cloud_folder_rename_leaves_no_empty_folder,
         },
         Scenario {
+            id: "S86",
+            name: "cloud-folder-rename-leftover-folder",
+            proves: "a folder that a rename in the cloud emptied of synced files is removed when everything left in it is a file that an OS wrote there by itself (.DS_Store, Thumbs.db), and those files are in the trash; a folder that holds anything else (an ignored build tree) stays as it is",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: cloud_folder_rename_leftover_folder,
+        },
+        Scenario {
+            id: "S87",
+            name: "both-sides-case-rename-keeps-this-device",
+            proves: "a synced file and a synced folder whose names both sides respelled in two ways while Vapor does not run end under the spelling of this device on both sides, with no conflict copy, no deletion, and nothing in the trash",
+            needs: &[
+                Need::NativeWatcher,
+                Need::Filesystem,
+                Need::CaseInsensitiveFs,
+            ],
+            expect: Expect::Pass,
+            run: both_sides_case_rename_keeps_this_device,
+        },
+        Scenario {
             id: "S48",
             name: "cloud-rename-is-a-move",
             proves: "renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash",
@@ -366,6 +386,18 @@ fn large_payload() -> Vec<u8> {
     (0..2_000_000u32).map(|i| (i % 249) as u8).collect()
 }
 
+/// Waits until the daemon holds no event for the file of a rename
+/// scenario. The names end in `.bin` and `.raw`, which debounce on the
+/// longest window (4 s), and the daemon reports a file of a sync
+/// folder it has just made a second time. That event must be through
+/// before the rename: an upload that is planned in the moment of a
+/// cloud rename finds the old name gone and removes the local file,
+/// and the rename is then a download.
+fn settle_past_the_longest_debounce(ctx: &Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    ctx.settle_home(&home, Duration::from_secs(6), CONVERGE_TIMEOUT)
+}
+
 fn local_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
     let home = ctx.primary.clone();
     start_primary(ctx)?;
@@ -374,7 +406,7 @@ fn local_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
     fs::write(&before, large_payload())?;
     ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
     ctx.wait_exists(&home.cloud.join("dataset-v1.bin"), CONVERGE_TIMEOUT)?;
-    ctx.settle(CONVERGE_TIMEOUT)?;
+    settle_past_the_longest_debounce(ctx)?;
     let cloud_inode = inode_of(&home.cloud.join("dataset-v1.bin"))?;
 
     let after = home.local.join("archive/dataset-final.bin");
@@ -439,6 +471,137 @@ fn cloud_folder_rename_leaves_no_empty_folder(ctx: &mut Ctx) -> Result<(), Failu
     Ok(())
 }
 
+fn cloud_folder_rename_leftover_folder(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("albums/first.txt"), "the first photo\n")?;
+    write_file(
+        &home.local.join("albums/second.txt"),
+        "the second photo, a longer one\n",
+    )?;
+    write_file(&home.local.join("projects/app/main.txt"), "the source\n")?;
+    ctx.converge_from(&mark, 3, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("albums/second.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("projects/app/main.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // While Vapor does not run: the file managers of two systems write
+    // their view settings into one folder, the other folder gets a
+    // build tree that an ignore rule hides, and another device gives
+    // both folders another name. The scan of the next start moves the
+    // synced files, and each old folder is left behind.
+    ctx.stop_daemon(first)?;
+    write_file(&home.local.join("albums/.DS_Store"), "a view\n")?;
+    write_file(&home.local.join("albums/Thumbs.db"), "thumbnails\n")?;
+    write_file(&home.local.join("projects/app/.DS_Store"), "a view\n")?;
+    write_file(
+        &home.local.join("projects/app/node_modules/pkg/index.js"),
+        "a dependency\n",
+    )?;
+    fs::rename(home.cloud.join("albums"), home.cloud.join("archive"))?;
+    fs::rename(
+        home.cloud.join("projects/app"),
+        home.cloud.join("projects/tool"),
+    )?;
+    ctx.start_daemon()?;
+    ctx.wait_exists(
+        &home.local.join("archive/second.txt"),
+        Duration::from_secs(90),
+    )?;
+    ctx.wait_exists(
+        &home.local.join("projects/tool/main.txt"),
+        Duration::from_secs(90),
+    )?;
+    // Nothing of the user is left in `albums`: the folder goes.
+    ctx.wait_absent(&home.local.join("albums"), Duration::from_secs(90))?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    let trash = ctx.cli().json(&["trash", "list", "--json"])?;
+    let mut trashed: Vec<String> = trash["entries"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry["originalPath"].as_str())
+                .filter_map(|path| path.rsplit(['/', '\\']).next())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    trashed.sort();
+    ensure!(
+        trashed == [".DS_Store", "Thumbs.db"],
+        "the two files of the OS are in the trash, and no synced file is: {trash}"
+    );
+    // The build tree is the user's: its folder stays, with everything
+    // that was left in it.
+    ensure!(
+        read_string(&home.local.join("projects/app/node_modules/pkg/index.js"))?
+            == "a dependency\n",
+        "the ignored build tree was touched"
+    );
+    ensure!(
+        read_string(&home.local.join("projects/app/.DS_Store"))? == "a view\n",
+        "a folder that holds anything else must stay as it is"
+    );
+    ensure!(
+        !home.local.join("projects/app/main.txt").exists(),
+        "the synced file moved to the new folder name"
+    );
+    let decisions = ctx.cli().json(&["decisions", "list", "--json"])?;
+    ensure!(
+        decisions["decisions"].as_array().is_some_and(Vec::is_empty),
+        "a leftover folder must not ask a question: {decisions}"
+    );
+    Ok(())
+}
+
+fn both_sides_case_rename_keeps_this_device(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("draft.txt"), "chapter one\n")?;
+    write_file(&home.local.join("photos/a.txt"), "the first photo\n")?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("photos/a.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // Each side gives the file and the folder another spelling before
+    // either syncs. No time decides: in two-way the spelling of this
+    // device has priority.
+    ctx.stop_daemon(first)?;
+    fs::rename(home.local.join("draft.txt"), home.local.join("DRAFT.txt"))?;
+    fs::rename(home.local.join("photos"), home.local.join("PHOTOS"))?;
+    fs::rename(home.cloud.join("draft.txt"), home.cloud.join("Draft.txt"))?;
+    fs::rename(home.cloud.join("photos"), home.cloud.join("Photos"))?;
+    ctx.start_daemon()?;
+    let cloud = home.cloud.clone();
+    ctx.wait_until(
+        Duration::from_secs(90),
+        "the cloud folder spells the names as this device does",
+        || stored_names(&cloud) == ["DRAFT.txt", "PHOTOS"],
+    )?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    ensure!(
+        stored_names(&home.local) == ["DRAFT.txt", "PHOTOS"],
+        "this device must keep its spelling: {:?}",
+        stored_names(&home.local)
+    );
+    ensure!(
+        stored_names(&home.cloud) == ["DRAFT.txt", "PHOTOS"],
+        "the cloud must take the spelling of this device: {:?}",
+        stored_names(&home.cloud)
+    );
+    ensure!(
+        read_string(&home.cloud.join("DRAFT.txt"))? == "chapter one\n"
+            && read_string(&home.cloud.join("PHOTOS/a.txt"))? == "the first photo\n",
+        "payload intact"
+    );
+    ensure_nothing_but_a_rename(ctx)
+}
+
 fn cloud_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
     let home = ctx.primary.clone();
     start_primary(ctx)?;
@@ -447,7 +610,7 @@ fn cloud_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
     fs::write(&local, large_payload())?;
     ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
     ctx.wait_exists(&home.cloud.join("footage.raw"), CONVERGE_TIMEOUT)?;
-    ctx.settle(CONVERGE_TIMEOUT)?;
+    settle_past_the_longest_debounce(ctx)?;
     let local_inode = inode_of(&local)?;
 
     let cloud_after = home.cloud.join("2026/footage-renamed.raw");

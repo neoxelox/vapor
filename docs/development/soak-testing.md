@@ -103,13 +103,7 @@ with few operations in a phase (`large`) gets a higher chance, so that
 about one such fault fires in a churn phase. Extra operations a
 fault performs stay on the phase's side and path subset, so the
 one-writer rule holds through a fault. After a crash the driver
-restarts the daemon itself (the driver starts its own daemon, with no service and so no supervisor); the
-mass-delete guard holding a subtree removal is answered with `vapor
-decisions resolve <id> --choose apply` and recorded as a `guard-trip`,
-since that is the product working as designed. The guard can trip
-while the driver waits for a quiet queue; a held removal is not in the
-queue, so the driver looks for held work before it calls a queue
-quiet. While the driver has
+restarts the daemon itself (the driver starts its own daemon, with no service and so no supervisor). While the driver has
 the cloud root parked, the daemon holds the profile with a
 `root-missing` question; the driver expects that state, leaves the
 question alone, and after restoring the root waits for the daemon to

@@ -123,9 +123,13 @@ pub struct ReconcileWalker {
     /// local file (`(wanted local path, existing local path)`); left
     /// untouched on both sides and surfaced on the timeline.
     name_collisions: Vec<(PathBuf, PathBuf)>,
-    /// Local entries this walk renamed to the cloud's spelling of
-    /// their name, as (old path, new path).
-    respelled: Vec<(PathBuf, PathBuf)>,
+    /// Local entries this walk renamed, as (old path, new path): the
+    /// cloud gave the entry another name or place, or another spelling
+    /// of its name.
+    renamed: Vec<(PathBuf, PathBuf)>,
+    /// The store of the op-id tags on this device. A tag that is a
+    /// file next to its file has to follow a renamed file.
+    tags: Option<vapor_providers::tags::OpIdTagStore>,
     /// Folders this walk skipped because it could not read them. A
     /// folder that was not compared is not converged; the runtime
     /// walks each again later.
@@ -171,7 +175,8 @@ impl ReconcileWalker {
             type_mismatches: Vec::new(),
             unsyncable_names: Vec::new(),
             name_collisions: Vec::new(),
-            respelled: Vec::new(),
+            renamed: Vec::new(),
+            tags: None,
             unreadable_dirs: Vec::new(),
             dirs_waiting_for_rules: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
@@ -188,6 +193,11 @@ impl ReconcileWalker {
 
     pub fn with_device_id(mut self, device_id: &str) -> Self {
         self.device_id = device_id.to_string();
+        self
+    }
+
+    pub fn with_tags(mut self, tags: vapor_providers::tags::OpIdTagStore) -> Self {
+        self.tags = Some(tags);
         self
     }
 
@@ -290,8 +300,10 @@ impl ReconcileWalker {
         std::mem::take(&mut self.name_collisions)
     }
 
-    pub fn take_respelled(&mut self) -> Vec<(PathBuf, PathBuf)> {
-        std::mem::take(&mut self.respelled)
+    /// The renames this walk made on this device since the last call,
+    /// as (old path, new path).
+    pub fn take_renamed(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.renamed)
     }
 
     pub fn take_unreadable_dirs(&mut self) -> Vec<(PathBuf, std::io::ErrorKind)> {
@@ -364,12 +376,24 @@ impl ReconcileWalker {
     /// files that collide, and never a deletion.
     ///
     /// The sync index says which side made the change: its rows carry
-    /// the spelling that was last synced. Rows under the cloud's
-    /// spelling and none under the local one mean this device renamed
-    /// the entry, and the cloud follows through the upload route's
-    /// move detection. In every other case the cloud's spelling stays
-    /// and the local entry is renamed to it here: the cloud renamed
-    /// it, both sides did, or the pair was never synced.
+    /// the spelling that was last synced. No time is compared.
+    ///
+    /// - Rows under the cloud's spelling and none under the local one:
+    ///   this device renamed the entry, and the cloud follows as one
+    ///   move of the cloud object.
+    /// - Rows under the local spelling: the cloud renamed the entry,
+    ///   and the local entry is renamed to the cloud's spelling here.
+    /// - Rows under a third spelling: both sides renamed it. In
+    ///   `two-way` the spelling of this device stays and goes to the
+    ///   cloud. The rows move to the cloud's spelling first, because
+    ///   that is where the cloud object is, and the case is then the
+    ///   first one.
+    /// - No row at all: the pair never synced, so no side changed the
+    ///   name. The cloud's spelling stays. The same holds for the
+    ///   merge after an answer about a root.
+    ///
+    /// A one-way mode has one side that decides: `push-only` keeps the
+    /// spelling of this device, `pull-only` the cloud's.
     ///
     /// Two cloud entries that fold together are left to the collision
     /// path, and so is a pair of different kinds.
@@ -436,10 +460,25 @@ impl ReconcileWalker {
             let this_device_renamed = match sync_mode {
                 SyncMode::PushOnly => true,
                 SyncMode::PullOnly => false,
+                SyncMode::TwoWay if self.merge_without_deletions => false,
+                SyncMode::TwoWay if synced_as_local_spells => false,
+                SyncMode::TwoWay if synced_as_cloud_spells => true,
                 SyncMode::TwoWay => {
-                    synced_as_cloud_spells
-                        && !synced_as_local_spells
-                        && !self.merge_without_deletions
+                    match synced_under_a_third_spelling(state_db, directory, &local_path)? {
+                        Some(third) => {
+                            // Both sides renamed the entry. The cloud
+                            // object is under the cloud's spelling
+                            // now, so the rows are too; the spelling
+                            // of this device then goes to the cloud.
+                            if is_dir {
+                                state_db.rekey_sync_index_under(&third, &cloud_spelled)?;
+                            } else {
+                                state_db.rekey_sync_index(&third, &cloud_spelled)?;
+                            }
+                            true
+                        }
+                        None => false,
+                    }
                 }
             };
             if this_device_renamed {
@@ -489,7 +528,166 @@ impl ReconcileWalker {
                 local.path = cloud_spelled.clone();
                 pairs.entry(remote_name.clone()).or_default().local = Some(local);
             }
-            self.respelled.push((local_path, cloud_spelled));
+            self.renamed.push((local_path, cloud_spelled));
+        }
+        Ok(())
+    }
+
+    /// A name of this device that still has to go to the cloud as one
+    /// move is between two places: the cloud object is under the name
+    /// the cloud gave it, the entry of this device is under its own
+    /// name, and the index rows are under a third path. None of the
+    /// three is compared until the move is made: compared now, the two
+    /// names would read as two entries, and the rows as rows of a name
+    /// that left both sides. The comparison of the folder follows the
+    /// move.
+    ///
+    /// The intent that makes the move is queued again here. It is in
+    /// the queue already, unless something dropped it.
+    fn leave_out_what_is_owed_a_move(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        directory: &Path,
+        pairs: &mut BTreeMap<String, EntryPair>,
+        listed: &mut std::collections::BTreeSet<String>,
+        now: SystemTime,
+    ) -> Result<(), WalkError> {
+        for carry in state_db.name_carries()? {
+            let mut here = false;
+            for path in [&carry.new, &carry.cloud_at, &carry.rows_at] {
+                if path.parent() == Some(directory)
+                    && let Some(name) = path.file_name().and_then(|name| name.to_str())
+                {
+                    here = true;
+                    pairs.remove(name);
+                    listed.insert(name.to_string());
+                }
+            }
+            if here {
+                state_db.enqueue_intents_coalesced(
+                    &[(carry.new, PendingIntentKind::Rename, now)],
+                    crate::safeguards::IntentSource::ReconcileBacklog,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Records the id of each entry that both sides hold, and settles
+    /// the entries that got another name or place in the cloud while no
+    /// changes feed said so.
+    ///
+    /// A cloud-only entry whose id the index holds under another path
+    /// is that synced file or folder under a new name. It is renamed on
+    /// this device in one step, or the cloud is owed a move to the name
+    /// on this device, by the sync mode
+    /// ([`crate::remote_move::DeviceRenames::settle`]). An entry that
+    /// is not paired stays as it is, and the rest of the comparison
+    /// works on it file by file.
+    fn settle_moves(
+        &mut self,
+        sync_mode: SyncMode,
+        state_db: &mut DurableStateDb,
+        directory: &Path,
+        pairs: &mut BTreeMap<String, EntryPair>,
+        now: SystemTime,
+    ) -> Result<(), WalkError> {
+        let mut moved = Vec::new();
+        for (name, pair) in pairs.iter() {
+            let Some(remote) = pair.remote.as_ref() else {
+                continue;
+            };
+            let Some(id) = remote.id.as_deref() else {
+                continue;
+            };
+            let here = directory.join(name);
+            let is_folder = remote.kind == RemoteEntryKind::Directory;
+            match &pair.local {
+                // On both sides under one name: the id is the id of
+                // this synced entry from now on.
+                Some(local) if local.is_dir == is_folder => {
+                    if is_folder {
+                        state_db.record_synced_folder(&here, id, now)?;
+                    } else {
+                        state_db.set_sync_index_remote_id(&here, id)?;
+                    }
+                }
+                Some(_) => {}
+                None if self.merge_without_deletions => {}
+                None => {
+                    if let Some((known_at, known_as_folder)) = state_db.path_of_remote_id(id)?
+                        && known_at != here
+                        && known_as_folder == is_folder
+                        && known_at.starts_with(&self.scope_root)
+                        && !self.ignores(&known_at, is_folder)
+                    {
+                        moved.push((name.clone(), known_at, is_folder));
+                    }
+                }
+            }
+        }
+        for (name, known_at, is_folder) in moved {
+            let here = directory.join(&name);
+            let mut renamed = Vec::new();
+            let settled = crate::remote_move::DeviceRenames {
+                state_db: &mut *state_db,
+                renamed: &mut renamed,
+                tags: self.tags.as_ref(),
+                local_root: &self.scope_root,
+                sync_mode,
+                now,
+            }
+            .settle(&known_at, &here, is_folder)?;
+            // An entry of this folder that was renamed away is no entry
+            // of the comparison any more.
+            let leaves_the_comparison = |pairs: &mut BTreeMap<String, EntryPair>, path: &Path| {
+                if path.parent() == Some(directory)
+                    && let Some(old_name) = path.file_name().and_then(|name| name.to_str())
+                    && old_name != name
+                {
+                    pairs.remove(old_name);
+                }
+            };
+            match settled {
+                crate::remote_move::CloudMove::RenamedOnDevice
+                | crate::remote_move::CloudMove::AlreadyThere => {
+                    for (old_path, _) in &renamed {
+                        leaves_the_comparison(pairs, old_path);
+                    }
+                    leaves_the_comparison(pairs, &known_at);
+                    // The entry is on both sides under this name now.
+                    if let Ok(metadata) = fs::symlink_metadata(&here)
+                        && let Some(pair) = pairs.get_mut(&name)
+                    {
+                        pair.local = Some(LocalEntry {
+                            path: here.clone(),
+                            is_dir: metadata.is_dir(),
+                            size_bytes: metadata.len(),
+                            modified_at: metadata.modified().ok(),
+                        });
+                    }
+                }
+                crate::remote_move::CloudMove::OwedToCloud(device_path) => {
+                    // The cloud entry goes to the name on this device.
+                    // Neither of the two is compared until it is there.
+                    pairs.remove(&name);
+                    leaves_the_comparison(pairs, &device_path);
+                    if sync_mode == SyncMode::PushOnly {
+                        self.stats.mirror_reverts += 1;
+                    }
+                }
+                crate::remote_move::CloudMove::FileByFile(reason) => {
+                    crate::logging::info(
+                        "A move in the cloud is not applied as one rename on this device; working file by file",
+                        &[
+                            ("from", known_at.display().to_string()),
+                            ("to", here.display().to_string()),
+                            ("reason", reason),
+                        ],
+                    );
+                }
+            }
+            self.renamed.append(&mut renamed);
         }
         Ok(())
     }
@@ -527,7 +725,11 @@ impl ReconcileWalker {
             }
         }
         let mut removed = 0usize;
-        for name in state_db.sync_index_names_in(directory)? {
+        // A synced folder with no synced file under it has only its
+        // folder row.
+        let mut names = state_db.sync_index_names_in(directory)?;
+        names.extend(state_db.synced_folder_names_in(directory)?);
+        for name in names {
             if hidden.contains(&name) {
                 state_db.mark_sync_index_hidden(&directory.join(&name), listed_at)?;
                 continue;
@@ -872,7 +1074,9 @@ impl ReconcileWalker {
         }
 
         let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
-        let listed: std::collections::BTreeSet<String> = pairs.keys().cloned().collect();
+        let mut listed: std::collections::BTreeSet<String> = pairs.keys().cloned().collect();
+        self.leave_out_what_is_owed_a_move(state_db, directory, &mut pairs, &mut listed, now)?;
+        self.settle_moves(sync_mode, state_db, directory, &mut pairs, now)?;
         self.settle_spellings(sync_mode, state_db, directory, &mut pairs, &mut batch, now)?;
         self.forget_names_that_left_both_sides(
             state_db, directory, &listed, &hidden, &pairs, listed_at,
@@ -1073,8 +1277,8 @@ impl ReconcileWalker {
                             // longer has while the local copy is exactly
                             // what was last synced (the cloud side
                             // deleted it while no daemon was running).
-                            // The executor's own guard and the
-                            // mass-delete guard still get their say.
+                            // The executor's own guard still gets its
+                            // say.
                             batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
                         } else {
                             batch.push((local_path, PendingIntentKind::Upload, now));
@@ -1191,6 +1395,26 @@ impl ReconcileWalker {
         }
         Ok(())
     }
+}
+
+/// The path under which the sync index holds the entry at `local_path`
+/// when that is a third spelling of its name: neither the spelling of
+/// this device nor the cloud's. `None` when the index holds nothing
+/// for any spelling of the name in `directory`.
+fn synced_under_a_third_spelling(
+    state_db: &DurableStateDb,
+    directory: &Path,
+    local_path: &Path,
+) -> Result<Option<PathBuf>, WalkError> {
+    let Some(other) = state_db.sync_index_row_spelled_otherwise(local_path)? else {
+        return Ok(None);
+    };
+    // The row is the entry's own, or the row of a file under it.
+    let third: PathBuf = other
+        .components()
+        .take(local_path.components().count())
+        .collect();
+    Ok((third != local_path && third.parent() == Some(directory)).then_some(third))
 }
 
 /// Equal sizes are not enough: a local edit that kept the byte count
@@ -2115,7 +2339,232 @@ mod tests {
             modified_at: ts(0),
             content_hash: None,
             op_id: None,
+            id: None,
         }
+    }
+
+    /// An entry of a cloud that has ids, as a listing gives it.
+    fn remote_entry_with_id(name: &str, kind: RemoteEntryKind, size: u64, id: &str) -> RemoteEntry {
+        RemoteEntry {
+            kind,
+            id: Some(id.to_string()),
+            ..remote_file(name, size)
+        }
+    }
+
+    /// Walks the root against `entries`, with the tick loop's budget.
+    fn walk_listing(
+        fixture: &mut Fixture,
+        entries: Vec<RemoteEntry>,
+        mode: SyncMode,
+    ) -> ReconcileWalker {
+        let provider: Arc<dyn Provider> = Arc::new(ListingProvider { entries });
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None);
+        for _ in 0..64 {
+            if walker
+                .process(
+                    provider.clone(),
+                    &ProviderCallMode::Inline,
+                    mode,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step")
+            {
+                break;
+            }
+        }
+        walker
+    }
+
+    /// A local file with its index row, as a sync left it: the row
+    /// holds what the cloud object looks like in these listings.
+    fn seed_synced(fixture: &mut Fixture, name: &str, body: &[u8], id: Option<&str>) -> PathBuf {
+        let path = fixture.local_root.join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("folders");
+        std::fs::write(&path, body).expect("seed");
+        let modified = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        fixture
+            .state_db
+            .set_sync_index(
+                &path,
+                "hash",
+                body.len() as u64,
+                modified,
+                Some(ts(0)),
+                "op",
+                ts(0) - std::time::Duration::from_secs(60),
+            )
+            .expect("index");
+        if let Some(id) = id {
+            fixture
+                .state_db
+                .set_sync_index_remote_id(&path, id)
+                .expect("the id of the row");
+        }
+        path
+    }
+
+    #[test]
+    fn the_walk_records_the_id_of_each_entry_that_both_sides_hold() {
+        let mut fixture = Fixture::new();
+        let file = seed_synced(&mut fixture, "report.txt", b"12345", None);
+        let folder = fixture.local_root.join("Photos");
+        std::fs::create_dir(&folder).expect("folder");
+
+        walk_listing(
+            &mut fixture,
+            vec![
+                remote_entry_with_id("report.txt", RemoteEntryKind::File, 5, "id-report"),
+                remote_entry_with_id("Photos", RemoteEntryKind::Directory, 0, "id-photos"),
+                // An entry that is in the cloud only is no synced
+                // entry yet: its id waits for the transfer.
+                remote_entry_with_id("new.txt", RemoteEntryKind::File, 3, "id-new"),
+            ],
+            SyncMode::TwoWay,
+        );
+
+        assert_eq!(
+            fixture
+                .state_db
+                .sync_index(&file)
+                .expect("read")
+                .expect("row")
+                .remote_id
+                .as_deref(),
+            Some("id-report")
+        );
+        assert_eq!(
+            fixture
+                .state_db
+                .synced_folder_id(&folder)
+                .expect("read")
+                .as_deref(),
+            Some("id-photos")
+        );
+        assert_eq!(
+            fixture.state_db.path_of_remote_id("id-new").expect("read"),
+            None
+        );
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(
+                fixture.local_root.join("new.txt"),
+                PendingIntentKind::Download
+            )]
+        );
+    }
+
+    #[test]
+    fn the_walk_renames_an_entry_whose_id_the_index_holds_under_another_path() {
+        let mut fixture = Fixture::new();
+        let old_file = seed_synced(&mut fixture, "report.txt", b"12345", Some("id-report"));
+        seed_synced(&mut fixture, "Photos/a.jpg", b"123", Some("id-a"));
+        let root = fixture.local_root.clone();
+        fixture
+            .state_db
+            .record_synced_folder(&root.join("Photos"), "id-photos", ts(0))
+            .expect("folder row");
+        // A file that an ignore rule would hide travels with its folder.
+        std::fs::write(root.join("Photos/.DS_Store"), b"a view").expect("ignored file");
+
+        // The cloud holds the same two objects under other names. No
+        // feed said so: the listing shows it.
+        let mut walker = walk_listing(
+            &mut fixture,
+            vec![
+                remote_entry_with_id("final.txt", RemoteEntryKind::File, 5, "id-report"),
+                remote_entry_with_id("Pictures", RemoteEntryKind::Directory, 0, "id-photos"),
+            ],
+            SyncMode::TwoWay,
+        );
+
+        assert!(!old_file.exists() && !root.join("Photos").exists());
+        assert_eq!(
+            std::fs::read(root.join("final.txt")).expect("renamed"),
+            b"12345"
+        );
+        assert!(root.join("Pictures/.DS_Store").exists());
+        let mut renamed = walker.take_renamed();
+        renamed.sort();
+        assert_eq!(
+            renamed,
+            vec![
+                (root.join("Photos"), root.join("Pictures")),
+                (root.join("report.txt"), root.join("final.txt")),
+            ]
+        );
+        assert!(
+            fixture
+                .state_db
+                .sync_index(&root.join("Pictures/a.jpg"))
+                .expect("read")
+                .is_some()
+        );
+        // The file is as its row says: nothing to send or to fetch.
+        // The listing of this test has nothing under `Pictures`, so
+        // that folder is not judged here.
+        assert!(
+            !fixture
+                .queued_kinds()
+                .iter()
+                .any(|(path, _)| path == &root.join("final.txt") || path == &old_file),
+            "the renamed file is compared as a synced pair"
+        );
+    }
+
+    #[test]
+    fn the_walk_leaves_out_the_names_that_are_owed_a_move_in_the_cloud() {
+        let mut fixture = Fixture::new();
+        let root = fixture.local_root.clone();
+        // Both sides renamed `Photos`: this device to `Pics`, the cloud
+        // to `Pictures`. The index rows are still under `Photos`, and
+        // the move of the cloud object to `Pics` is owed.
+        seed_synced(&mut fixture, "Photos/a.jpg", b"123", Some("id-a"));
+        std::fs::rename(root.join("Photos"), root.join("Pics")).expect("local rename");
+        fixture
+            .state_db
+            .record_name_carry(
+                &crate::state_db::NameCarry {
+                    new: root.join("Pics"),
+                    rows_at: root.join("Photos"),
+                    cloud_at: root.join("Pictures"),
+                },
+                ts(0),
+            )
+            .expect("carry");
+
+        walk_listing(
+            &mut fixture,
+            vec![remote_entry_with_id(
+                "Pictures",
+                RemoteEntryKind::Directory,
+                0,
+                "id-photos",
+            )],
+            SyncMode::TwoWay,
+        );
+
+        // Compared now, `Pics` would upload as a new folder, `Pictures`
+        // would download as another one, and the rows of `Photos`
+        // would be forgotten as rows of a name that left both sides.
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(root.join("Pics"), PendingIntentKind::Rename)],
+            "only the intent that makes the move is queued"
+        );
+        assert!(
+            fixture
+                .state_db
+                .sync_index(&root.join("Photos/a.jpg"))
+                .expect("read")
+                .is_some(),
+            "the rows wait for the move"
+        );
     }
 
     #[test]

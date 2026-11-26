@@ -63,7 +63,7 @@ again and that would otherwise dominate the sync:
   like;
 - build output: `dist/`, `build/`, `out/`, `target/`, `_build/`;
 - tool caches: `__pycache__/`, `.gradle/`, `.terraform/`, `.cache/`;
-- OS and editor junk: `.DS_Store`, `Thumbs.db`, swap, temporary and
+- OS and editor junk: `.DS_Store`, `Thumbs.db`, `desktop.ini`, `.directory`, swap, temporary and
   partial files, logs;
 - what an OS keeps at the root of a volume: `.fseventsd/`,
   `.Spotlight-V100/`, `System Volume Information/`.
@@ -104,6 +104,25 @@ The full list is `DEFAULT_PRE_IGNORE_RULES` in
 - Files that are written in the same seconds as a new ignore file next
   to them can be picked up before its rules load. This is open work
   (`docs/tasks/core.md`).
+
+## When a folder leaves the cloud and ignored files stay
+
+An ignored file never goes to the cloud, so it can be the last thing
+in a folder that the cloud no longer has: the folder was removed
+there, or it got another name and Vapor moved its files one by one.
+
+- A folder that holds only `.DS_Store`, `Thumbs.db`, `desktop.ini`, or
+  `.directory` is removed. These are the files that Finder, Windows
+  Explorer, and KDE write into a folder by themselves. They go to the
+  trash, so `vapor trash restore` brings one back.
+- A folder that holds anything else stays as it is, with every file in
+  it: an ignored `node_modules/`, a log, a file that has not synced
+  yet. Vapor does not judge what an ignored file is worth.
+- The four names count whatever your own rules say.
+
+With Google Drive this is rare. A folder that gets another name there
+is renamed on this device in one step, with everything in it, so no
+folder is left behind.
 
 ## See what the rules hold back
 

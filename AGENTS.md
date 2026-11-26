@@ -157,7 +157,8 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Handle local/remote races deterministically.
 - Default conflict policy: keep both (never silent overwrite).
 - A deletion propagates on the evidence of the sync index only: the index has a row for the path, and the surviving copy is exactly what that row last saw. With no row, or a changed survivor, keeping data wins over honouring a deletion, and Vapor never deletes a cloud object that it did not compare. A modification time never decides that a deletion wins (owner, 2026-11-14).
-- On a volume that folds case, a change in only the spelling of a name is a rename, carried to the other side as a move. When both sides changed the spelling, the cloud's spelling stays (owner, 2026-11-14).
+- On a volume that folds case, a change in only the spelling of a name is a rename, carried to the other side as a move (owner, 2026-11-14). When both sides changed the spelling, the priority rule for names decides: in `two-way` the spelling of this device stays (owner, 2026-11-25).
+- A file or a folder that gets another name or another place in the cloud becomes one rename of the same entry on this device, where the provider has an id for it. Where it cannot be paired, or the new name is taken on this device, the device works file by file, and nothing is ever replaced. When both sides gave one entry another name or place before either synced, no time is compared: in `two-way` the name and the place on this device stay and go to the cloud, in `pull-only` the cloud's stay, and in `push-only` this device's stay. The rule covers names and places only: content keeps both versions, a deletion follows the sync index, and a file against a folder asks (owner, 2026-11-25).
 - A file Vapor removes on this device goes to the trash (`core/daemon/src/trash.rs`, the `TrashBin` platform trait), never straight to an unlink, unless the user turned the trash off.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
 - Equality checks in the reconcile walk are the rsync quick check on both sides (size plus the local mtime and the remote mtime the sync index recorded), never a whole-tree hash; a pair the index has no row for is verified once, not assumed converged; the upload planner hashes and converges identical content silently, and a change on one side only while the other side still equals the last synced hash is a transfer in that direction, never a conflict copy.
@@ -786,10 +787,17 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
 - The filesystem provider is the default. Google Drive is an opt-in
   mode (`--provider gdrive`) that needs real credentials for a
   dedicated test account: never part of the default run, never in CI,
-  never run implicitly by an agent, never against the project owner's
-  account. It runs once per release, by hand, as a leg of
+  never against the project owner's account. It runs as a leg of
   `./scripts/release.sh`, which runs the suite for every provider
   the harness knows before a version bump.
+- The dedicated test account is there to be used. An agent runs
+  whatever a Drive check needs in it (the e2e leg, a Tier VM guest
+  with the Internet, files made, moved, and removed in that account)
+  with no question to the owner, and a change to the Google Drive
+  provider, or to how the engine uses a provider's listing or feed, is
+  checked with the account before it is reported as done (owner,
+  2026-11-25). The sign-in of the account reaches a command on its
+  stdin and never an argument, a file of the tree, or a log.
 
 ### 9.9) Virtual machine verification (Tier VM)
 
@@ -815,7 +823,8 @@ invariants:
   has a route to the Internet only when it is started to test a real
   cloud provider (`./scripts/vm.sh --guest --internet`); a run of the
   suite never has one (owner, 2026-11-22). Such a test uses the
-  dedicated test account of §9.8, never the owner's own. The harness changes only
+  dedicated test account of §9.8, never the owner's own, and an agent
+  starts it without asking (owner, 2026-11-25). The harness changes only
   VMs named `vapor-vm-*`, and a checkout only its own.
 - A run deletes every guest it made; only `--keep` leaves one, on
   request. What stays on the host is the evidence under the repo-local
@@ -922,6 +931,10 @@ for what is already granted nor acts on what is not.
 
 - Without asking: run the wrapper scripts the validation ladder calls
   for (§8.4), the e2e manual sandbox, and the Tier VM manual guest;
+  test with the dedicated Google Drive test account (e2e against
+  Google Drive, a Tier VM guest with the Internet by `./scripts/vm.sh
+  --guest --internet`, and anything in that account that a Drive check
+  needs) (owner, 2026-11-25);
   read repository and PR state
   with `git` and read-only `gh` calls; write scratch files under
   `.context/` and the repo-local `.vapor/`; read `~/.vapor` to
@@ -930,9 +943,8 @@ for what is already granted nor acts on what is not.
   onto a moved `main`), answer human comments, and run the adversarial
   review.
 - Only when the owner asks for that specific action: push a branch,
-  open a PR, cut or rehearse a release, run e2e against Google Drive,
-  start a Tier VM guest with the Internet (`./scripts/vm.sh --guest
-  --internet`) or test a real cloud provider in one,
+  open a PR, cut or rehearse a release, use a cloud account other
+  than the dedicated test account,
   install or remove Tart (a removal with `HOMEBREW_NO_AUTOREMOVE=1`,
   so Homebrew removes nothing else), pull the guest image
   (`./scripts/vm.sh --setup`), change repository settings, release

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 /// Atomically renames `from` onto `to`, failing with
 /// [`io::ErrorKind::AlreadyExists`] when `to` already exists: an
-/// atomic no-clobber commit.
+/// atomic no-clobber commit. `from` is a file or a folder; a folder
+/// goes with everything in it.
 ///
 /// This must be a *rename*, not a hard-link + unlink pair, wherever the
 /// OS allows: macOS FSEvents tracks file-level events by node, and a
@@ -334,14 +335,67 @@ fn atomic_noclobber_rename_impl(from: &Path, to: &Path) -> io::Result<()> {
 /// available.
 #[cfg(not(target_os = "macos"))]
 fn link_based_noclobber(from: &Path, to: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(from)?.is_dir() {
+        return folder_noclobber(from, to);
+    }
     std::fs::hard_link(from, to)?;
     let _ = std::fs::remove_file(from);
     Ok(())
 }
 
+/// A folder has no hard link. The name is claimed with an empty
+/// folder, which fails when the name is taken, and the rename then
+/// takes the place of that empty folder. Where a rename does not take
+/// the place of a folder (Windows), the claim is given up just before
+/// the rename, and the rename fails on whatever took the name in that
+/// instant.
+#[cfg(not(target_os = "macos"))]
+fn folder_noclobber(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir(to)?;
+    #[cfg(windows)]
+    std::fs::remove_dir(to)?;
+    std::fs::rename(from, to).inspect_err(|_| {
+        let _ = std::fs::remove_dir(to);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_renamed_with_what_it_holds_and_never_onto_a_taken_name() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let from = dir.path().join("photos");
+        std::fs::create_dir_all(from.join("2026")).expect("folder");
+        std::fs::write(from.join("2026/a.jpg"), b"payload").expect("file");
+
+        // A file and a folder each hold the name: nothing is replaced.
+        for taken in ["a-file", "a-folder"] {
+            let to = dir.path().join(taken);
+            if taken == "a-file" {
+                std::fs::write(&to, b"mine").expect("taken by a file");
+            } else {
+                std::fs::create_dir(&to).expect("taken by a folder");
+                std::fs::write(to.join("kept.txt"), b"mine").expect("content");
+            }
+            atomic_noclobber_rename(&from, &to).expect_err("the name is taken");
+            assert!(from.join("2026/a.jpg").exists(), "the folder stays");
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("a-file")).expect("file"),
+            b"mine"
+        );
+        assert!(dir.path().join("a-folder/kept.txt").exists());
+
+        let to = dir.path().join("pictures");
+        atomic_noclobber_rename(&from, &to).expect("rename");
+        assert_eq!(
+            std::fs::read(to.join("2026/a.jpg")).expect("moved file"),
+            b"payload"
+        );
+        assert!(!from.exists(), "the old name is gone");
+    }
 
     #[test]
     fn renames_atomically_when_the_target_is_absent() {

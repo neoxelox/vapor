@@ -43,7 +43,6 @@ pub struct DecisionJson {
     pub resolved_at_ms: Option<u64>,
     pub choice: Option<String>,
     pub applied_at_ms: Option<u64>,
-    pub held: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,7 +81,6 @@ fn to_json(profile_id: &str, record: DecisionRecord) -> DecisionJson {
         resolved_at_ms: record.resolved_at.map(millis),
         choice: record.choice,
         applied_at_ms: record.applied_at.map(millis),
-        held: record.held_intents,
     }
 }
 
@@ -321,17 +319,8 @@ pub fn render_list(report: &DecisionListReport) -> String {
             (Some(choice), Some(_)) => format!("applied {choice}"),
         };
         lines.push(format!(
-            "#{} [{}] {} ({}{}): {}",
-            decision.id,
-            decision.profile_id,
-            decision.kind,
-            state,
-            if decision.held > 0 {
-                format!(", {} held", decision.held)
-            } else {
-                String::new()
-            },
-            decision.question
+            "#{} [{}] {} ({}): {}",
+            decision.id, decision.profile_id, decision.kind, state, decision.question
         ));
         if decision.choice.is_none() {
             for option in option_lines(&decision.options) {
@@ -381,12 +370,6 @@ pub fn render_show(decision: &DecisionJson) -> String {
             "Status: answered {choice}; the daemon applies it on its next tick"
         )),
         (Some(choice), Some(_)) => lines.push(format!("Status: applied {choice}")),
-    }
-    if decision.held > 0 {
-        lines.push(format!(
-            "Changes held until it is answered: {}",
-            decision.held
-        ));
     }
     if !decision.evidence.is_null() {
         lines.push("Evidence:".to_string());
@@ -575,20 +558,19 @@ mod tests {
             decisions: vec![DecisionJson {
                 profile_id: "default".into(),
                 id: 7,
-                kind: "mass-delete".into(),
-                scope: "batch".into(),
+                kind: "root-missing".into(),
+                scope: "profile".into(),
                 path: None,
-                question: "Apply 240 deletions?".into(),
+                question: "The local folder is gone. Create it again?".into(),
                 options: vec![DecisionOptionJson {
-                    key: "apply".into(),
-                    label: "Apply the deletions".into(),
+                    key: "recreate".into(),
+                    label: "Create the folder again".into(),
                 }],
-                evidence: serde_json::json!({ "count": 240 }),
+                evidence: serde_json::json!({ "side": "local" }),
                 created_at_ms: 1_700_000_000_000,
                 resolved_at_ms: None,
                 choice: None,
                 applied_at_ms: None,
-                held: 240,
             }],
             skipped_profiles: vec![],
         };
@@ -600,24 +582,23 @@ mod tests {
     {
       "profileId": "default",
       "id": 7,
-      "kind": "mass-delete",
-      "scope": "batch",
+      "kind": "root-missing",
+      "scope": "profile",
       "path": null,
-      "question": "Apply 240 deletions?",
+      "question": "The local folder is gone. Create it again?",
       "options": [
         {
-          "key": "apply",
-          "label": "Apply the deletions"
+          "key": "recreate",
+          "label": "Create the folder again"
         }
       ],
       "evidence": {
-        "count": 240
+        "side": "local"
       },
       "createdAtMs": 1700000000000,
       "resolvedAtMs": null,
       "choice": null,
-      "appliedAtMs": null,
-      "held": 240
+      "appliedAtMs": null
     }
   ],
   "skippedProfiles": []
@@ -643,7 +624,6 @@ mod tests {
             resolved_at_ms: None,
             choice: None,
             applied_at_ms: None,
-            held: 0,
         };
         let open = render_list(&DecisionListReport {
             decisions: vec![DecisionJson { ..decision }],
@@ -663,7 +643,6 @@ mod tests {
             evidence: serde_json::Value::Null,
             created_at_ms: 1,
             applied_at_ms: None,
-            held: 0,
         };
         let answered = render_list(&DecisionListReport {
             decisions: vec![decision],

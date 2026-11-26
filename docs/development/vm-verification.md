@@ -237,6 +237,9 @@ the Internet through the host. It is for a test with a real cloud
 provider, such as a Google Drive sign-in with the dedicated test
 account. The guest can then also reach the local network of the host.
 Without the option the guest stays on the host-only network.
+A change to the Google Drive provider is checked this way with the
+dedicated test account before it is reported as done, and an agent
+starts such a guest without asking (`AGENTS.md` §9.8).
 
 With `--window`, Tart shows the screen of the guest in a window, and a
 person uses the app in it with the pointer and the keyboard, as in a

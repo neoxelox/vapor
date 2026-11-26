@@ -117,7 +117,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var restartRequired: String?
   /// Questions the daemon parked until the user answers them
   /// (`vapor decisions list`): a conflict, a missing or replaced sync
-  /// root, a mass delete, a file that changed type.
+  /// root, a file that changed type.
   public var decisions: UInt64
   /// The whole-scope scan is queued but the throttle holds it (the
   /// user is active, the machine is busy). Sync now runs it anyway.

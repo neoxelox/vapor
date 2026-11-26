@@ -32,14 +32,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use md5::{Digest as Md5Digest, Md5};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use vapor_platform::SecretStore;
 
 use crate::http::{HttpRequest, HttpResponse, HttpTransport};
 use crate::{
-    ChangesPoll, DownloadRequest, HashAlgorithm, Provider, ProviderCapabilities, ProviderError,
-    RemoteChange, RemoteChangeKind, RemoteChangesPage, RemoteEntry, RemoteEntryKind, RemotePath,
-    RemotePrecondition, TransferOutcome, TransferSession, TransferStep, UploadRequest, logging,
+    ChangesPoll, DownloadRequest, FollowUpChange, HashAlgorithm, Provider, ProviderCapabilities,
+    ProviderError, RemoteChange, RemoteChangeKind, RemoteChangesPage, RemoteEntry, RemoteEntryKind,
+    RemoteIdentity, RemotePath, RemotePrecondition, TransferOutcome, TransferSession, TransferStep,
+    UploadRequest, logging,
 };
 use oauth::StoredTokens;
 
@@ -581,25 +582,195 @@ const REVISION_PAGES_MAX: usize = 5;
 /// its own.
 #[derive(Clone, Debug)]
 enum ReplacedWork {
-    /// Read the versions of a file after a guarded upload of it landed:
-    /// `base_md5` is what the upload meant to replace, `own_md5` what
-    /// it wrote.
-    Check {
-        file_id: String,
-        parent_id: String,
-        file_name: String,
-        base_md5: String,
-        own_md5: String,
-        /// From the re-verification before the commit to the answer of
-        /// the commit: the time in which another write could land
-        /// unseen.
-        commit_took: Duration,
-        /// The tag the upload put on the file. A file that still has
-        /// it was not written again by a device that runs Vapor.
-        op_id: String,
-    },
+    /// Read the versions of the file after a guarded upload of it
+    /// landed ([`ReplacedCheck`]).
+    Check,
     /// Copy one version into a file next to the one it belongs to.
-    Copy(RevisionCopy),
+    Copy(Box<RevisionCopy>),
+}
+
+/// The check that follows one guarded upload. It is also what the
+/// daemon stores for the check, so that a daemon that stops before the
+/// work ends does it after the next start ([`FollowUpRecord`]). It
+/// holds ids, hashes, and the name of the file: no token and no
+/// address of an upload session.
+///
+/// A write whose outcome the daemon did not record gets the same
+/// check ([`Provider::note_unrecorded_write`]): nobody measured its
+/// commit, so [`UNRECORDED_COMMIT_TOOK`] stands for the time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplacedCheck {
+    /// The cloud root the upload wrote into. A provider that syncs
+    /// another folder now writes nothing next to this file.
+    root_id: String,
+    file_id: String,
+    /// The folder and the name of the file, which a copy of a replaced
+    /// version is placed and named by.
+    parent_id: String,
+    file_name: String,
+    /// What the upload meant to replace.
+    base_md5: String,
+    /// What it wrote.
+    own_md5: String,
+    /// From the re-verification before the commit to the answer of the
+    /// commit: the time in which another write could land unseen.
+    commit_took_ms: u64,
+    /// The tag the upload put on the file. A file that still has it
+    /// was not written again by a device that runs Vapor.
+    op_id: String,
+    /// When the answer of the commit came, or did not come, in
+    /// milliseconds since the Unix epoch.
+    landed_at_ms: u64,
+}
+
+/// The check for a write whose outcome the daemon did not record
+/// ([`Provider::note_unrecorded_write`]), when the provider did not
+/// know the ids of the file as the daemon asked. The poll reads them
+/// by the path and makes the check of a [`ReplacedCheck`] from there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplacedCheckAtPath {
+    /// The cloud root the path is in.
+    root_id: String,
+    path: String,
+    base_md5: String,
+    own_md5: String,
+    /// The tag that the write put on the file.
+    op_id: String,
+    /// When the daemon asked, in milliseconds since the Unix epoch.
+    noted_at_ms: u64,
+}
+
+/// What this provider gives the daemon to store
+/// ([`Provider::take_follow_up_changes`]). The name of the variant is
+/// in the stored text, so a record of a kind that this build does not
+/// know is not taken back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum FollowUpRecord {
+    ReplacedCheck(ReplacedCheck),
+    ReplacedCheckAtPath(ReplacedCheckAtPath),
+}
+
+impl FollowUpRecord {
+    fn root_id(&self) -> &str {
+        match self {
+            Self::ReplacedCheck(check) => &check.root_id,
+            Self::ReplacedCheckAtPath(check) => &check.root_id,
+        }
+    }
+
+    /// The name of the file, for a line of the log.
+    fn file_name(&self) -> &str {
+        match self {
+            Self::ReplacedCheck(check) => &check.file_name,
+            Self::ReplacedCheckAtPath(check) => &check.path,
+        }
+    }
+
+    /// The time the age of the check counts from.
+    fn since_ms(&self) -> u64 {
+        match self {
+            Self::ReplacedCheck(check) => check.landed_at_ms,
+            Self::ReplacedCheckAtPath(check) => check.noted_at_ms,
+        }
+    }
+
+    /// Whether the check is older than Drive keeps the versions it
+    /// would read ([`REPLACED_CHECK_MAX_AGE`]). A time that far ahead
+    /// of the clock, or one that is no time at all, is no better: the
+    /// record came from a clock that was wrong or from a damaged
+    /// entry, and its age would never run out.
+    fn is_out_of_date(&self, now: SystemTime) -> bool {
+        let Some(since) =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(self.since_ms()))
+        else {
+            return true;
+        };
+        let apart = match now.duration_since(since) {
+            Ok(age) => age,
+            Err(ahead) => ahead.duration(),
+        };
+        apart > REPLACED_CHECK_MAX_AGE
+    }
+
+    /// Whether `other` is the check for the same write: the same file,
+    /// the same base, and the same content over it. A check that knows
+    /// its file by the id and one that knows it by the path are never
+    /// the same here. The poll finds the copy that the first of them
+    /// made, and makes no second one.
+    fn is_for_the_write_of(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::ReplacedCheck(one), Self::ReplacedCheck(two)) => {
+                (&one.root_id, &one.file_id, &one.base_md5, &one.own_md5)
+                    == (&two.root_id, &two.file_id, &two.base_md5, &two.own_md5)
+            }
+            (Self::ReplacedCheckAtPath(one), Self::ReplacedCheckAtPath(two)) => {
+                (&one.root_id, &one.path, &one.base_md5, &one.own_md5)
+                    == (&two.root_id, &two.path, &two.base_md5, &two.own_md5)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A check and its stored text. Each piece of work carries the one it
+/// is, or the one it follows from: the record ends when the last piece
+/// does.
+#[derive(Debug)]
+struct ReplacedOrigin {
+    check: FollowUpRecord,
+    record: String,
+}
+
+impl ReplacedOrigin {
+    fn new(check: FollowUpRecord) -> Self {
+        let record = serde_json::to_string(&check).expect("a check serializes");
+        Self { check, record }
+    }
+
+    /// The check of a stored record, or the record when this build
+    /// cannot read it. The text is kept as it came: the daemon finds
+    /// its entry by it.
+    fn from_record(record: String) -> Result<Self, String> {
+        match serde_json::from_str(&record) {
+            Ok(check) => Ok(Self { check, record }),
+            Err(_) => Err(record),
+        }
+    }
+}
+
+/// One piece of [`ReplacedWork`] in the line, with the tries it has
+/// had.
+#[derive(Clone, Debug)]
+struct ReplacedEntry {
+    origin: Arc<ReplacedOrigin>,
+    work: ReplacedWork,
+    attempts: u32,
+}
+
+/// The work for replaced versions that is left, and what the daemon
+/// has not been told about it yet. One lock holds both, so a record
+/// is reported as started before a poll can report it as finished.
+#[derive(Debug, Default)]
+struct ReplacedState {
+    queue: std::collections::VecDeque<ReplacedEntry>,
+    changes: Vec<FollowUpChange>,
+    /// The check whose piece a poll took out of the line and works on.
+    running: Option<Arc<ReplacedOrigin>>,
+}
+
+impl ReplacedState {
+    /// Whether a check for the write of `check` has not ended yet: one
+    /// in the line, or the one a poll works on.
+    fn owes_the_check_of(&self, check: &FollowUpRecord) -> bool {
+        self.queue
+            .iter()
+            .map(|entry| &entry.origin)
+            .chain(&self.running)
+            .any(|origin| origin.check.is_for_the_write_of(check))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -626,6 +797,11 @@ const REPLACED_WORK_ATTEMPTS: u32 = 20;
 /// stay quick. A check is one request. A copy moves bytes, so a poll
 /// makes one step of one copy and no more.
 const REPLACED_WORK_PER_POLL: usize = 8;
+/// How long a check stays worth making. Drive can remove a version
+/// that is older than 30 days, so a check of that age finds nothing it
+/// could keep. This is also what ends a check that can never be made:
+/// a sign-in that never comes back spends none of its tries.
+const REPLACED_CHECK_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Room on top of what the time of a commit says about the versions
 /// another device wrote at the same moment. A version that the upload
@@ -639,6 +815,26 @@ const REPLACED_VERSION_SLACK_BEFORE: Duration = Duration::from_secs(30);
 /// which the next save of another device reads as a write of this
 /// moment.
 const REPLACED_VERSION_SLACK_AFTER: Duration = Duration::from_secs(1);
+/// What stands for the time of a commit that nobody measured: the one
+/// of a write whose outcome the daemon did not record
+/// ([`Provider::note_unrecorded_write`]). The commit of a small file
+/// takes a second or two. A longer time finds a write that a slow
+/// commit replaced. The daemon asks for a write of this device only,
+/// so the longer time costs no copy of a version that this device
+/// compared.
+const UNRECORDED_COMMIT_TOOK: Duration = Duration::from_secs(10);
+
+fn unrecorded_commit_took_ms() -> u64 {
+    u64::try_from(UNRECORDED_COMMIT_TOOK.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The time of the clock in milliseconds since the Unix epoch.
+fn epoch_millis_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
 
 /// How many uploads this provider remembers as its own
 /// ([`GoogleDriveProvider::own_writes`]).
@@ -797,9 +993,11 @@ pub struct GoogleDriveProvider {
     tokens: Arc<TokenManager>,
     /// Resolved id of the configured cloud root folder.
     root_id: Mutex<Option<String>>,
-    /// Path → file-id cache; pruned on deletes/renames.
+    /// Path → file-id cache; pruned on deletes/renames. A start fills
+    /// it with the ids that the engine stored
+    /// ([`Provider::restore_remote_ids`]).
     id_by_path: Mutex<BTreeMap<String, String>>,
-    /// File-id → path cache for changes mapping.
+    /// File-id → path cache for changes mapping, filled the same way.
     path_by_id: Mutex<BTreeMap<String, String>>,
     /// File ids the changes feed has resolved to be outside the sync root,
     /// with the time they were last confirmed so the entry can expire.
@@ -818,10 +1016,16 @@ pub struct GoogleDriveProvider {
     /// allows two folders with one name, so two uploads into one new
     /// folder must not both find it missing and both create it.
     folder_creation: Mutex<()>,
-    /// What is left to do for versions that uploads replaced, with the
-    /// tries each piece has had. An upload adds to it when it lands;
-    /// the changes poll works it off.
-    replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
+    /// What is left to do for versions that uploads replaced. An
+    /// upload adds to it when it lands, and the changes poll works it
+    /// off. The daemon stores a record for each check, and hands back
+    /// at the start the ones whose work did not end.
+    replaced: Arc<Mutex<ReplacedState>>,
+    /// Held by the one poll that works the line off. A piece that a
+    /// poll took out is in no list while it runs, and the record of a
+    /// check ends with its last piece: two polls at a time could end
+    /// it with a piece still running.
+    replaced_running: Mutex<()>,
     /// The file and the content of the last uploads this provider
     /// made. The check for a replaced version reads it: the next save
     /// of this device is in the list of the versions too, and it is no
@@ -858,7 +1062,8 @@ impl GoogleDriveProvider {
             folder_creation: Mutex::new(()),
             out_of_scope: Mutex::new(BTreeMap::new()),
             chunk_hint: Arc::new(Mutex::new(CHUNK_START)),
-            replaced_work: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            replaced: Arc::default(),
+            replaced_running: Mutex::new(()),
             own_writes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
@@ -962,22 +1167,36 @@ impl GoogleDriveProvider {
 
     // -- Versions that uploads replaced --------------------------------
 
-    /// Works off a part of [`Self::replaced_work`]. A piece that fails
-    /// goes to the end of the line and is tried at a later poll.
+    /// Works off a part of the line of [`ReplacedState`]. A piece that
+    /// fails goes to the end of the line and is tried at a later poll.
     fn keep_replaced_versions(&self) {
+        let _running = match self.replaced_running.try_lock() {
+            Ok(running) => running,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
         for _ in 0..REPLACED_WORK_PER_POLL {
-            let next = self
-                .replaced_work
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop_front();
-            let Some((work, attempts)) = next else {
+            let next = {
+                let mut state = self
+                    .replaced
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let next = state.queue.pop_front();
+                state.running = next.as_ref().map(|entry| entry.origin.clone());
+                next
+            };
+            let Some(ReplacedEntry {
+                origin,
+                work,
+                attempts,
+            }) = next
+            else {
                 return;
             };
             let moved_bytes = matches!(&work, ReplacedWork::Copy(_));
             let mut requeue: Vec<(ReplacedWork, u32)> = Vec::new();
             let mut failed = false;
-            match self.advance_replaced_work(work.clone()) {
+            match self.advance_replaced_work(&origin.check, work.clone()) {
                 // What follows keeps the tries of the piece it follows:
                 // a copy that opens a session each time and never ends
                 // must run out of them too.
@@ -1024,9 +1243,12 @@ impl GoogleDriveProvider {
                     } else {
                         match &work {
                             // Nothing says that a version was replaced.
-                            ReplacedWork::Check { file_name, .. } => crate::logging::debug(
+                            ReplacedWork::Check => crate::logging::debug(
                                 "Gave up the check for a version that an upload replaced",
-                                &[("file", file_name.clone()), ("error", error.message)],
+                                &[
+                                    ("file", origin.check.file_name().to_string()),
+                                    ("error", error.message),
+                                ],
                             ),
                             ReplacedWork::Copy(copy) => crate::logging::warning(
                                 "Two writes of one file landed in Google Drive at the same moment, and the version that lost the name could not be kept as a copy; it is in the version history of the file in Google Drive",
@@ -1036,18 +1258,36 @@ impl GoogleDriveProvider {
                     }
                 }
             }
-            let mut queue = self
-                .replaced_work
+            let mut state = self
+                .replaced
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.running = None;
+            let requeue = requeue.into_iter().map(|(work, attempts)| ReplacedEntry {
+                origin: origin.clone(),
+                work,
+                attempts,
+            });
             if failed {
-                queue.extend(requeue);
+                state.queue.extend(requeue);
             } else {
-                for work in requeue.into_iter().rev() {
-                    queue.push_front(work);
+                for entry in requeue.rev() {
+                    state.queue.push_front(entry);
                 }
             }
-            drop(queue);
+            // The last piece of a check ended: the daemon forgets the
+            // record. A daemon that stopped before this line does the
+            // check again, and finds the copies that are there.
+            if !state
+                .queue
+                .iter()
+                .any(|entry| Arc::ptr_eq(&entry.origin, &origin))
+            {
+                state
+                    .changes
+                    .push(FollowUpChange::Finished(origin.record.clone()));
+            }
+            drop(state);
             // One failure is enough for one poll, and so is one step of
             // a copy: the bytes it moves are outside the transfer
             // budgets of the engine.
@@ -1057,22 +1297,70 @@ impl GoogleDriveProvider {
         }
     }
 
-    /// Does one piece of the work and answers with what follows it.
+    /// Does one piece of the work of `check` and answers with what
+    /// follows it.
     fn advance_replaced_work(
         &self,
+        check: &FollowUpRecord,
         work: ReplacedWork,
     ) -> Result<Vec<ReplacedWork>, ProviderError> {
+        if check.is_out_of_date(SystemTime::now()) {
+            crate::logging::debug(
+                "Gave up the check for a version that an upload replaced: Google Drive keeps no version that long",
+                &[("file", check.file_name().to_string())],
+            );
+            return Ok(Vec::new());
+        }
+        // A copy goes next to the file, and the file is in the folder
+        // that was the cloud root when the upload ran. Nothing is
+        // written there when the profile syncs another folder now.
+        let root_id = self
+            .root_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match root_id {
+            Some(root_id) if root_id == check.root_id() => {}
+            Some(_) => {
+                crate::logging::debug(
+                    "Gave up the check for a version that an upload replaced: the profile syncs another cloud folder now",
+                    &[("file", check.file_name().to_string())],
+                );
+                return Ok(Vec::new());
+            }
+            None => {
+                return Err(ProviderError::cloud_root_unavailable(
+                    "the Google Drive sync root has not been ensured yet",
+                ));
+            }
+        }
         match work {
-            ReplacedWork::Check {
-                file_id,
-                parent_id,
-                file_name,
-                base_md5,
-                own_md5,
-                commit_took,
-                op_id,
-            } => {
-                let revisions = match self.list_revisions(&file_id) {
+            ReplacedWork::Check => {
+                let read_by_the_path;
+                let check = match check {
+                    FollowUpRecord::ReplacedCheck(check) => check,
+                    FollowUpRecord::ReplacedCheckAtPath(at_path) => {
+                        match self.replaced_check_at(at_path)? {
+                            Some(check) => {
+                                read_by_the_path = check;
+                                &read_by_the_path
+                            }
+                            // No file is at the path: nothing has
+                            // versions to read.
+                            None => return Ok(Vec::new()),
+                        }
+                    }
+                };
+                let ReplacedCheck {
+                    file_id,
+                    parent_id,
+                    file_name,
+                    base_md5,
+                    own_md5,
+                    op_id,
+                    ..
+                } = check;
+                let revisions = match self.list_revisions(file_id) {
                     Ok(revisions) => revisions,
                     // The file is gone, and its versions with it.
                     Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
@@ -1085,14 +1373,14 @@ impl GoogleDriveProvider {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .iter()
-                    .filter(|(file, content)| file == &file_id && content != &own_md5)
+                    .filter(|(file, content)| file == file_id && content != own_md5)
                     .map(|(_, content)| content.clone())
                     .collect();
                 let same_moment = versions_of_the_same_moment(
                     &revisions,
-                    &base_md5,
-                    &own_md5,
-                    commit_took,
+                    base_md5,
+                    own_md5,
+                    Duration::from_millis(check.commit_took_ms),
                     &own_writes,
                 );
                 // The common answer, and it costs the one request.
@@ -1111,23 +1399,68 @@ impl GoogleDriveProvider {
                     .app_properties
                     .as_ref()
                     .and_then(|properties| properties.get(OP_ID_PROPERTY))
-                    .is_some_and(|tag| tag == &op_id);
+                    .is_some_and(|tag| tag == op_id);
                 Ok(same_moment
                     .into_kept(head.md5_checksum.as_deref(), head_carries_own_tag)
                     .into_iter()
                     .map(|revision| {
-                        ReplacedWork::Copy(RevisionCopy {
+                        ReplacedWork::Copy(Box::new(RevisionCopy {
                             file_id: file_id.clone(),
                             revision,
                             parent_id: parent_id.clone(),
                             file_name: file_name.clone(),
                             copy_name: String::new(),
                             upload: None,
-                        })
+                        }))
                     })
                     .collect())
             }
-            ReplacedWork::Copy(copy) => self.advance_revision_copy(copy),
+            ReplacedWork::Copy(copy) => self.advance_revision_copy(*copy),
+        }
+    }
+
+    /// The check for the file that is at the path of `at_path` now,
+    /// with the ids that a request reads. `None` when no file is there.
+    fn replaced_check_at(
+        &self,
+        at_path: &ReplacedCheckAtPath,
+    ) -> Result<Option<ReplacedCheck>, ProviderError> {
+        let Ok(path) = RemotePath::new(at_path.path.as_str()) else {
+            return Ok(None);
+        };
+        let Some(file) = self.resolve(&path)? else {
+            return Ok(None);
+        };
+        let Some(parent_id) = file.parents.first().cloned() else {
+            return Ok(None);
+        };
+        if file.mime_type.starts_with(GOOGLE_APPS_MIME_PREFIX) {
+            return Ok(None);
+        }
+        self.remember_own_write(&file.id, &at_path.own_md5);
+        Ok(Some(ReplacedCheck {
+            root_id: at_path.root_id.clone(),
+            file_id: file.id,
+            parent_id,
+            file_name: file.name,
+            base_md5: at_path.base_md5.clone(),
+            own_md5: at_path.own_md5.clone(),
+            commit_took_ms: unrecorded_commit_took_ms(),
+            op_id: at_path.op_id.clone(),
+            landed_at_ms: at_path.noted_at_ms,
+        }))
+    }
+
+    /// Notes content that this device put into the file `file_id`
+    /// ([`Self::own_writes`]).
+    fn remember_own_write(&self, file_id: &str, content_md5: &str) {
+        let mut own_writes = self
+            .own_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        own_writes.push_back((file_id.to_string(), content_md5.to_string()));
+        while own_writes.len() > OWN_WRITES_MAX {
+            own_writes.pop_front();
         }
     }
 
@@ -1267,7 +1600,7 @@ impl GoogleDriveProvider {
                     ProviderError::transient("resumable initiation returned no session URI")
                 })?;
             copy.upload = Some((session_url, 0));
-            return Ok(vec![ReplacedWork::Copy(copy)]);
+            return Ok(vec![ReplacedWork::Copy(Box::new(copy))]);
         }
 
         let (session_url, sent) = copy.upload.clone().expect("checked above");
@@ -1310,7 +1643,7 @@ impl GoogleDriveProvider {
                     .map(|end| end + 1)
                     .unwrap_or(last + 1);
                 copy.upload = Some((session_url, acked.min(size)));
-                Ok(vec![ReplacedWork::Copy(copy)])
+                Ok(vec![ReplacedWork::Copy(Box::new(copy))])
             }
             200 | 201 => {
                 self.report_kept_copy(&copy, &name);
@@ -1481,6 +1814,39 @@ impl GoogleDriveProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|_, known| !known.starts_with(&below));
+    }
+
+    /// Moves what the cache holds under the folder `from` to the same
+    /// place under `to`: the folder got another name or another place,
+    /// and everything in it went along with the id it had.
+    fn reroot_under(&self, from: &str, to: &str) {
+        let below = format!("{from}/");
+        let moved = |known: &str| format!("{to}/{}", &known[below.len()..]);
+        let mut id_by_path = self
+            .id_by_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_paths: Vec<String> = id_by_path
+            .range(below.clone()..)
+            .take_while(|(known, _)| known.starts_with(&below))
+            .map(|(known, _)| known.clone())
+            .collect();
+        for old_path in old_paths {
+            if let Some(id) = id_by_path.remove(&old_path) {
+                id_by_path.insert(moved(&old_path), id);
+            }
+        }
+        drop(id_by_path);
+        for known in self
+            .path_by_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values_mut()
+        {
+            if known.starts_with(&below) {
+                *known = moved(known);
+            }
+        }
     }
 
     /// The path a feed entry gives its file, when the cache knows the
@@ -1749,6 +2115,7 @@ impl GoogleDriveProvider {
                 .as_ref()
                 .and_then(|properties| properties.get(OP_ID_PROPERTY))
                 .cloned(),
+            id: Some(file.id.clone()).filter(|id| !id.is_empty()),
         }
     }
 
@@ -2041,6 +2408,9 @@ impl Provider for GoogleDriveProvider {
         )?;
         self.evict_path(from.as_str());
         self.cache_mapping(to.as_str(), &file.id);
+        if file.mime_type == FOLDER_MIME {
+            self.reroot_under(from.as_str(), to.as_str());
+        }
         Ok(())
     }
 
@@ -2266,10 +2636,15 @@ impl Provider for GoogleDriveProvider {
             precondition: request.precondition.clone(),
             hasher: Md5::new(),
             hashed_bytes: 0,
-            replaced_work: self.replaced_work.clone(),
+            replaced: self.replaced.clone(),
             own_writes: self.own_writes.clone(),
             op_id: request.op_id.clone(),
             reverified_at: None,
+            root_id: self
+                .root_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         }))
     }
 
@@ -2323,6 +2698,187 @@ impl Provider for GoogleDriveProvider {
         )?;
         self.evict_path(path.as_str());
         Ok(())
+    }
+
+    fn take_follow_up_changes(&self) -> Vec<FollowUpChange> {
+        std::mem::take(
+            &mut self
+                .replaced
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .changes,
+        )
+    }
+
+    fn resume_follow_ups(&self, records: Vec<String>) -> Vec<String> {
+        let now = SystemTime::now();
+        let mut not_taken = Vec::new();
+        let mut resumed = Vec::new();
+        for record in records {
+            match ReplacedOrigin::from_record(record) {
+                Ok(origin) if !origin.check.is_out_of_date(now) => resumed.push(origin),
+                Ok(origin) => not_taken.push(origin.record),
+                Err(record) => not_taken.push(record),
+            }
+        }
+        // The saves of this device are no writes of another one, also
+        // for a check that runs after a stop.
+        let mut own_writes = self
+            .own_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for origin in &resumed {
+            // A check that knows its file by the path adds its own
+            // when the poll has read the id.
+            if let FollowUpRecord::ReplacedCheck(check) = &origin.check {
+                own_writes.push_back((check.file_id.clone(), check.own_md5.clone()));
+            }
+        }
+        while own_writes.len() > OWN_WRITES_MAX {
+            own_writes.pop_front();
+        }
+        drop(own_writes);
+        if !resumed.is_empty() {
+            logging::info(
+                "Took back the checks for replaced versions that an earlier run left",
+                &[("checks", resumed.len().to_string())],
+            );
+        }
+        // The check runs from its start: the versions of the file give
+        // the same answer again, and a copy that an earlier run made is
+        // found under its name and not made twice.
+        self.replaced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .queue
+            .extend(resumed.into_iter().map(|origin| ReplacedEntry {
+                origin: Arc::new(origin),
+                work: ReplacedWork::Check,
+                attempts: 0,
+            }));
+        not_taken
+    }
+
+    fn note_unrecorded_write(
+        &self,
+        path: &RemotePath,
+        base_hash: &str,
+        content_hash: &str,
+        op_id: &str,
+    ) {
+        let Some(file_name) = path.file_name() else {
+            return;
+        };
+        if base_hash.is_empty()
+            || content_hash.is_empty()
+            || base_hash == content_hash
+            || op_id.is_empty()
+        {
+            return;
+        }
+        // With no cloud root there is no place for a copy, and no
+        // lookup found the content that the daemon speaks of.
+        let Some(root_id) = self
+            .root_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        // The lookup that showed the daemon the content left the ids
+        // here. When the feed took them out since, the poll reads them
+        // by the path: this call makes no request.
+        let (file_id, parent_id) = {
+            let id_by_path = self
+                .id_by_path
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let parent_id = match path.parent() {
+                Some(parent) if !parent.is_root() => id_by_path.get(parent.as_str()).cloned(),
+                _ => Some(root_id.clone()),
+            };
+            (id_by_path.get(path.as_str()).cloned(), parent_id)
+        };
+        let check = match (file_id, parent_id) {
+            (Some(file_id), Some(parent_id)) => {
+                self.remember_own_write(&file_id, content_hash);
+                FollowUpRecord::ReplacedCheck(ReplacedCheck {
+                    root_id,
+                    file_id,
+                    parent_id,
+                    file_name: file_name.to_string(),
+                    base_md5: base_hash.to_string(),
+                    own_md5: content_hash.to_string(),
+                    commit_took_ms: unrecorded_commit_took_ms(),
+                    op_id: op_id.to_string(),
+                    landed_at_ms: epoch_millis_now(),
+                })
+            }
+            _ => FollowUpRecord::ReplacedCheckAtPath(ReplacedCheckAtPath {
+                root_id,
+                path: path.as_str().to_string(),
+                base_md5: base_hash.to_string(),
+                own_md5: content_hash.to_string(),
+                op_id: op_id.to_string(),
+                noted_at_ms: epoch_millis_now(),
+            }),
+        };
+        let mut state = self
+            .replaced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The upload itself left a check when the answer of its commit
+        // did not come, and an earlier run can have left one: that
+        // check is the one for this write.
+        if state.owes_the_check_of(&check) {
+            return;
+        }
+        let origin = Arc::new(ReplacedOrigin::new(check));
+        state
+            .changes
+            .push(FollowUpChange::Started(origin.record.clone()));
+        state.queue.push_back(ReplacedEntry {
+            origin,
+            work: ReplacedWork::Check,
+            attempts: 0,
+        });
+    }
+
+    fn restore_remote_ids(&self, known: Vec<RemoteIdentity>) {
+        let restored = known.len();
+        // What a request of this run found is newer than what the
+        // engine stored, so a path or an id that is here stays.
+        let mut id_by_path = self
+            .id_by_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for identity in &known {
+            if !identity.path.is_root() {
+                id_by_path
+                    .entry(identity.path.as_str().to_string())
+                    .or_insert_with(|| identity.id.clone());
+            }
+        }
+        drop(id_by_path);
+        let mut path_by_id = self
+            .path_by_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for identity in known {
+            if !identity.path.is_root() {
+                path_by_id
+                    .entry(identity.id)
+                    .or_insert_with(|| identity.path.as_str().to_string());
+            }
+        }
+        drop(path_by_id);
+        if restored > 0 {
+            logging::info(
+                "Took back the ids of the synced files and folders",
+                &[("ids", restored.to_string())],
+            );
+        }
     }
 
     fn poll_changes(
@@ -2399,15 +2955,12 @@ impl Provider for GoogleDriveProvider {
                 let Ok(remote_path) = RemotePath::new(path) else {
                     continue;
                 };
-                changes.push(RemoteChange {
-                    path: remote_path,
-                    kind: RemoteChangeKind::Removed,
-                    observed_at: now,
-                    op_id: None,
-                    content_hash: None,
-                    size_bytes: None,
-                    modified_at: None,
-                });
+                changes.push(bare_change(
+                    remote_path,
+                    RemoteChangeKind::Removed,
+                    now,
+                    &change.file_id,
+                ));
                 continue;
             }
             let Some(file) = &change.file else { continue };
@@ -2438,15 +2991,12 @@ impl Provider for GoogleDriveProvider {
                     match self.path_for_changed_file(file) {
                         ChangedPath::InScope(resolved) => {
                             if let Ok(path) = RemotePath::new(resolved.new_path) {
-                                changes.push(RemoteChange {
+                                changes.push(bare_change(
                                     path,
-                                    kind: RemoteChangeKind::FolderMoved,
-                                    observed_at: now,
-                                    op_id: None,
-                                    content_hash: None,
-                                    size_bytes: None,
-                                    modified_at: None,
-                                });
+                                    RemoteChangeKind::FolderMoved,
+                                    now,
+                                    &file.id,
+                                ));
                             }
                         }
                         ChangedPath::OutOfScope => {}
@@ -2460,38 +3010,63 @@ impl Provider for GoogleDriveProvider {
                 if self.path_from_the_cache(file).as_deref() == Some(path_before.as_str()) {
                     continue;
                 }
-                // Whatever the cache holds for a folder that got
-                // another name or another place, and for everything
-                // under it, names the old place.
+                // The folder got another name or another place. What
+                // the cache holds for it names the old place.
                 self.evict_path(&path_before);
-                self.forget_under(&path_before);
-                // Drive reports such a folder with this one entry, and
-                // nothing for the files in it. The engine walks the
-                // folder that held it and the one that holds it now.
-                let path_now = match self.path_for_changed_file(file) {
-                    ChangedPath::InScope(resolved) => Some(resolved.new_path),
+                let resolved = match self.path_for_changed_file(file) {
+                    ChangedPath::InScope(resolved) => Some(resolved),
                     ChangedPath::OutOfScope => None,
                     ChangedPath::Unknown => {
                         place_unknown = true;
                         None
                     }
                 };
-                if path_now.as_deref() == Some(path_before.as_str()) {
+                if let Some(resolved) = &resolved
+                    && resolved.new_path == path_before
+                {
                     continue;
                 }
+                // Drive reports such a folder with this one entry, and
+                // nothing for the files in it. Both places are known
+                // here, so the engine can rename the same folder: what
+                // is in it went along, and keeps the ids the cache has.
+                if let Some(resolved) = &resolved
+                    && resolved.names_the_path
+                    && let (Ok(from), Ok(to)) = (
+                        RemotePath::new(path_before.clone()),
+                        RemotePath::new(resolved.new_path.clone()),
+                    )
+                {
+                    self.reroot_under(&path_before, &resolved.new_path);
+                    changes.push(bare_change(
+                        to,
+                        RemoteChangeKind::Moved {
+                            from,
+                            entry_kind: RemoteEntryKind::Directory,
+                        },
+                        now,
+                        &file.id,
+                    ));
+                    continue;
+                }
+                // The folder left the synced folder, its new place
+                // could not be read, or another folder has the name it
+                // got: no rename can stand for that. What the cache
+                // holds under the old place is out of date, and the
+                // engine walks the folder that held it and the one
+                // that holds it now.
+                self.forget_under(&path_before);
+                let path_now = resolved.map(|resolved| resolved.new_path);
                 for path in [Some(path_before), path_now].into_iter().flatten() {
                     let Ok(path) = RemotePath::new(path) else {
                         continue;
                     };
-                    changes.push(RemoteChange {
+                    changes.push(bare_change(
                         path,
-                        kind: RemoteChangeKind::FolderMoved,
-                        observed_at: now,
-                        op_id: None,
-                        content_hash: None,
-                        size_bytes: None,
-                        modified_at: None,
-                    });
+                        RemoteChangeKind::FolderMoved,
+                        now,
+                        &file.id,
+                    ));
                 }
                 continue;
             }
@@ -2514,15 +3089,12 @@ impl Provider for GoogleDriveProvider {
                         if self.path_is_bound_to(&path, &file.id) {
                             self.evict_path(&path);
                             if let Ok(path) = RemotePath::new(path) {
-                                changes.push(RemoteChange {
+                                changes.push(bare_change(
                                     path,
-                                    kind: RemoteChangeKind::Removed,
-                                    observed_at: now,
-                                    op_id: None,
-                                    content_hash: None,
-                                    size_bytes: None,
-                                    modified_at: None,
-                                });
+                                    RemoteChangeKind::Removed,
+                                    now,
+                                    &file.id,
+                                ));
                             }
                         } else {
                             self.forget_file(&file.id);
@@ -2535,34 +3107,43 @@ impl Provider for GoogleDriveProvider {
                     continue;
                 }
             };
-            // A rename/move surfaces as Removed(old) + CreatedOrModified(new)
-            // so the local side deletes the old path and downloads the new
-            // one. Reported at the cached path alone, the change would
-            // never converge.
-            if let Some(old_path) = resolved.old_path
-                && let Ok(old_remote) = RemotePath::new(old_path)
-            {
-                changes.push(RemoteChange {
-                    path: old_remote,
-                    kind: RemoteChangeKind::Removed,
-                    observed_at: now,
-                    op_id: None,
-                    content_hash: None,
-                    size_bytes: None,
-                    modified_at: None,
-                });
-            }
-            if !resolved.names_the_path {
+            // A file that got another name or another place left its
+            // old path. Reported at the cached path alone, the change
+            // would never converge.
+            let moved_from = resolved
+                .old_path
+                .and_then(|old_path| RemotePath::new(old_path).ok());
+            let new_place = if resolved.names_the_path {
+                RemotePath::new(resolved.new_path).ok()
+            } else {
                 // A second file under a name that another file has: it
-                // stays in the cloud, and the path did not change.
+                // stays in the cloud, and that path did not change.
+                None
+            };
+            let Some(remote_path) = new_place else {
+                if let Some(old_remote) = moved_from {
+                    changes.push(bare_change(
+                        old_remote,
+                        RemoteChangeKind::Removed,
+                        now,
+                        &file.id,
+                    ));
+                }
                 continue;
-            }
-            let Ok(remote_path) = RemotePath::new(resolved.new_path) else {
-                continue;
+            };
+            // Both places are known: one change says that the same
+            // file is under another name, so the engine renames it and
+            // transfers nothing.
+            let kind = match moved_from {
+                Some(from) => RemoteChangeKind::Moved {
+                    from,
+                    entry_kind: RemoteEntryKind::File,
+                },
+                None => RemoteChangeKind::CreatedOrModified,
             };
             changes.push(RemoteChange {
                 path: remote_path,
-                kind: RemoteChangeKind::CreatedOrModified,
+                kind,
                 observed_at: now,
                 op_id: file
                     .app_properties
@@ -2572,6 +3153,7 @@ impl Provider for GoogleDriveProvider {
                 content_hash: file.md5_checksum.clone(),
                 size_bytes: file.size.as_deref().and_then(|size| size.parse().ok()),
                 modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
+                id: Some(file.id.clone()),
             });
         }
 
@@ -2584,6 +3166,7 @@ impl Provider for GoogleDriveProvider {
                 content_hash: None,
                 size_bytes: None,
                 modified_at: None,
+                id: None,
             });
         }
 
@@ -2601,6 +3184,26 @@ impl Provider for GoogleDriveProvider {
             changes,
             next_cursor,
         }))
+    }
+}
+
+/// A change of the feed that carries no state of the object: a
+/// removal, a folder that moved.
+fn bare_change(
+    path: RemotePath,
+    kind: RemoteChangeKind,
+    observed_at: SystemTime,
+    file_id: &str,
+) -> RemoteChange {
+    RemoteChange {
+        path,
+        kind,
+        observed_at,
+        op_id: None,
+        content_hash: None,
+        size_bytes: None,
+        modified_at: None,
+        id: Some(file_id.to_string()).filter(|id| !id.is_empty()),
     }
 }
 
@@ -2698,7 +3301,9 @@ struct GdriveUploadSession {
     hashed_bytes: u64,
     /// Where a guarded overwrite that landed leaves the check for a
     /// version it replaced ([`ReplacedWork`]).
-    replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
+    replaced: Arc<Mutex<ReplacedState>>,
+    /// The cloud root this upload writes into.
+    root_id: Option<String>,
     /// Shared with the provider ([`GoogleDriveProvider::own_writes`]).
     own_writes: Arc<Mutex<std::collections::VecDeque<(String, String)>>>,
     /// The tag this upload puts on the file.
@@ -2717,6 +3322,14 @@ impl GdriveUploadSession {
         ProviderHandle {
             tokens: self.tokens.clone(),
         }
+    }
+
+    /// The id of the file that this upload wrote: the one Drive
+    /// answered with, or the one of the file it wrote over.
+    fn written_file_id(&self, answer: &GdFile) -> Option<String> {
+        Some(answer.id.clone())
+            .filter(|id| !id.is_empty())
+            .or_else(|| self.file_id.clone())
     }
 
     /// Re-verifies a `HashEquals` precondition immediately before the
@@ -2767,9 +3380,22 @@ impl GdriveUploadSession {
     /// can have landed, and the retry then finds its own bytes in the
     /// cloud and sends nothing. A check for a write that did not land
     /// finds no version of it and ends.
+    ///
+    /// The check is in the line, and reported to the daemon as
+    /// started, before the step of the upload returns: the daemon
+    /// stores it with the outcome of the transfer.
     fn check_for_a_replaced_version(&self, own_md5: &str) {
-        let (RemotePrecondition::HashEquals(base_md5), Some(file_id), Some((parent_id, file_name))) =
-            (&self.precondition, &self.file_id, &self.overwritten)
+        let (
+            RemotePrecondition::HashEquals(base_md5),
+            Some(file_id),
+            Some((parent_id, file_name)),
+            Some(root_id),
+        ) = (
+            &self.precondition,
+            &self.file_id,
+            &self.overwritten,
+            &self.root_id,
+        )
         else {
             return;
         };
@@ -2789,21 +3415,31 @@ impl GdriveUploadSession {
             .reverified_at
             .map(|(at, wall)| at.elapsed().max(wall.elapsed().unwrap_or_default()))
             .unwrap_or_default();
-        self.replaced_work
+        let origin = Arc::new(ReplacedOrigin::new(FollowUpRecord::ReplacedCheck(
+            ReplacedCheck {
+                root_id: root_id.clone(),
+                file_id: file_id.clone(),
+                parent_id: parent_id.clone(),
+                file_name: file_name.clone(),
+                base_md5: base_md5.clone(),
+                own_md5: own_md5.to_string(),
+                commit_took_ms: u64::try_from(commit_took.as_millis()).unwrap_or(u64::MAX),
+                op_id: self.op_id.clone(),
+                landed_at_ms: epoch_millis_now(),
+            },
+        )));
+        let mut state = self
+            .replaced
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back((
-                ReplacedWork::Check {
-                    file_id: file_id.clone(),
-                    parent_id: parent_id.clone(),
-                    file_name: file_name.clone(),
-                    base_md5: base_md5.clone(),
-                    own_md5: own_md5.to_string(),
-                    commit_took,
-                    op_id: self.op_id.clone(),
-                },
-                0,
-            ));
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .changes
+            .push(FollowUpChange::Started(origin.record.clone()));
+        state.queue.push_back(ReplacedEntry {
+            origin,
+            work: ReplacedWork::Check,
+            attempts: 0,
+        });
     }
 
     /// Whether a failed commit can have landed all the same: the
@@ -2884,6 +3520,7 @@ impl GdriveUploadSession {
             }
         };
         self.state = UploadState::Done;
+        let remote_id = self.written_file_id(&file);
         let content_hash = file
             .md5_checksum
             .filter(|md5| !md5.is_empty())
@@ -2893,6 +3530,7 @@ impl GdriveUploadSession {
             bytes_total: self.total_bytes,
             remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             content_hash,
+            remote_id,
         })
     }
 
@@ -3062,6 +3700,7 @@ impl TransferSession for GdriveUploadSession {
                         // it read every one of them.
                         let sent_hash = (self.hashed_bytes == self.total_bytes)
                             .then(|| hex_encode(&std::mem::take(&mut self.hasher).finalize()));
+                        let remote_id = self.written_file_id(&file);
                         let stored_hash = file.md5_checksum.filter(|checksum| !checksum.is_empty());
                         // A completed upload is a verified upload: what
                         // Drive stored is what was sent. A difference
@@ -3083,6 +3722,7 @@ impl TransferSession for GdriveUploadSession {
                                 .modified_time
                                 .as_deref()
                                 .and_then(parse_rfc3339_millis),
+                            remote_id,
                         }))
                     }
                     _ => {
@@ -3230,6 +3870,7 @@ impl GdriveDownloadSession {
             bytes_total: self.received_bytes,
             content_hash,
             remote_modified_at: self.remote_modified_at,
+            remote_id: Some(self.file_id.clone()).filter(|id| !id.is_empty()),
         }))
     }
 }

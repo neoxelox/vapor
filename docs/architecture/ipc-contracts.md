@@ -260,7 +260,7 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   stage), `attempts`, `error` (the last one), and a human-readable
   `reason` it is not moving (for example "hash workers 2/2 and read
   tokens 1/1 in use", "retry backoff active (attempt 3); next try in
-  4 min", "waiting for decision #4"). This is the data source for the "why is this stuck"
+  4 min"). This is the data source for the "why is this stuck"
   surface.
 - `action` says what the item does (`constants::intent::ACTION_*`):
   - `upload` / `download`: content moving to or from the cloud.
@@ -268,13 +268,11 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   - `local-delete`: a delete made on this device, carried to the cloud.
   - `cloud-delete`: a delete made in the cloud, applied on this device.
   - `reconcile`: a subtree the reconcile walk still has to compare.
-- `stage` says where it is (`constants::intent::STAGE_*`). Three values
+- `stage` says where it is (`constants::intent::STAGE_*`). Two values
   describe the durable queue, the rest mirror the staged executor:
   - `queued`, in the durable queue, waiting to be leased.
   - `retrying`: hit a transient or rate-limited failure and waits out
     its backoff; it reads `queued` again once the backoff elapses.
-  - `held`: parked behind an open decision; the blocker names the
-    decision number. Not leased until the decision is answered.
   - `planning`: leased and in the planner.
   - `waiting-to-hash`: planned, waiting for a hash permit (workgate cap
     exhausted, or the throttle disallows hashing).

@@ -16,7 +16,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use vapor_providers::{ChangesPoll, ProviderError, RemoteChangeKind};
+use vapor_providers::tags::OpIdTagStore;
+use vapor_providers::{
+    ChangesPoll, ProviderError, RemoteChange, RemoteChangeKind, RemoteEntryKind,
+};
 use vapor_shared::{SyncMode, ThrottleState, constants};
 
 use crate::DaemonApp;
@@ -25,6 +28,7 @@ use crate::event_intents::PendingIntentKind;
 use crate::fs_events::SharedEventPathFilter;
 use crate::logging;
 use crate::provider_jobs::{ProviderCall, ProviderCallMode};
+use crate::remote_move::{CloudMove, DeviceRenames};
 use crate::self_write_cache::SelfWriteCache;
 use crate::state_db::{DurableStateDb, StateDbError};
 
@@ -45,9 +49,6 @@ pub struct RemotePollReport {
     /// Push-only strict-mirror removals scheduled this poll (cloud-only
     /// content deleted).
     pub mirror_deletes: usize,
-    /// Held deletions dropped because the cloud removed the path itself
-    /// while the question was open.
-    pub moot_holds: usize,
     /// Remote changes left untouched because they would alias a
     /// differently-cased local file. The paths are kept by the poller
     /// (`take_name_collisions`) for the timeline.
@@ -56,6 +57,23 @@ pub struct RemotePollReport {
     /// until the user signs in again. The message is kept by the poller
     /// (`take_refused_sign_in`).
     pub sign_in_refused: bool,
+    /// Files and folders that got another name or place in the cloud
+    /// and were renamed on this device in one step this poll.
+    pub renamed_on_device: usize,
+}
+
+/// What a poll works with beyond the provider and the state database.
+pub(crate) struct PollEnv<'a> {
+    /// Echo cache keyed by remote path.
+    pub remote_echoes: &'a mut SelfWriteCache,
+    /// Echo cache keyed by local path: a rename that the poll makes on
+    /// this device is recorded here.
+    pub local_echoes: &'a mut SelfWriteCache,
+    /// The store of the op-id tags on this device.
+    pub tags: Option<&'a OpIdTagStore>,
+    pub local_root: Option<&'a Path>,
+    pub path_filter: Option<&'a SharedEventPathFilter>,
+    pub sync_mode: SyncMode,
 }
 
 pub struct RemotePoller {
@@ -221,23 +239,19 @@ impl RemotePoller {
     /// tick harvests the page, so the tick loop never waits on the
     /// network. A poll in flight is harvested before any gate is
     /// consulted, so a throttle change cannot strand it.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn poll_if_due(
         &mut self,
         app: &mut DaemonApp,
         state_db: &mut DurableStateDb,
-        remote_echoes: &mut SelfWriteCache,
-        local_root: Option<&Path>,
-        path_filter: Option<&SharedEventPathFilter>,
-        sync_mode: SyncMode,
+        mut env: PollEnv<'_>,
         clock: &SharedClock,
         now: SystemTime,
         mode: &ProviderCallMode,
     ) -> Result<RemotePollReport, StateDbError> {
         let mut report = RemotePollReport::default();
-        let Some(local_root) = local_root else {
+        if env.local_root.is_none() {
             return Ok(report);
-        };
+        }
         if let Some(call) = self.in_flight.as_mut() {
             let Some(result) = call.take() else {
                 return Ok(report);
@@ -250,16 +264,7 @@ impl RemotePoller {
             }
             report.polled = true;
             if let Some(poll) = self.unwrap_poll(result, &mut report) {
-                self.apply_poll(
-                    poll,
-                    state_db,
-                    remote_echoes,
-                    local_root,
-                    path_filter,
-                    sync_mode,
-                    now,
-                    &mut report,
-                )?;
+                self.apply_poll(poll, state_db, &mut env, now, &mut report)?;
             }
             return Ok(report);
         }
@@ -318,16 +323,7 @@ impl RemotePoller {
         };
         report.polled = true;
         if let Some(poll) = self.unwrap_poll(result, &mut report) {
-            self.apply_poll(
-                poll,
-                state_db,
-                remote_echoes,
-                local_root,
-                path_filter,
-                sync_mode,
-                now,
-                &mut report,
-            )?;
+            self.apply_poll(poll, state_db, &mut env, now, &mut report)?;
         }
         Ok(report)
     }
@@ -369,18 +365,18 @@ impl RemotePoller {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_poll(
         &mut self,
         poll: ChangesPoll,
         state_db: &mut DurableStateDb,
-        remote_echoes: &mut SelfWriteCache,
-        local_root: &Path,
-        path_filter: Option<&SharedEventPathFilter>,
-        sync_mode: SyncMode,
+        env: &mut PollEnv<'_>,
         now: SystemTime,
         report: &mut RemotePollReport,
     ) -> Result<(), StateDbError> {
+        let Some(local_root) = env.local_root else {
+            return Ok(());
+        };
+        let (path_filter, sync_mode) = (env.path_filter, env.sync_mode);
         let first_poll = !self.first_poll_done;
         self.first_poll_done = true;
         match poll {
@@ -429,7 +425,7 @@ impl RemotePoller {
                 self.awaiting_cursor = true;
                 self.last_poll_inst = None;
             }
-            ChangesPoll::Page(page) => {
+            ChangesPoll::Page(mut page) => {
                 self.awaiting_cursor = false;
                 // A page for a poll with a cursor holds every change
                 // since that cursor, so only a baseline leaves a gap.
@@ -455,7 +451,22 @@ impl RemotePoller {
                 let page_was_full =
                     page.changes.len() >= constants::engine::REMOTE_CHANGES_PAGE_MAX;
                 let mut batch = Vec::new();
-                for change in &page.changes {
+                let mut changes: std::collections::VecDeque<RemoteChange> =
+                    std::mem::take(&mut page.changes).into();
+                while let Some(change) = changes.pop_front() {
+                    let change = &change;
+                    if let RemoteChangeKind::Moved { from, entry_kind } = &change.kind {
+                        // One object under another name or in another
+                        // place. A move that is not settled here is
+                        // worked as the changes it stands for.
+                        let unsettled =
+                            settle_move(state_db, env, change, from, *entry_kind, now, report)?;
+                        for change in unsettled.into_iter().rev() {
+                            changes.push_front(change);
+                        }
+                        continue;
+                    }
+                    let remote_echoes = &mut *env.remote_echoes;
                     // A remote name materialized under an alias maps to
                     // its local copy, not to the name it cannot have here.
                     let local_target = match state_db.name_alias(change.path.as_str())? {
@@ -536,7 +547,9 @@ impl RemotePoller {
                         }
                         continue;
                     }
-                    match change.kind {
+                    match &change.kind {
+                        // Settled above.
+                        RemoteChangeKind::Moved { .. } => {}
                         RemoteChangeKind::CreatedOrModified => {
                             // The object is there again. A delete the
                             // daemon made at this path is over, and a
@@ -589,8 +602,10 @@ impl RemotePoller {
                             // folder, and none of them has an entry of
                             // its own. The walk of the folder that holds
                             // this path finds what the change did: a
-                            // name with another spelling, files under a
-                            // new path, files that left.
+                            // folder under a new name that the index
+                            // knows by its id, a name with another
+                            // spelling, files under a new path, files
+                            // that left.
                             //
                             // The root as the path: the provider could
                             // not read where a change is, and the walk
@@ -653,15 +668,6 @@ impl RemotePoller {
                                 }
                                 continue;
                             }
-                            // A deletion of this path held behind the
-                            // mass-delete decision has nothing left to
-                            // do: the cloud copy is already gone.
-                            if state_db
-                                .drop_held_at(&local_target, PendingIntentKind::Delete)?
-                                .is_some()
-                            {
-                                report.moot_holds += 1;
-                            }
                             batch.push((
                                 local_target,
                                 PendingIntentKind::ApplyRemoteDelete,
@@ -702,6 +708,154 @@ impl RemotePoller {
 
         Ok(())
     }
+}
+
+/// Applies a change that says one object went from `from` to the path
+/// of the change. Returns the changes that are still to work:
+///
+/// - The entry was renamed on this device, or the device keeps its own
+///   name and the cloud is owed a move: nothing is left for a folder.
+///   A file leaves one `CreatedOrModified` for its path, because a
+///   file can get new content with its new name; the content of an
+///   unchanged file reads as what the index holds, and is dropped.
+/// - Nothing was paired: the changes that a feed without this kind
+///   sends, a removal and a new file, or a folder that moved at each
+///   of its two paths. The device then works file by file.
+fn settle_move(
+    state_db: &mut DurableStateDb,
+    env: &mut PollEnv<'_>,
+    change: &RemoteChange,
+    from: &vapor_providers::RemotePath,
+    entry_kind: RemoteEntryKind,
+    now: SystemTime,
+    report: &mut RemotePollReport,
+) -> Result<Vec<RemoteChange>, StateDbError> {
+    let Some(local_root) = env.local_root else {
+        return Ok(Vec::new());
+    };
+    let is_folder = entry_kind == RemoteEntryKind::Directory;
+    let (from_local, to_local) = (from.to_local(local_root), change.path.to_local(local_root));
+    let state_of_the_file = || RemoteChange {
+        kind: RemoteChangeKind::CreatedOrModified,
+        ..change.clone()
+    };
+    if env.remote_echoes.matches_delete(from.as_str(), now) {
+        // The daemon moved this object itself, to carry a name of this
+        // device to the cloud. What the feed says about the content of
+        // a file is still read, like the echo of an upload.
+        report.suppressed_echoes += 1;
+        return Ok(if is_folder {
+            Vec::new()
+        } else {
+            vec![state_of_the_file()]
+        });
+    }
+    let hidden = |path: &Path| {
+        env.path_filter
+            .is_some_and(|filter| filter.should_ignore_kind(path, is_folder))
+    };
+    let settled = if hidden(&from_local) || hidden(&to_local) {
+        // A name that an ignore rule hides never syncs, so a move to
+        // it or from it is a removal or a new entry.
+        CloudMove::FileByFile("an ignore rule hides one of the two paths".to_string())
+    } else if state_db.name_alias(from.as_str())?.is_some()
+        || state_db.name_alias(change.path.as_str())?.is_some()
+    {
+        CloudMove::FileByFile("the file syncs under another name on this device".to_string())
+    } else {
+        let mut renamed = Vec::new();
+        let settled = DeviceRenames {
+            state_db: &mut *state_db,
+            renamed: &mut renamed,
+            tags: env.tags,
+            local_root,
+            sync_mode: env.sync_mode,
+            now,
+        }
+        .settle(&from_local, &to_local, is_folder)?;
+        for (old_path, new_path) in renamed {
+            env.local_echoes.record_rename(&old_path, &new_path, now);
+        }
+        settled
+    };
+    Ok(match settled {
+        CloudMove::RenamedOnDevice | CloudMove::AlreadyThere => {
+            if settled == CloudMove::RenamedOnDevice {
+                report.renamed_on_device += 1;
+            }
+            match (&change.id, is_folder) {
+                (Some(id), true) => state_db.record_synced_folder(&to_local, id, now)?,
+                (Some(id), false) => state_db.set_sync_index_remote_id(&to_local, id)?,
+                (None, _) => {}
+            }
+            // A backend can give an object a new modification time when
+            // it gets a new name. With the content of the last sync the
+            // object is still unchanged: the index takes the new time,
+            // so the next scan does not read it as a change.
+            if !is_folder
+                && let (Some(hash), Some(modified_at)) =
+                    (change.content_hash.as_deref(), change.modified_at)
+                && let Some(row) = state_db.sync_index(&to_local)?
+                && row.content_hash == hash
+            {
+                state_db.set_sync_index_remote_state(
+                    &to_local,
+                    modified_at,
+                    change.op_id.as_deref().unwrap_or(&row.last_op_id),
+                )?;
+            }
+            if is_folder {
+                Vec::new()
+            } else {
+                vec![state_of_the_file()]
+            }
+        }
+        CloudMove::OwedToCloud(_) => {
+            if env.sync_mode == SyncMode::PushOnly {
+                report.mirror_reverts += 1;
+            }
+            Vec::new()
+        }
+        CloudMove::FileByFile(reason) => {
+            // One line for one move. A folder goes to the walk of the
+            // folder that holds it, which tries the rename once more
+            // and says so when it works file by file too.
+            let fields = [
+                ("from", from_local.display().to_string()),
+                ("to", to_local.display().to_string()),
+                ("reason", reason),
+            ];
+            if is_folder {
+                logging::debug(
+                    "A move of a folder in the cloud is left to the walk of the folder that holds it",
+                    &fields,
+                );
+            } else {
+                logging::info(
+                    "A move in the cloud is not applied as one rename on this device; working file by file",
+                    &fields,
+                );
+            }
+            let bare = |path: &vapor_providers::RemotePath, kind: RemoteChangeKind| RemoteChange {
+                path: path.clone(),
+                kind,
+                observed_at: change.observed_at,
+                op_id: None,
+                content_hash: None,
+                size_bytes: None,
+                modified_at: None,
+                id: change.id.clone(),
+            };
+            if is_folder {
+                vec![
+                    bare(from, RemoteChangeKind::FolderMoved),
+                    bare(&change.path, RemoteChangeKind::FolderMoved),
+                ]
+            } else {
+                vec![bare(from, RemoteChangeKind::Removed), state_of_the_file()]
+            }
+        }
+    })
 }
 
 /// Whether a regular file exists at `path` (symlinks and directories
@@ -848,6 +1002,7 @@ mod tests {
         state_db: DurableStateDb,
         poller: RemotePoller,
         remote_echoes: SelfWriteCache,
+        local_echoes: SelfWriteCache,
         feed: ManualFeedHandle,
         clock: Arc<ManualClock>,
     }
@@ -884,6 +1039,7 @@ mod tests {
                 state_db,
                 poller: RemotePoller::new("default"),
                 remote_echoes: SelfWriteCache::new(),
+                local_echoes: SelfWriteCache::new(),
                 feed,
                 clock,
             }
@@ -903,10 +1059,14 @@ mod tests {
                 .poll_if_due(
                     &mut self.app,
                     &mut self.state_db,
-                    &mut self.remote_echoes,
-                    Some(&self.local_root),
-                    self.path_filter.as_deref(),
-                    self.sync_mode,
+                    PollEnv {
+                        remote_echoes: &mut self.remote_echoes,
+                        local_echoes: &mut self.local_echoes,
+                        tags: None,
+                        local_root: Some(&self.local_root),
+                        path_filter: self.path_filter.as_deref(),
+                        sync_mode: self.sync_mode,
+                    },
                     &clock,
                     now,
                     &ProviderCallMode::Inline,
@@ -1137,6 +1297,7 @@ mod tests {
             content_hash: None,
             size_bytes: None,
             modified_at: None,
+            id: None,
         };
         // The folder got another spelling, then moved to the top. Then
         // the provider could not read where a change is.
@@ -1157,6 +1318,7 @@ mod tests {
             DurableStateDb::open(temp.path().join("state/vapor.sqlite")).expect("open state db");
         let mut poller = RemotePoller::new("default");
         let mut echoes = SelfWriteCache::new();
+        let mut local_echoes = SelfWriteCache::new();
         let mut poll = |state_db: &mut DurableStateDb, now: SystemTime| {
             clock.advance(Duration::from_secs(61));
             let shared: SharedClock = clock.clone();
@@ -1164,10 +1326,14 @@ mod tests {
                 .poll_if_due(
                     &mut app,
                     state_db,
-                    &mut echoes,
-                    Some(&local_root),
-                    None,
-                    SyncMode::TwoWay,
+                    PollEnv {
+                        remote_echoes: &mut echoes,
+                        local_echoes: &mut local_echoes,
+                        tags: None,
+                        local_root: Some(&local_root),
+                        path_filter: None,
+                        sync_mode: SyncMode::TwoWay,
+                    },
                     &shared,
                     now,
                     &ProviderCallMode::Inline,

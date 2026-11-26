@@ -129,7 +129,7 @@ fn each_command_ends_with_its_documented_exit_code() {
         (&["profiles", "enable", "nope"], 1),
         (&["profiles", "rename", "nope", "Name"], 1),
         (&["decisions", "show", "99"], 1),
-        (&["decisions", "resolve", "99", "--choose", "apply"], 1),
+        (&["decisions", "resolve", "99", "--choose", "skip"], 1),
         (&["trash", "restore", "99"], 1),
         (&["init"], 1),
         // 1: the commands that need the daemon, with none running.
@@ -449,7 +449,7 @@ fn decisions_and_trash_are_empty_and_well_formed_on_a_fresh_home() {
 
     let missing = vapor(
         home.path(),
-        &["decisions", "resolve", "7", "--choose", "apply"],
+        &["decisions", "resolve", "7", "--choose", "skip"],
     );
     assert_eq!(missing.status.code(), Some(1));
     assert!(stderr(&missing).contains("7"), "{}", stderr(&missing));

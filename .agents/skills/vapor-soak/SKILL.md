@@ -77,10 +77,9 @@ order and quote what you find:
    skill for the product side.
 
 States the driver expects and you should not mistake for findings: a
-`guard-trip` fault event (the mass-delete guard held a subtree
-removal and the driver answered `apply`), a `root-missing` decision
-while the driver has the cloud root parked (it withdraws itself on
-restore), the daemon in `Error` during that parking, and the daemon
+`root-missing` decision while the driver has the cloud root parked (it
+withdraws itself on restore), the daemon in `Error` during that
+parking, and the daemon
 in `Error` with a reason that starts with `uploads wait` during a
 `disk-full` phase and for up to 16 minutes after it (the driver's
 note says that it waits for those uploads). A daemon that

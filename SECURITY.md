@@ -72,9 +72,8 @@ Most valuable to look at:
   `core/providers/src/paths.rs`. Vapor must never read or write outside
   the configured local and cloud roots. Path traversal, symlink
   escapes, and `..` handling all count.
-- **Data-destroying behaviour**: the mass-delete guard
-  (`core/daemon/src/safeguards.rs`), conflict resolution
-  (`core/daemon/src/conflict.rs`), and loop prevention
+- **Data-destroying behaviour**: conflict resolution
+  (`core/daemon/src/conflict.rs`) and loop prevention
   (`core/daemon/src/self_write_cache.rs`). Anything that silently
   overwrites or destroys user data in `two-way` mode is a security-class
   bug to us, not just a sync bug.

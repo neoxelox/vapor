@@ -1,4 +1,4 @@
-//! Sync modes, deletion semantics, profiles, safeguards, and name
+//! Sync modes, deletion semantics, profiles, decisions, and name
 //! collisions. Several scenarios here pin behavior the product has
 //! today so a change of policy is a deliberate edit, not an accident.
 
@@ -136,14 +136,6 @@ pub fn scenarios() -> Vec<Scenario> {
             run: profile_changes_need_no_restart,
         },
         Scenario {
-            id: "S31",
-            name: "mass-delete-decision-apply",
-            proves: "a burst of local deletions is held whole behind a mass-delete decision while other work continues; vapor decisions resolve --choose apply releases it",
-            needs: &[Need::NativeWatcher, Need::Filesystem],
-            expect: Expect::Pass,
-            run: mass_delete_guard,
-        },
-        Scenario {
             id: "S46",
             name: "type-mismatch-decision",
             proves: "a name that is a file here and a folder in the cloud opens a type-mismatch decision and touches nothing; keep-both moves the file to a conflict name and brings the folder down",
@@ -195,14 +187,6 @@ pub fn scenarios() -> Vec<Scenario> {
             needs: &[Need::NativeWatcher, Need::Filesystem, Need::DiskImage],
             expect: Expect::Pass,
             run: trash_on_the_sync_root_volume,
-        },
-        Scenario {
-            id: "S40",
-            name: "mass-delete-decision-discard",
-            proves: "a burst of cloud deletions is held before it touches this device; --choose discard restores the cloud copies from the local ones",
-            needs: &[Need::NativeWatcher, Need::Filesystem],
-            expect: Expect::Pass,
-            run: mass_delete_discard,
         },
         Scenario {
             id: "S33",
@@ -994,133 +978,6 @@ fn profile_changes_need_no_restart(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The one open mass-delete decision, once the daemon has opened it.
-fn wait_open_mass_deletion(cli: &crate::cli::Cli, timeout: Duration) -> Result<i64, Failure> {
-    let mut found = None;
-    wait::wait_until(timeout, "the mass-delete guard to open a decision", || {
-        let Ok(report) = cli.json(&["decisions", "list", "--json"]) else {
-            return false;
-        };
-        found = report["decisions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|decision| decision["kind"] == "mass-delete" && decision["choice"].is_null())
-            .and_then(|decision| decision["id"].as_i64());
-        found.is_some()
-    })?;
-    found.ok_or_else(|| Failure::new("no open mass-delete decision"))
-}
-
-fn victims_in(root: &Path) -> usize {
-    fs::read_dir(root)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("victim-"))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-/// Twenty synced files; twelve deleted at once. Under the default
-/// settings that is a burst above the ratio floor, so the guard holds
-/// it behind a decision.
-fn seed_victims(ctx: &mut Ctx, home: &crate::sandbox::Home) -> Result<(), Failure> {
-    let mark = ctx.mark();
-    for index in 0..20 {
-        write_file(
-            &home.local.join(format!("victim-{index:02}.txt")),
-            format!("victim {index}\n"),
-        )?;
-    }
-    ctx.converge_from(&mark, 20, Duration::from_secs(60))?;
-    ctx.wait_exists(&home.cloud.join("victim-19.txt"), CONVERGE_TIMEOUT)?;
-    ctx.settle(CONVERGE_TIMEOUT)?;
-    Ok(())
-}
-
-fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
-    let home = ctx.primary.clone();
-    ctx.configure_scope(&home)?;
-    ctx.start_daemon()?;
-    seed_victims(ctx, &home)?;
-
-    for index in 0..12 {
-        fs::remove_file(home.local.join(format!("victim-{index:02}.txt")))?;
-    }
-    let cli = ctx.cli();
-    let id = wait_open_mass_deletion(&cli, Duration::from_secs(30))?;
-    // Each deletion of a synced file first waits out the move-settle
-    // window, so the twelve join the hold over a few ticks.
-    wait::wait_until(
-        Duration::from_secs(30),
-        "every deletion of the burst to be held",
-        || {
-            cli.json(&["decisions", "show", &id.to_string(), "--json"])
-                .ok()
-                .and_then(|decision| decision["held"].as_u64())
-                == Some(12)
-        },
-    )?;
-    let decision = cli.json(&["decisions", "show", &id.to_string(), "--json"])?;
-    ensure!(
-        decision["held"].as_u64() == Some(12),
-        "the whole burst must be held before any of it lands: {decision}"
-    );
-    ensure!(
-        decision["evidence"]["direction"] == "local-to-cloud",
-        "wrong direction in the evidence: {decision}"
-    );
-    let status = cli
-        .status()
-        .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.run.state == "running",
-        "a held batch must not pause the daemon (run state {})",
-        status.run.state
-    );
-    ensure!(
-        status.decisions == 1,
-        "status must count the open decision, got {}",
-        status.decisions
-    );
-    ensure!(
-        victims_in(&home.cloud) == 20,
-        "held deletions must not reach the cloud; {} of 20 remain",
-        victims_in(&home.cloud)
-    );
-    // Other work keeps flowing while the question is open.
-    let mark = ctx.mark();
-    write_file(&home.local.join("meanwhile.txt"), "still syncing\n")?;
-    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
-    ctx.wait_exists(&home.cloud.join("meanwhile.txt"), CONVERGE_TIMEOUT)?;
-    let timeline = cli.json(&["timeline", "--json"])?;
-    ensure!(
-        timeline.to_string().contains("\"decision\""),
-        "the decision did not land on the timeline"
-    );
-
-    cli.ok(&["decisions", "resolve", &id.to_string(), "--choose", "apply"])?;
-    ctx.wait_until(
-        Duration::from_secs(60),
-        "the held deletions to propagate after apply",
-        || victims_in(&home.cloud) == 8,
-    )?;
-    ctx.settle(CONVERGE_TIMEOUT)?;
-    let open = cli.json(&["decisions", "list", "--json"])?;
-    ensure!(
-        open["decisions"].as_array().is_some_and(Vec::is_empty),
-        "the answered decision must leave the open list: {open}"
-    );
-    let status = cli
-        .status()
-        .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(status.decisions == 0, "status still counts a decision");
-    ctx.allow_warning("Mass-deletion guard tripped");
-    Ok(())
-}
-
 #[cfg(unix)]
 fn unsyncable_name_decision(ctx: &mut Ctx) -> Result<(), Failure> {
     use std::os::unix::ffi::OsStrExt;
@@ -1530,48 +1387,6 @@ fn sync_now_after_a_full_cloud(ctx: &mut Ctx) -> Result<(), Failure> {
     cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ctx.keep_alive(Box::new(image));
-    Ok(())
-}
-
-fn mass_delete_discard(ctx: &mut Ctx) -> Result<(), Failure> {
-    let home = ctx.primary.clone();
-    ctx.configure_scope(&home)?;
-    ctx.start_daemon()?;
-    seed_victims(ctx, &home)?;
-
-    // Another device empties most of the cloud folder.
-    for index in 0..12 {
-        fs::remove_file(home.cloud.join(format!("victim-{index:02}.txt")))?;
-    }
-    let cli = ctx.cli();
-    // The changes feed polls once a minute under the harness's static
-    // throttle, and each removal waits out the move-settle window.
-    let id = wait_open_mass_deletion(&cli, Duration::from_secs(120))?;
-    let decision = cli.json(&["decisions", "show", &id.to_string(), "--json"])?;
-    ensure!(
-        decision["evidence"]["direction"] == "cloud-to-local",
-        "wrong direction in the evidence: {decision}"
-    );
-    ensure!(
-        victims_in(&home.local) == 20,
-        "held deletions must not touch this device; {} of 20 remain",
-        victims_in(&home.local)
-    );
-    cli.ok(&[
-        "decisions",
-        "resolve",
-        &id.to_string(),
-        "--choose",
-        "discard",
-    ])?;
-    ctx.wait_until(
-        Duration::from_secs(60),
-        "the discarded deletions to be undone by re-uploading",
-        || victims_in(&home.cloud) == 20,
-    )?;
-    ctx.settle(CONVERGE_TIMEOUT)?;
-    ensure!(victims_in(&home.local) == 20, "a local copy went missing");
-    ctx.allow_warning("Mass-deletion guard tripped");
     Ok(())
 }
 

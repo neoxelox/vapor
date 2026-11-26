@@ -23,8 +23,8 @@ use vapor_platform::fs_caps::{CaseSensitivity, InMemoryFilesystemCapabilities};
 use vapor_providers::filesystem::hash_hex_of_bytes;
 use vapor_providers::{
     ChangesPoll, DownloadRequest, FilesystemProvider, Provider, ProviderCapabilities,
-    ProviderError, RemoteEntry, RemoteEntryKind, RemotePath, RemotePrecondition, TransferOutcome,
-    TransferSession, TransferStep, UploadRequest,
+    ProviderError, RemoteEntry, RemoteEntryKind, RemoteIdentity, RemotePath, RemotePrecondition,
+    TransferOutcome, TransferSession, TransferStep, UploadRequest,
 };
 use vapor_shared::ProviderErrorKind;
 
@@ -279,6 +279,153 @@ fn contract_changes_feed_reports_new_writes_or_is_unadvertised() {
 }
 
 #[test]
+fn contract_a_provider_that_owes_no_work_after_a_write_reports_none_and_takes_no_record() {
+    for under_test in providers_under_test() {
+        let provider = under_test.provider.as_ref();
+        let name = under_test.name;
+        let scratch = tempfile::TempDir::new().expect("scratch");
+
+        // A fresh write and a guarded overwrite: each of these backends
+        // makes the check and the write one step, or holds the replaced
+        // file in its hands at once, so nothing is left to do later.
+        let first = upload(
+            provider,
+            scratch.path(),
+            "notes/owed.txt",
+            b"first",
+            RemotePrecondition::Absent,
+        )
+        .unwrap_or_else(|error| panic!("{name}: upload failed: {error}"));
+        upload(
+            provider,
+            scratch.path(),
+            "notes/owed.txt",
+            b"second",
+            RemotePrecondition::HashEquals(first.content_hash),
+        )
+        .unwrap_or_else(|error| panic!("{name}: guarded overwrite failed: {error}"));
+        assert!(
+            provider.take_follow_up_changes().is_empty(),
+            "{name}: no work is owed after a write"
+        );
+
+        // A record that another backend stored is not kept: the engine
+        // forgets what the provider does not take.
+        let records = vec!["a record of another backend".to_string()];
+        assert_eq!(
+            provider.resume_follow_ups(records.clone()),
+            records,
+            "{name}: a record it cannot do is handed straight back"
+        );
+    }
+}
+
+#[test]
+fn contract_object_ids_are_for_every_object_or_for_none_and_stay_with_a_moved_object() {
+    for under_test in providers_under_test() {
+        let provider = under_test.provider.as_ref();
+        let name = under_test.name;
+        let scratch = tempfile::TempDir::new().expect("scratch");
+        let path = |text: &str| RemotePath::new(text).expect("path");
+
+        let written = upload(
+            provider,
+            scratch.path(),
+            "ids/first.txt",
+            b"first",
+            RemotePrecondition::Absent,
+        )
+        .unwrap_or_else(|error| panic!("{name}: upload failed: {error}"));
+        upload(
+            provider,
+            scratch.path(),
+            "ids/second.txt",
+            b"second",
+            RemotePrecondition::Absent,
+        )
+        .unwrap_or_else(|error| panic!("{name}: upload failed: {error}"));
+
+        // A folder and two files: a backend with ids has one for each
+        // of them, and a backend without ids has none anywhere. The
+        // engine pairs a renamed entry by its id, so an id on some
+        // entries only would pair some renames and not others.
+        let mut entries = provider
+            .enumerate(&RemotePath::root())
+            .unwrap_or_else(|error| panic!("{name}: enumerate failed: {error}"));
+        entries.extend(
+            provider
+                .enumerate(&path("ids"))
+                .unwrap_or_else(|error| panic!("{name}: enumerate failed: {error}")),
+        );
+        assert_eq!(entries.len(), 3, "{name}: {entries:?}");
+        let ids: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry.id.as_deref())
+            .collect();
+        let has_ids = !ids.is_empty();
+        assert!(
+            ids.is_empty() || ids.len() == entries.len(),
+            "{name}: an id for every entry or for none: {entries:?}"
+        );
+        assert_eq!(
+            written.remote_id.is_some(),
+            has_ids,
+            "{name}: a transfer reports the id of its object when the backend has ids"
+        );
+        let stat_id = |text: &str| {
+            provider
+                .stat(&path(text))
+                .unwrap_or_else(|error| panic!("{name}: stat failed: {error}"))
+                .and_then(|entry| entry.id)
+        };
+        if has_ids {
+            let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+            assert_eq!(unique.len(), ids.len(), "{name}: one id, one object");
+            assert_eq!(
+                stat_id("ids/first.txt"),
+                written.remote_id,
+                "{name}: a lookup and a transfer name the object by the same id"
+            );
+        } else {
+            assert_eq!(stat_id("ids/first.txt"), None, "{name}");
+        }
+
+        // The id is the object's, not the path's: it stays under a new
+        // name.
+        if provider.capabilities().supports_server_side_move {
+            let before = stat_id("ids/first.txt");
+            provider
+                .move_object(&path("ids/first.txt"), &path("ids/moved.txt"), "op-move")
+                .unwrap_or_else(|error| panic!("{name}: move failed: {error}"));
+            assert_eq!(stat_id("ids/moved.txt"), before, "{name}");
+        }
+
+        // The ids that the engine stored come back at a start. They
+        // are what the engine believed: an id for a path makes no
+        // object, and a backend without ids keeps nothing.
+        provider.restore_remote_ids(vec![RemoteIdentity {
+            path: path("ids/never-there.txt"),
+            kind: RemoteEntryKind::File,
+            id: "an-id-of-no-object".to_string(),
+        }]);
+        assert!(
+            provider
+                .stat(&path("ids/never-there.txt"))
+                .is_ok_and(|entry| entry.is_none()),
+            "{name}: a path that came back is no object"
+        );
+        assert_eq!(
+            provider
+                .enumerate(&path("ids"))
+                .unwrap_or_else(|error| panic!("{name}: enumerate failed: {error}"))
+                .len(),
+            2,
+            "{name}: the listing is what the backend holds"
+        );
+    }
+}
+
+#[test]
 fn contract_scope_rejects_traversal_shapes_at_the_type_boundary() {
     // RemotePath is the shared scope-safety gate: no provider can even
     // be asked to touch a traversal path.
@@ -382,6 +529,7 @@ impl Provider for MockObjectStoreProvider {
                             modified_at: SystemTime::UNIX_EPOCH,
                             content_hash: None,
                             op_id: None,
+                            id: None,
                         });
                     }
                 }
@@ -392,6 +540,7 @@ impl Provider for MockObjectStoreProvider {
                     modified_at: SystemTime::UNIX_EPOCH,
                     content_hash: Some(hash_hex_of_bytes(content)),
                     op_id: None,
+                    id: None,
                 }),
             }
         }
@@ -406,6 +555,7 @@ impl Provider for MockObjectStoreProvider {
             modified_at: SystemTime::UNIX_EPOCH,
             content_hash: Some(hash_hex_of_bytes(content)),
             op_id: None,
+            id: None,
         }))
     }
 
@@ -447,6 +597,7 @@ impl Provider for MockObjectStoreProvider {
                 bytes_total: bytes,
                 content_hash: hash,
                 remote_modified_at: None,
+                remote_id: None,
             }),
         }))
     }
@@ -469,6 +620,7 @@ impl Provider for MockObjectStoreProvider {
                 bytes_total: content.len() as u64,
                 content_hash: hash_hex_of_bytes(&content),
                 remote_modified_at: None,
+                remote_id: None,
             }),
         }))
     }

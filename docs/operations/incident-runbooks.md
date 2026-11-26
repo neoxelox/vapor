@@ -208,7 +208,6 @@ Mitigation, by what the items say:
 
 | Stage or state | Meaning | What to do |
 |---|---|---|
-| `held` | the item waits for a decision | `vapor decisions list`, then `vapor decisions resolve <id> --choose <option>` |
 | `retrying` | a transient failure or a rate limit | check the network; for a rate limit, runbook 3 |
 | `waiting-to-hash`, `waiting-to-upload`, `waiting-to-download` | the throttle admits less work now | read the throttle line of `vapor status`; only `suspended` (a critically hot device) stops sync |
 | run state `error` | the profile is on hold | the reason names the cause: a missing or replaced folder (a decision), a sign-in (runbook 2), a full cloud (free space, then `vapor reconcile` tries the waiting uploads at once, after a restart too; with no request they are tried each 15 minutes), a cloud folder that cannot be reached |

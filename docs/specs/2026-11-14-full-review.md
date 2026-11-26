@@ -101,7 +101,7 @@ Each decision below is the owner's (owner, 2026-11-14).
 | # | Decision |
 |---|---|
 | D1 | On a volume that folds case, a change in only the spelling of a name is a rename. Vapor carries it to the other side as a move. It makes no conflict copy and asks no question. (ENG-29) |
-| D2 | When both sides changed the spelling in different ways before a sync, the cloud's spelling stays and the local name follows it. (ENG-29) |
+| D2 | When both sides changed the spelling in different ways before a sync, the cloud's spelling stays and the local name follows it. (ENG-29) Replaced by D8 of `2026-11-25-cloud-folder-rename.md`. |
 | D3 | A local deletion of a file that has no row in the sync index keeps the cloud object and downloads it again. Vapor never deletes a cloud object that it did not compare. (ENG-16) |
 | D4 | A modification time never decides that a deletion wins. Both tombstone-against-mtime rules go, and the sync index is the only evidence. The tombstone table goes too when no other code reads it. Accepted cost: a device that lost its state database can bring a deleted file back. (ENG-15) |
 | D5 | With no usable configuration (no `vapor.json`, a file that does not parse, or no valid profile) the daemon syncs nothing and creates no folder. It stays up, and `vapor status` says what to fix. A profile exists only when the user set its roots. (ENG-07, APP-01) |

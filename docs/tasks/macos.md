@@ -64,8 +64,8 @@ decision waits; the sign-in notice has a Sign In button.
       list as buttons, a Reveal in Finder affordance for a `conflict`
       row (its `evidence` names the original and the copy), and a native
       notification on `decision` timeline events. Kinds today:
-      `conflict`, `mass-delete`, `root-missing`, `root-replaced`,
-      `type-mismatch`, `unsyncable-name`, `one-way-mode`. No matching
+      `conflict`, `root-missing`, `root-replaced`, `type-mismatch`,
+      `unsyncable-name`, `one-way-mode`. No matching
       or resolution logic in Swift; the CLI and the daemon are the
       single engine (`docs/architecture/conflict-resolution.md`).
 - [ ] M3-10 Trash pane: what Vapor removed on this device, driving

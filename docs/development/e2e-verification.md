@@ -326,7 +326,6 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S28 | a file deleted in the cloud while the daemon was down is removed here into the trash on restart when the local copy is unchanged, and re-uploaded when the local copy changed meanwhile |
 | S29 | push-only uploads, overwrites a divergent cloud edit, removes a cloud-only file, never downloads |
 | S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
-| S31 | a burst of local deletions is held whole behind a `mass-delete` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
 | S32 | with the state DB deleted, a restart rebuilds the index from both trees without loss or invented conflicts |
 | S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy aliased to its own cloud object; an edit to the copy reaches that object and the cloud gains no third file |
 | S34 | the cloud root disappears mid-run: sync blocks with Error; it returns: work resumes and converges |
@@ -335,7 +334,6 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S37 | push-only overwrites a same-size cloud edit with no index row for the pair |
 | S38 | a cloud name that would alias a differently-cased local file never rewrites either cloud object, materializes once as a conflict copy, and a second reconcile adds nothing |
 | S39 | a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart |
-| S40 | a burst of cloud deletions is held before it touches this device; `--choose discard` restores the cloud copies from the local ones |
 | S41 | a cloud edit made while the daemon was down that keeps the byte count is found by the startup reconcile and downloaded, with no conflict copy |
 | S42 | a file removed on this device because the cloud deleted it lands in the trash; `vapor trash list` shows it and `vapor trash restore` brings it back and re-uploads it |
 | S43 | an empty folder appearing where the adopted local root was opens a `root-replaced` decision and syncs nothing; `reattach` merges the cloud into it with no deletion anywhere |
@@ -380,6 +378,9 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S82 | a profile that `vapor profiles` adds, disables, enables, or renames while the daemon runs is started, stopped, or renamed within seconds; the other profile keeps syncing, and status asks for no restart |
 | S83 | a file in the cloud folder whose name has a backslash opens an `unsyncable-name` decision that says where the file is, never reaches this device, and the question is withdrawn once the file is renamed in the cloud |
 | S84 | a state database that a build with another schema wrote is set aside next to itself at the start, the index is built again from both folders, and a file that left this device while the daemon was down comes back from the cloud: nothing is deleted on either side |
+| S85 | 40 files that are removed one by one on this device leave the cloud, and 40 that are removed in the cloud leave this device: half of what the profile syncs each time, with no question to the user |
+| S86 | a folder that a rename in the cloud emptied of synced files is removed when everything left in it is a file that an OS wrote there by itself (`.DS_Store`, `Thumbs.db`), and those files are in the trash; a folder that holds anything else (an ignored build tree) stays as it is |
+| S87 | a synced file and a synced folder whose names both sides respelled in two ways while Vapor does not run end under the spelling of this device on both sides, with no conflict copy, no deletion, and nothing in the trash (needs a volume that folds case) |
 | R01 | install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own (`--full`, disposable runners only) |
 
 ## Extending the harness

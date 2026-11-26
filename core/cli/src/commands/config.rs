@@ -182,10 +182,9 @@ pub fn one_way_warning(key: &str, value: &str) -> Option<String> {
 
 /// Updates one key in place and keeps every other key, so the Swift
 /// `VaporConfigurationStore` and the daemon never lose state. A dotted
-/// key (`resourceLimits.cpuPercent`, `safeguards.massDelete.threshold`)
-/// changes one field of a group and keeps its other fields; `null`
-/// removes the field so it takes its default. A whole group given as
-/// JSON replaces the group.
+/// key (`resourceLimits.cpuPercent`) changes one field of a group and
+/// keeps its other fields; `null` removes the field so it takes its
+/// default. A whole group given as JSON replaces the group.
 pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let segments = validate_key(key)?;
     let top = segments[0];
@@ -215,7 +214,12 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
                 .filter(|group| group.is_object())
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default()));
-            set_path(&mut group, &segments[1..], field_value);
+            let fields = group.as_object_mut().expect("the group is an object");
+            if field_value.is_null() {
+                fields.remove(segments[1]);
+            } else {
+                fields.insert(segments[1].to_string(), field_value);
+            }
             let checked = parse_value_for_key(top, &group.to_string())?;
             object.insert(top.to_string(), checked);
         }
@@ -224,31 +228,8 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     })
 }
 
-fn set_path(target: &mut Value, segments: &[&str], value: Value) {
-    let Some((last, parents)) = segments.split_last() else {
-        return;
-    };
-    let mut node = target;
-    for segment in parents {
-        let object = node.as_object_mut().expect("groups are objects");
-        let child = object
-            .entry(segment.to_string())
-            .or_insert_with(|| Value::Object(Default::default()));
-        if !child.is_object() {
-            *child = Value::Object(Default::default());
-        }
-        node = child;
-    }
-    let object = node.as_object_mut().expect("groups are objects");
-    if value.is_null() {
-        object.remove(*last);
-    } else {
-        object.insert(last.to_string(), value);
-    }
-}
-
-/// The key's path: one segment for a top-level key, more for a field of
-/// a group (`resourceLimits.cpuPercent`, `safeguards.massDelete.enabled`).
+/// The key's path: one segment for a top-level key, two for a field of
+/// a group (`resourceLimits.cpuPercent`).
 fn validate_key(key: &str) -> Result<Vec<&str>, ConfigError> {
     use constants::config as keys;
     let segments: Vec<&str> = key.split('.').collect();
@@ -257,12 +238,6 @@ fn validate_key(key: &str) -> Result<Vec<&str>, ConfigError> {
         [keys::KEY_RESOURCE_LIMITS, field] => constants::resource_limits::ALL_KEYS.contains(field),
         [keys::KEY_IDLE_BOOST, field] => constants::idle_boost::ALL_KEYS.contains(field),
         [keys::KEY_TRASH, field] => constants::trash::ALL_KEYS.contains(field),
-        [keys::KEY_SAFEGUARDS, constants::safeguards::KEY_MASS_DELETE] => true,
-        [
-            keys::KEY_SAFEGUARDS,
-            constants::safeguards::KEY_MASS_DELETE,
-            field,
-        ] => constants::safeguards::MASS_DELETE_KEYS.contains(field),
         _ => false,
     };
     if known {
@@ -287,8 +262,8 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
         KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_POST_IGNORE_RULES, KEY_PRE_IGNORE_RULES, KEY_PROFILES,
-        KEY_PROVIDER, KEY_RESOURCE_LIMITS, KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT,
-        KEY_TRASH, KEY_USE_GITIGNORE, KEY_USE_VAPORIGNORE,
+        KEY_PROVIDER, KEY_RESOURCE_LIMITS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_TRASH,
+        KEY_USE_GITIGNORE, KEY_USE_VAPORIGNORE,
     };
     if matches!(
         key,
@@ -356,13 +331,6 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
             key,
             raw,
             "a JSON object such as {\"enabled\": false}",
-        );
-    }
-    if key == KEY_SAFEGUARDS {
-        return parse_json_value::<vapor_shared::config::SafeguardsConfig>(
-            key,
-            raw,
-            "a JSON object such as {\"massDelete\": {\"threshold\": 500}}",
         );
     }
     if key == KEY_TRASH {
@@ -543,7 +511,7 @@ mod tests {
         let contents = fs::read_to_string(&path).expect("file");
         // Stored as JSON, not as a string containing JSON.
         assert!(contents.contains("\"profiles\": ["), "{contents}");
-        let error = set(&path, "safeguards", "massDelete.threshold=500").expect_err("not JSON");
+        let error = set(&path, "trash", "retentionDays=14").expect_err("not JSON");
         assert!(matches!(error, ConfigError::Parse(_)));
         let error = set(&path, "profiles", r#"{"id": "x"}"#).expect_err("wrong shape");
         assert!(error.to_string().contains("profiles"), "{error}");
@@ -622,15 +590,6 @@ mod tests {
         assert_eq!(
             get(&path, "resourceLimits.concurrentTransfers").expect("get"),
             None
-        );
-        assert_eq!(
-            get(&path, "safeguards.massDelete.threshold").expect("default"),
-            Some("1000".into())
-        );
-        set(&path, "safeguards.massDelete.enabled", "false").expect("nested field");
-        assert_eq!(
-            get(&path, "safeguards.massDelete.enabled").expect("get"),
-            Some("false".into())
         );
 
         // The field's type is checked like the whole group's.

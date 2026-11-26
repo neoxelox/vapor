@@ -133,9 +133,7 @@ Things the product does on purpose that a scenario must account for:
 - A deletion of a synced file waits one settle window (3 s) only
   while the create half of a rename may still come: other local
   events are inside their quiet window, or a transfer that could be
-  the new name is queued. Budget for it in waits, and expect a delete
-  burst to join a `mass-delete` hold over a few ticks rather than at
-  once.
+  the new name is queued. Budget for it in waits.
 - A decision (`vapor decisions list --json`) holds only its scope and
   never pauses the daemon: assert `run.state` stays `running` and
   `decisions` counts it; answer with `vapor decisions resolve`.

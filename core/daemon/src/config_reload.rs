@@ -2,8 +2,8 @@
 //!
 //! The daemon composes its pipeline from the configuration once, at
 //! start. Some settings can change under a running daemon without
-//! recomposing anything: resource ceilings, idle boost, the mass-delete
-//! guard, ignore toggles and rules, and the timeline length. Those are
+//! recomposing anything: resource ceilings, idle boost, ignore toggles
+//! and rules, and the timeline length. Those are
 //! `constants::config::LIVE_RELOAD_KEYS`, and the multi-profile runtime
 //! applies them within one poll interval of the file changing. So is
 //! the profile set: a profile that joins is composed and one that
@@ -77,7 +77,6 @@ pub fn diff(applied: &VaporConfig, fresh: &VaporConfig) -> ConfigChange {
         keys::KEY_RESOURCE_LIMITS,
     );
     live(applied.idle_boost != fresh.idle_boost, keys::KEY_IDLE_BOOST);
-    live(applied.safeguards != fresh.safeguards, keys::KEY_SAFEGUARDS);
     live(applied.trash != fresh.trash, keys::KEY_TRASH);
 
     let mut restart = |differs: bool, key: &'static str| {
