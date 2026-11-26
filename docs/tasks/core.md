@@ -278,6 +278,18 @@ a task costs a user.
       daemon in that time loses it, and a rename of that folder made
       while the daemon is stopped is applied file by file, by the ids
       of its files, with no transfer.
+- [ ] P-22 Two devices that send the same new file to Google Drive in
+      the same moment make it twice. Drive lets two files in one
+      folder have one name, and an upload of a new file is a lookup
+      and then a create: both devices find the name free and both
+      create. Each device then syncs one of the two, and a scan asks
+      about the other as a name that cannot sync. Seen with the test
+      account on 2026-11-26: the cloud root went to the trash, both
+      devices answered `recreate`, and both filled the empty folder at
+      once; every file and every folder was there twice, with the
+      same content. No data was lost. A check after a create, like
+      the one after an overwrite, could remove the copy of this device
+      when the other file has the same content and the lower id.
 - [ ] P-17 The check of the cloud root costs Google Drive requests all
       day. Each profile checks its two roots every 15 seconds
       (`ROOT_CHECK_INTERVAL_SECONDS`), and on Google Drive one check

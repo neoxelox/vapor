@@ -404,6 +404,21 @@ test that fails without the fix, unless the row says otherwise.
 | Documents | The debug skill named schema 9; one sentence about the guard stayed; two documents and two skills had the rule for the Drive account from before 2026-11-25; two sentences of `AGENTS.md` read as a contradiction; this spec said that nothing under `apps/macos` changed; `.gitignore` had a change with no reason. | Each corrected. No test. |
 | Tools | Scenario S86 could fail when one cloud listing lands a tick before another. | Declined. 30 of 30 runs passed. The order that would break it is the product race of task P-15, and the assertion is what shows a regression of the pairing. |
 
+The fixes that touch the Google Drive provider and the use of its feed
+were checked with the test account on the fixed build (2026-11-26), in
+a Tier VM guest with the Internet, two profiles as two devices:
+
+| Check | Result on both devices |
+|---|---|
+| A file gets a name with a `/` in the cloud | The file left its path in about 2 s (it is in Vapor's trash). No folder was made for the part before the `/`. With a name that a path can hold again, the file came back in about 1 s. |
+| One poll holds a removal in a folder and the rename of that folder | The folder under its new name in 3 s, the same inode, without the removed file. |
+| One poll holds a new file in a folder and the rename of that folder | The folder under its new name with the new file in 5 s. The devices worked file by file here, and one of them fetched one file again. |
+| The cloud root goes to the trash of the account, and both devices answer `recreate` | Both devices waited with a question and removed nothing. After the answer each forgot 3 ids, filled the new folder, and recorded the new ids. Drive then held each file twice, because both devices filled the empty folder at the same moment: task P-22. |
+| A folder gets another name in the cloud, with the daemon running and with it stopped | One rename each time, the same inode, nothing in the trash; 2 s after the start for the stopped daemon, which took back 26 ids. |
+| The kill test, and the operations and conflict cases of `drive_tests.py` | Both edits on both devices 15 s after the kill; 2 of 2 cases passed. |
+
+The daemon log of that session has no `ERROR` line.
+
 ## Open points
 
 None. Every question of the three rounds has its decision.
