@@ -107,6 +107,11 @@ them with one "ok". D14 is the owner's addition.
   The tenth became D15. The call gave no thinking level, so the
   review ran at the default level of the model. The skills now give a
   level in every call.
+- The adversarial review of the pull request ran on the latest Gemini
+  Neon model at `xhigh`, started with `delegate_task`: nine findings.
+  Eight are fixed in the pull request. One is declined: it said that
+  the `.env` of a checkout never holds the sign-in of the test
+  account, and `tools/vm/workloads/README.md` says that it does.
 - Not checked: the launch of a worker thread, the move of a thread to
   another model after a usage limit, and a whole coordinated project.
   No thread was started for a test. The first project that the owner

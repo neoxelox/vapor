@@ -224,7 +224,9 @@ while CI runs.
 **Model.** A reviewer comes from the model family that did not write
 the change, so that the review is not biased towards its implementer
 (`AGENTS.md` §8.12): the latest Gemini Neon when you run on Claude,
-the latest Claude Fable or Claude Opus when you run on Gemini.
+the latest Claude Fable or Claude Opus when you run on Gemini. A
+worker of a coordinator uses the reviewer that its Coordination block
+names (`vapor-coordinate`).
 
 - In T3 Code, start each reviewer with `delegate_task`: `role:
   "review"`, the brief as `task`, and `target: {providerInstanceId,
@@ -234,8 +236,9 @@ the latest Claude Fable or Claude Opus when you run on Gemini.
   `shared` isolation the reviewer reads this worktree. Its result
   returns to your thread.
 - Give the reviewer the thinking level `xhigh`, or the highest level
-  that its model lists when the model has no `xhigh`. With no
-  `options` it runs at the default level of its model, which is lower.
+  that its model lists on that instance when it has no `xhigh`. With
+  no `options` it runs at the default level of its model, which is
+  lower.
 - Where no such tool exists, or the other family cannot run (no usage
   left, a provider error), your own subagents review. In T3 Code,
   check first that your own thread runs on a `Personal` instance

@@ -25,9 +25,10 @@ personal provider of the owner (`AGENTS.md` §8.12).
 1. Call `orchestrator_capabilities` one time, at setup. Use only an
    instance whose `displayName` starts with `Personal`. Two of them
    matter: the Claude instance, which lists Claude models only, and
-   the Gemini instance, which lists the Gemini models. Write the
-   `providerInstanceId` of each and the model ids of the table in the
-   status file.
+   the Gemini instance, which lists the Gemini models and can list
+   Claude models too. In the status file, write for each of them its
+   `providerInstanceId` and each model of the table that it lists,
+   with the thinking option of that model on that instance.
 2. Never start a worker, a research task, or a reviewer on another
    instance, whatever model it offers. A message to a thread starts a
    turn on the instance of that thread, so the rule also covers a
@@ -56,22 +57,28 @@ every launch, and do not count on what a thread inherits.
 `xhigh`, or at the highest level that its model lists when the model
 has no `xhigh` (`AGENTS.md` §8.12). Put the level in each call: a
 thread or a task that starts with a model and no options runs at the
-default level of that model, which is lower.
-`orchestrator_capabilities` gives the option id of each model
-(`effort` or `thought_level`) and its levels. The shape is
-`options: [{id, value}]`.
+default level of that model, which is lower. The option belongs to a
+model on an instance: the same model can have another option id
+(`effort` or `thought_level`) and other levels on another instance.
+Read both from `orchestrator_capabilities` for the instance that you
+use. The shape is `options: [{id, value}]`.
 
 **No usage left.** A worker that stops on a usage limit shows as
 `failed` or `interrupted` in `t3_thread_list`, and its last items name
 the limit.
 
-Each time, move the worker to the first of these that it did not try:
+Each time, move the worker to the first of these that it did not try
+and whose limit is not in force:
 
 1. the same Claude model on another `Personal` instance that lists
-   it;
+   it, with the thinking option of that instance;
 2. the other Claude model of the two, on the Claude instance. A limit
    can apply to one model only;
 3. the latest Gemini Neon. The worker stays there until its PR merges.
+
+When none is left, the stage is **Blocked**. Put the reset time in its
+"Now" cell, tell the owner, and move the worker when the first limit
+resets.
 
 Move it with `t3_thread_configure({threadId, environmentId,
 modelSelection: {instanceId, model, options}})`, then send "Continue
@@ -86,11 +93,15 @@ from where you stopped. Read your brief again first." Then:
 **Which model reviews.** The reviewers of a stage come from the family
 that the stage did not start on. Fix that when you launch the worker,
 and put that one instance and model in its Coordination block. A move
-to another model does not change it. When that family cannot run (no
+to another model does not change it, and the block wins over the
+general rule of `vapor-pr` step 5. When that family cannot run (no
 usage left, a provider error), the worker's own subagents review, as
-`vapor-pr` step 5 says. The final report then names the model that
-reviewed, and the PR cell of the stage says `review by the same
-family`, so that the owner knows it before the merge.
+`vapor-pr` step 5 says, and the final report names the model that
+reviewed. In two cases the family that reviewed also wrote a part of
+the change: the other family could not review, or you moved the worker
+to the family of its reviewer. The PR cell of the stage then says
+`review by the same family`, so that the owner knows it before the
+merge.
 
 ## Setup (once per project)
 
@@ -127,8 +138,8 @@ Name it and its reason in the next owner message.
 Keep the project state in `~/.coordinator/<KEY>.md`. Edit it with your
 normal file tools. It holds:
 
-- your coordinator IDs, the provider instances, the model ids, and
-  the thinking level;
+- your coordinator IDs, and for each provider instance its models
+  with their thinking options;
 - the parallel limit, and a usage limit with its reset time;
 - the stage list: ID, name, state, thread link, PR, the task ids that
   the stage closes, owned files, "after", the model family that the
@@ -191,9 +202,10 @@ answer (`AGENTS.md` §1.2). A worker never designs with the owner.
   the repository through a stage. Until then it is a draft at
   `~/.coordinator/<KEY>/<spec file name>`, next to the status file.
 - The last round asks to start, as `vapor-design` step 4 says. When
-  the owner says yes, set the status of the draft to `agreed`. The
-  stages of the design then start as any other stage of the approved
-  plan.
+  the owner says yes, set the status of the draft to `agreed`. If the
+  owner approved the plan already, the stages of the design start as
+  any other stage. If not, put them in the plan: the approval card of
+  the plan (Setup) is what starts them.
 - One open stage owns the spec file. The first stage of the design
   copies the draft, unchanged, to `docs/specs/` and adds its row to
   `docs/specs/README.md`. Compare the file in its PR with the draft
@@ -271,14 +283,13 @@ stop:true, reason})`.
 **After a merge:** settle the worker thread with
 `t3_thread_organize({threadId, environmentId, action:"settle"})`.
 
-**PR facts:** read them from GitHub at the moment you report:
-`pull_request_read`, or `gh pr view <url> --json
-state,mergeable,mergeStateStatus,statusCheckRollup,headRefName`. Then
-see if the PR branch holds the latest `main`: run `git fetch origin`,
-and `git merge-base --is-ancestor origin/main origin/<headRefName>`
-exits with 0 when it does. Never copy "ready" or "green" from a worker
-message without this check. `mergeStateStatus: BLOCKED` and a missing
-approval are normal here: the owner merges through the admin bypass
+**PR facts:** read them from GitHub at the moment you report.
+`pull_request_read` gives the state, `mergeability`, the checks, and
+`behindBy`, which is 0 when the branch holds the latest `main`. `gh pr
+view <url> --json reviewDecision` gives `CHANGES_REQUESTED` when a
+person asked for changes. Never copy "ready" or "green" from a worker
+message without this check. `REVIEW_REQUIRED` and `mergeStateStatus:
+BLOCKED` are normal here: the owner merges through the admin bypass
 (`docs/ci/required-checks.md`).
 
 ## The brief
@@ -317,9 +328,10 @@ are shared, and the brief says so:
   it. That is "queued", not "blocked".
 - The Google Drive test account is one account. A worker that uses it
   works in a cloud folder that has its stage ID in the name, and
-  touches no other folder. The sign-in is in the `.env` of the
-  checkout. A worker whose checkout has none reports it, and never
-  puts a secret in a message.
+  touches no other folder. The workload tool reads the sign-in of the
+  account from the `.env` of the checkout
+  (`tools/vm/workloads/README.md`). A worker whose checkout has no
+  `.env` reports it, and never puts a secret in a message.
 - `~/.vapor` and the host's launchd jobs belong to the owner. No
   worker touches them (`AGENTS.md` §10.1).
 
@@ -344,7 +356,8 @@ You are worker <ID> of project <KEY>. Coordinator: <coordinator link>
 - The one child work that you start is the adversarial review of vapor-pr step 5.
   Start its reviewers with delegate_task and target {providerInstanceId:<reviewer
   instance id>, model:<reviewer model id>, options:<reviewer options>}. This target
-  stays the same if the coordinator moves you to another model. If it cannot run (no usage left, a
+  stays the same if the coordinator moves you to another model, and it wins over the
+  general rule of vapor-pr step 5. If it cannot run (no usage left, a
   provider error), your own subagents review, and your final report says so. Use no
   other provider instance.
 - After you open the PR, call watch_pull_request with until:"merged". On a conflict,
@@ -594,8 +607,8 @@ that unblocks the most stages.
   may need the owner.
 - **PR:** number linked to the PR, then the GitHub facts: `checks
   green`, `checks running`, `checks failing`, `conflict`, `behind
-  main`, `changes requested`. Add `review by the same family` when
-  the other family could not review.
+  main`, `changes requested`. Add `review by the same family` in the
+  two cases of "Which model reviews".
 - **Now:** at most about 60 characters. For Blocked, name what it
   waits for.
 
@@ -635,19 +648,22 @@ When the owner asks "status", reply with the `## Needs you` and
 When the owner asks an existing coordinator to switch to this skill,
 or a new thread to continue a project:
 
-1. Do the setup steps. Keep the open worker threads. Do not restart
-   them. If `~/.coordinator/<KEY>.md` exists, read it first.
+1. Do Setup steps 1 to 5. Keep the open worker threads. Do not
+   restart them. If `~/.coordinator/<KEY>.md` exists, read it first.
 2. Write the status file with every stage: merged, open, and planned.
-3. Check the instance of each open worker thread (`t3_thread_list`
-   gives the `providerInstanceId` of each row). Send no message to a
-   thread on an instance that is not a `Personal` one. Move it first
-   with `t3_thread_configure`, and tell the owner that you moved it.
+3. Read each open worker thread with `t3_thread_configure({threadId,
+   environmentId})`: it gives the instance, the model, and the
+   options. Send no message to a thread on an instance that is not a
+   `Personal` one. Move it first with `t3_thread_configure`, and tell
+   the owner that you moved it. Set the level of "Which thinking
+   level" on each thread that has another one.
 4. Rename each open worker thread to `[<KEY>] <ID>: <name>`
    (`t3_thread_update({threadId, environmentId, action:"rename",
    title})`).
-5. Send each open worker the filled-in Coordination block with
-   `mode:"queue"`.
-6. Write every open owner question as a Needs-you card in the format
+5. Write every open owner question as a Needs-you card in the format
    above. If no approval of the plan is on record, add the approval
-   card (Setup), and start no new worker before the answer.
+   card (Setup). Until the answer, start no new worker, and send no
+   worker the Coordination block.
+6. With the approval on record, send each open worker the filled-in
+   Coordination block and item 7 of the brief with `mode:"queue"`.
 7. Send one owner message.

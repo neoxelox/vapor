@@ -598,10 +598,10 @@ reviewer.
   model it offers. When no personal instance can run the work, say so
   and stop.
 - Implementation runs on the latest Claude Fable or Claude Opus model.
-  When a model has no usage left, the work moves to the first of
-  these that can run: the same Claude model on another personal
-  instance that lists it, the other one of the two Claude models, the
-  latest Gemini Neon model (owner, 2026-11-26).
+  When a model has no usage left, the work can move to the same
+  Claude model on another personal instance that lists it, to the
+  other one of the two Claude models, or to the latest Gemini Neon
+  model (owner, 2026-11-26). An agent tries them in that order.
 - The adversarial review of a pull request (§10) runs on the latest
   Gemini Neon model for now. Claude writes the changes, and a review
   by the same model family shares its blind spots. A change that
@@ -610,9 +610,9 @@ reviewer.
   the report names the model that reviewed (owner, 2026-11-26).
 - A worker thread or a reviewer that an agent starts gets its thinking
   level in the call: `xhigh`, or the highest level that its model
-  lists when the model has no `xhigh` (owner, 2026-11-26). With no
-  level in the call, it starts at the default of the model, which is
-  lower.
+  lists on that instance when it has no `xhigh` (owner, 2026-11-26).
+  With no level in the call, it starts at the default of the model,
+  which is lower.
 - "Latest" is the highest version of the family that the provider
   lists at that time. Model ids change, so an agent reads them from
   that list and never from memory.
