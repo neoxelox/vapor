@@ -454,9 +454,10 @@ worker's claim is not evidence. Check it.
     text for personal information (`AGENTS.md` §6.1);
   - look for conflicts with other open PRs: the same files, the same
     names, or behaviour that contradicts another stage.
-- **One adversarial review per PR.** The worker runs it. Do not start
-  a second one (`AGENTS.md` §10). Your check above is not a review by
-  subagents: you do it yourself.
+- **The adversarial review is the worker's.** It runs when the PR
+  opens, sized to the change, and again only when later commits change
+  the PR a lot (`vapor-pr` step 5). You start none. Your check above
+  is not a review by subagents: you do it yourself.
 - **Conflicts are yours to resolve.** When two stages disagree, or a
   stage disagrees with the spec, decide which way is right, tell both
   workers, and record it in the contracts list. Ask the owner only

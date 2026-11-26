@@ -8,7 +8,7 @@ license: GPL-3.0-only
 
 One branch, one PR. At open: one commit on the latest `origin/main`, a
 green validation ladder, docs in step. Ready to merge: no conflict,
-nine green checks, and every finding of one adversarial review fixed
+nine green checks, and every finding of the adversarial review fixed
 or declined with evidence. Run the steps in order and verify each one.
 Start at the step the request names ("open a PR", "check CI", "rebase
 on main", "is it ready"), after confirming the earlier ones still hold.
@@ -195,7 +195,9 @@ git fetch origin main && git merge-base --is-ancestor origin/main HEAD; echo "up
 ```
 
 **CI.** Nine checks must pass: `lint`, `test`, and `build`, each on
-macOS, Ubuntu, and Windows. Right after a push the list can be empty
+macOS, Ubuntu, and Windows. A job runs only what the change touches,
+so a check of a job with nothing to do is green in seconds
+(`scripts/scope.sh`). Right after a push the list can be empty
 or partial; that is not green. On a failure, read the log first. It
 is readable when the run has finished, and so is the rerun
 (`gh run view <run-id> --log-failed | tail -200`):
@@ -218,8 +220,9 @@ merges through the admin bypass (`docs/ci/required-checks.md`).
 
 ## 5. Adversarial review
 
-One pass per PR, by reviewers that you start and brief, read only,
-while CI runs.
+One full review per PR, by reviewers that you start and brief, read
+only. It starts when the PR opens, never before, and it runs while CI
+runs.
 
 **Model.** A reviewer comes from the model family that did not write
 the change, so that the review is not biased towards its implementer
@@ -246,16 +249,33 @@ names (`vapor-coordinate`).
   tell the owner.
 - The report names the model that reviewed.
 
-**Reviewers.** One per coherent area of the diff, three at most,
-because large parallel agent runs reach usage limits. A small diff
-gets one. Launch them in one message so they run at the same time.
+**Size.** A review is as deep as the change needs, and no deeper
+(owner, 2026-11-26). Size it from the diff before you write a brief:
+
+| The change | Reviewers | What a reviewer reads |
+|---|---|---|
+| Small: a few lines in one place, with no rule of `AGENTS.md` §3 to §6 in reach | one | the diff, the function or the section around it, and its direct callers or the rule that it cites |
+| Normal: one area, or a few files that go together | one for each area | the diff, the code that it calls and that calls it, its tests, and the rules of that area |
+| Large or risky: several areas, or the deletion, conflict, schema, IPC, or secret paths of the engine | one for each area, three at most | all of the above, and the invariants of `AGENTS.md` §3 to §6 that the change can reach |
+
+- Say in the brief what the reviewer does not read. A reviewer with
+  no limit reads the whole repository for a change of one line.
+- Ask the questions that this change raises, not every row of the
+  table of risks.
+- Depth is not length. Ask for the failures that matter, each with
+  its evidence.
+- Three reviewers at most, because large parallel agent runs reach
+  usage limits. Launch them in one message so they run at the same
+  time.
 
 **Brief.** Each reviewer gets:
 
 - its files, or `git diff origin/main...<head SHA> -- <paths>`;
 - the intent: what the PR is for, the spec decisions it builds, and
   the behaviour that must hold;
-- the risks of its area from the table, plus any the change raises;
+- the risks that this change raises: the rows of the table for its
+  area that the diff can reach, plus any of its own;
+- what it reads and what it leaves out (see Size);
 - the rules: read only; edit nothing; run no build, test, or e2e
   script (the main agent reproduces runtime claims); check each claim
   against the code; give a concrete failure (the inputs and state,
@@ -289,8 +309,17 @@ claim with a test or an e2e scenario. Then classify and act:
 
 Two findings can share one cause. Find it before fixing either.
 
-**Single pass.** No second review, and no subagent to check a fix.
-Verify each fix yourself with `vapor-validate`.
+**After the review.** Verify each fix yourself with `vapor-validate`.
+No reviewer checks a fix. Start another review only when later commits
+change the PR a lot: a new area, new behaviour, or a rewrite of what
+was reviewed (owner, 2026-11-26). Then:
+
+- review only what changed, `git diff <reviewed SHA>..HEAD`, sized as
+  above;
+- say in the brief what the first review covered, and that the
+  reviewer does not review it again;
+- give no review to a small fix, a rename, or a change that a finding
+  asked for.
 
 **Other comments.** No external AI reviewer runs on this repository,
 and none is to be added (owner, 2026-11-14): it sees the diff without
@@ -310,7 +339,7 @@ comment in its thread, and leave the thread for the human to resolve.
   the new picture and remove the old reference from the body.
 - Run `vapor-validate` before the push, then `git push origin HEAD`.
 - After every push, repeat the CI and base checks of step 4. The
-  review does not run again.
+  review runs again only as step 5 says.
 - Stop and report to the owner when conflicts and CI have not settled
   after three pushes.
 

@@ -726,8 +726,9 @@ If a test's failure mode is "I typo'd a default value", skip it.
 ### 9.5) Test tiers
 
 - **Tier 1**: `./scripts/test.sh` via `test.yml` (and `workflow_call`
-  in a release). Runs on every PR; required check on `main`
-  (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
+  in a release). Runs on every PR that changes what it covers;
+  required check on `main` (`docs/ci/required-checks.md`). Budget:
+  under 5 minutes per OS on CI.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, a release gate and on
   demand.
   The property tests at 4 000 cases each, then one bounded soak cell
@@ -743,8 +744,8 @@ If a test's failure mode is "I typo'd a default value", skip it.
   `docs/development/soak-testing.md`; procedure in the `vapor-soak`
   skill. Never a PR gate; the workload and the model are never edited
   to make a run green.
-- **Tier E2E**: `./scripts/e2e.sh` (the `tools/e2e` harness), on
-  every PR in every `test.yml` OS job (macOS adds `--full`, which
+- **Tier E2E**: `./scripts/e2e.sh` (the `tools/e2e` harness), in
+  every `test.yml` OS job that runs for a PR (macOS adds `--full`, which
   installs a real LaunchAgent and is for disposable runners only;
   scenarios whose needs the host cannot meet skip by name) and locally
   by the contributor (host-safe default). Contract in §9.8; procedure
@@ -755,6 +756,12 @@ If a test's failure mode is "I typo'd a default value", skip it.
   installed in a macOS virtual machine, with the app driven as a user
   does. Never a PR gate: a GitHub-hosted runner cannot run a macOS
   guest. Contract in §9.9; procedure in the `vapor-vm` skill.
+
+A CI job runs only what a change touches (owner, 2026-11-26). A change
+to documents runs the text checks of lint, a change to the Mac app
+runs the macOS jobs, and any other change runs everything. A release
+runs everything. Each required check still reports on every PR
+(`scripts/scope.sh`, `docs/ci/overview.md`).
 
 ### 9.6) Flaky-test policy
 
@@ -930,13 +937,23 @@ The invariants behind them:
   and a video when the change moves on the screen, so the reviewer
   sees what changed. Both are optional, and a picture shows a guest
   only, never a contributor's machine (owner, 2026-11-21).
-- Every PR gets one adversarial review by reviewers that the agent
-  starts and briefs (owner, 2026-11-14). It starts the moment the PR
-  opens and runs while CI runs, so it adds no time to the wait. One
-  pass; the agent verifies the fixes itself. For now the reviewers
-  run on the latest Gemini Neon model, so that a review is not always
-  biased towards Claude, which implements (owner, 2026-11-26). The
-  other cases are in §8.12.
+- Every PR gets one full adversarial review by reviewers that the
+  agent starts and briefs (owner, 2026-11-14). It starts the moment
+  the PR opens, not before, and runs while CI runs, so it adds no time
+  to the wait. The agent verifies the fixes itself. For now the
+  reviewers run on the latest Gemini Neon model, so that a review is
+  not always biased towards Claude, which implements (owner,
+  2026-11-26). The other cases are in §8.12.
+- A review is as deep as the change needs, and no deeper (owner,
+  2026-11-26). The agent sizes it from the diff: how many reviewers,
+  what each one reads, and what each one checks. A change of one line
+  gets a short review of that line and of what depends on it. A large
+  or risky change gets depth.
+- After the review at the opening, a PR gets another review only when
+  later commits change it a lot: a new area, new behaviour, or a
+  rewrite of what was reviewed. That review covers only what changed
+  since the first one, and repeats none of it. A small fix gets none
+  (owner, 2026-11-26).
 - No external AI reviewer runs on this repository, and none is to be
   added (owner, 2026-11-14). Such a reviewer sees the diff without the
   task or the decisions. A reviewer that the agent starts with a brief

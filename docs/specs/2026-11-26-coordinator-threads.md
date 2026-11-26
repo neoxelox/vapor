@@ -63,7 +63,7 @@ them with one "ok". D14 is the owner's addition.
 |---|---|
 | D6 | The name of the skill is `vapor-coordinate`, an action, like `vapor-validate`. |
 | D7 | With no limit from the owner, three workers run at the same time. Each worker builds the workspace in its own checkout and runs the validation ladder on one machine, each push to an open pull request starts nine CI jobs, and all the workers use the usage of one account. |
-| D8 | The worker runs the one adversarial review of its pull request. The coordinator checks each pull request itself and starts no second review. |
+| D8 | The worker runs the one adversarial review of its pull request. The coordinator checks each pull request itself and starts no second review. Changed by D19. |
 | D9 | A stage that starts on Gemini gets its review from Claude, for the reason of D5. The reviewer of a stage is fixed when the stage starts, so a move to another model does not change it. |
 | D10 | When the other model family cannot review, the agent's own subagents do. The report names the model, and the status table of a coordinator says it. |
 | D11 | A worker that stops on a usage limit tries the other one of the two Claude models one time before it moves to Gemini Neon. A limit can apply to one model only. |
@@ -78,6 +78,20 @@ them with one "ok". D14 is the owner's addition.
 | D15 | The owner approves the plan of a coordinator one time, before a worker starts. The approval is the owner's request for one pull request for each stage of the project, the stages that the coordinator adds later included. After it, the coordinator starts every stage with no more questions. `AGENTS.md` §10 says so. |
 | D16 | A worker and a reviewer run at the thinking level `xhigh`, or at the highest level that their model lists when it has no `xhigh`. The level is in each call, because a call with no level starts at the default of the model. |
 
+### Round 4, 2026-11-26
+
+The pull request of this spec took 100 minutes, and the owner asked
+where the time went. Two thirds went to reviews and to CI runs that
+the change did not need. Each decision is the owner's.
+
+| # | Decision |
+|---|---|
+| D17 | The full adversarial review runs when the pull request opens, and not before. |
+| D18 | A review is as deep as the change needs. The agent sizes it from the diff: a change of one line gets a short review, and a large or risky change gets depth. A review can be extensive, and it must make sense for the change. |
+| D19 | After the first review, a pull request gets another one only when later commits change it a lot. That review covers only what changed since the first one. Small fixes get none. D19 changes D8: the worker can run a second review. The coordinator still starts none. |
+| D20 | A CI job runs only what a change touches. A change to documents runs the text checks, a change to the Mac app runs the macOS jobs, and any other change runs everything. |
+| D21 | A test that is broken or flaky is fixed, not recorded and left. |
+
 ## Design
 
 - The skill is `.agents/skills/vapor-coordinate/SKILL.md`. It keeps the
@@ -91,6 +105,12 @@ them with one "ok". D14 is the owner's addition.
   with `vapor-pr` (one commit, a rebase, nine checks, one adversarial
   review); a design goes through `vapor-design`; a finding becomes a
   task; messages to the owner use Simplified Technical English.
+- `vapor-pr` step 5 has a table that sizes a review from the diff (D18)
+  and the rule for a review after the first one (D19).
+- `scripts/scope.sh` gives each CI job one mode for a change: `full`,
+  `docs`, or `skip` (D20). A job always starts and reports, because the
+  ruleset of `main` requires the nine checks by name. The detail is in
+  `docs/ci/overview.md`.
 - The names of the files that most stages change (`CHANGELOG.md`, the
   task files, the scenario files, the constants) are in the skill, and
   so are the numbers that two stages can both take (a scenario id, a
@@ -112,6 +132,20 @@ them with one "ok". D14 is the owner's addition.
   Eight are fixed in the pull request. One is declined: it said that
   the `.env` of a checkout never holds the sign-in of the test
   account, and `tools/vm/workloads/README.md` says that it does.
+- CI failed one time on the pull request, in e2e scenario S26, on a
+  commit that changed documents only. The cause was a defect of the
+  daemon, and D21 asked for the fix. The listing of a cloud folder
+  that is being removed failed when a subfolder left during the
+  listing, the planner read that as "the folder is gone", and the
+  empty folder stayed in the cloud. `list_subtree_with` in
+  `core/daemon/src/provider_jobs.rs` now takes such a subfolder out of
+  the listing and goes on. Three unit tests cover it.
+- `scripts/tests/scope.sh` checks the mode of each of the nine jobs
+  for each class of change, and the changed files of a pull request
+  and of a push in real repositories. Tier 1 runs it.
+- Not checked: a CI run in the `docs` and the `skip` modes. The pull
+  request of this spec changes the core, so its own CI runs in `full`.
+  The first pull request that changes documents only is that test.
 - Not checked: the launch of a worker thread, the move of a thread to
   another model after a usage limit, and a whole coordinated project.
   No thread was started for a test. The first project that the owner
