@@ -668,14 +668,6 @@ runners. What remains before Linux ships a surface:
       a run reports, and which of them gate a release. Each fix of a
       finding of the session adds its case to Tier 1 or Tier E2E
       first; the soak model does not produce any of them today.
-- [ ] TR-14 Run only the jobs of one system for a change to its
-      native files in the platform layer. Today any file under `core/`
-      runs all nine CI jobs (`scripts/scope.sh`). A file such as
-      `core/platform/src/fs_watch/macos.rs` is compiled on one system
-      only: each of these modules is declared under
-      `#[cfg(target_os = "...")]` (checked 2026-11-26). The gate would
-      then rest on that convention, so it needs a test that fails when
-      a module of that name is declared in another way.
 - [ ] PT-3 Measure in the perf gate what a user waits for, so a slower
       build fails the gate. `scripts/perf.sh` checks CPU and memory of
       a soak cell today and no latency. `tools/vm/workloads/latency.py`

@@ -78,7 +78,9 @@ reads the changed files and prints one mode for the job:
 - The app of one system is built by the jobs of that system only, and
   the core runs on every system. So the daemon, the CLI, the platform
   layer, and anything else that the systems share always run
-  everything.
+  everything. That holds for the native files of one system inside
+  the platform layer too: they are part of the shared runtime, and no
+  file name inside `core/` gates a job.
 - A new top-level path is `core` until `scripts/scope.sh` names it.
   `scripts/tests/scope.sh` holds the cases, and Tier 1 runs it.
 

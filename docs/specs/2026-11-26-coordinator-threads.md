@@ -92,6 +92,7 @@ the change did not need. Each decision is the owner's.
 | D20 | A CI job runs only what a change touches. A change to documents runs the text checks, a change to the Mac app runs the macOS jobs, and any other change runs everything. |
 | D21 | A test that is broken or flaky is fixed, not recorded and left. |
 | D22 | D20 holds for the app of every system: a change to the Windows app or to the Linux app runs the jobs of that system only, as a change to the Mac app does. A change to the daemon, the runtime, the CLI, or anything that the systems share runs everything. |
+| D23 | No gate by file name inside the shared runtime. The native files of one system in the platform layer are part of the core, and a change to them runs everything: a gate there is a risk that the time it saves does not pay for. |
 
 ## Design
 
