@@ -2129,6 +2129,21 @@ impl DurableStateDb {
         Ok(file.map(|file| (path_from_text(file), false)))
     }
 
+    /// Forgets what the index holds about the objects of one cloud
+    /// root: the id of each synced file and folder, and each move that
+    /// the cloud is owed. A profile that takes another folder as its
+    /// cloud root starts with none of it: an id of the old folder names
+    /// no object of the new one. Returns how many ids it forgot.
+    pub fn forget_what_belongs_to_the_cloud_root(&mut self) -> Result<usize, StateDbError> {
+        let mut forgotten = self.connection.execute(
+            "UPDATE sync_index SET remote_id = NULL WHERE remote_id IS NOT NULL",
+            [],
+        )?;
+        forgotten += self.connection.execute("DELETE FROM sync_folders", [])?;
+        self.connection.execute("DELETE FROM name_carries", [])?;
+        Ok(forgotten)
+    }
+
     /// Every id that the index holds, as (synced path, id, is a
     /// folder): what a provider gets back at a start.
     pub fn remote_identities(&self) -> Result<Vec<(PathBuf, String, bool)>, StateDbError> {
@@ -2212,9 +2227,10 @@ impl DurableStateDb {
         )? > 0)
     }
 
-    /// Removes every queued intent of `kind` at `path` and under it.
+    /// Removes every intent of `kind` that waits at `path` or under it.
     /// A rename of the folder that a scan read as removals withdraws
-    /// them this way: an intent in work finds its row gone and stops.
+    /// them this way. An intent that is in work stays: no rename is
+    /// made while one is ([`Self::intents_in_the_way_at_or_under`]).
     pub fn discard_queued_of_kind_under(
         &mut self,
         path: &Path,
@@ -2223,23 +2239,40 @@ impl DurableStateDb {
         let (lower, upper) = rows_under_bounds(path)?;
         Ok(self.connection.execute(
             "DELETE FROM queue_intents
-             WHERE kind = ?1 AND (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4))",
-            params![intent_kind_label(kind), path_to_text(path)?, lower, upper],
+             WHERE kind = ?1 AND state = ?5
+               AND (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4))",
+            params![
+                intent_kind_label(kind),
+                path_to_text(path)?,
+                lower,
+                upper,
+                STATE_PENDING
+            ],
         )?)
     }
 
-    /// How many intents are queued (pending or leased) at `path` and
-    /// under it, of any kind but `except`.
-    pub fn intents_at_or_under_except(
+    /// How many intents at `path` and under it stand in the way of a
+    /// change of that path: each intent of a kind other than
+    /// `waiting_is_fine`, and each intent that is in work, of any
+    /// kind. An intent in work has a worker on the old path, or has
+    /// changed the device already and not recorded it yet.
+    pub fn intents_in_the_way_at_or_under(
         &self,
         path: &Path,
-        except: PendingIntentKind,
+        waiting_is_fine: PendingIntentKind,
     ) -> Result<usize, StateDbError> {
         let (lower, upper) = rows_under_bounds(path)?;
         let count = self.connection.query_row(
             "SELECT COUNT(*) FROM queue_intents
-             WHERE kind <> ?1 AND (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4))",
-            params![intent_kind_label(except), path_to_text(path)?, lower, upper],
+             WHERE (kind <> ?1 OR state = ?5)
+               AND (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4))",
+            params![
+                intent_kind_label(waiting_is_fine),
+                path_to_text(path)?,
+                lower,
+                upper,
+                STATE_LEASED
+            ],
             |row| row.get::<_, i64>(0),
         )?;
         Ok(usize::try_from(count).unwrap_or(usize::MAX))
@@ -4841,7 +4874,7 @@ mod tests {
         let photos = root.join("Photos");
         assert_eq!(
             database
-                .intents_at_or_under_except(&photos, PendingIntentKind::ApplyRemoteDelete)
+                .intents_in_the_way_at_or_under(&photos, PendingIntentKind::ApplyRemoteDelete)
                 .expect("count"),
             1
         );
@@ -4852,6 +4885,49 @@ mod tests {
             2
         );
         assert_eq!(database.queue_depth().expect("depth"), 2);
+    }
+
+    #[test]
+    fn a_removal_that_is_in_work_under_a_folder_is_in_the_way_and_is_not_withdrawn() {
+        let mut database = DurableStateDb::open_in_memory().expect("open");
+        let root = PathBuf::from("/tmp/vapor-root");
+        let photos = root.join("Photos");
+        for name in ["a.jpg", "b.jpg"] {
+            database
+                .enqueue_intent(
+                    &photos.join(name),
+                    PendingIntentKind::ApplyRemoteDelete,
+                    timestamp_ms(1),
+                )
+                .expect("enqueue");
+        }
+        // A worker has one of the two removals: its file can be in the
+        // trash already, with the index row still at the old path.
+        let leased = database
+            .lease_next_ready(timestamp_ms(2))
+            .expect("lease")
+            .expect("an intent");
+        assert_eq!(
+            database
+                .intents_in_the_way_at_or_under(&photos, PendingIntentKind::ApplyRemoteDelete)
+                .expect("count"),
+            1,
+            "the removal in work counts, the one that waits does not"
+        );
+        assert_eq!(
+            database
+                .discard_queued_of_kind_under(&photos, PendingIntentKind::ApplyRemoteDelete)
+                .expect("discard"),
+            1,
+            "only the removal that waits is withdrawn"
+        );
+        assert_eq!(
+            database
+                .queued_paths_of_kind(PendingIntentKind::ApplyRemoteDelete)
+                .expect("paths"),
+            [leased.path],
+            "the removal in work keeps its row"
+        );
     }
 
     #[test]

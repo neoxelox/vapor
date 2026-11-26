@@ -590,6 +590,7 @@ impl ReconcileWalker {
         state_db: &mut DurableStateDb,
         directory: &Path,
         pairs: &mut BTreeMap<String, EntryPair>,
+        listed: &mut std::collections::BTreeSet<String>,
         now: SystemTime,
     ) -> Result<(), WalkError> {
         let mut moved = Vec::new();
@@ -672,6 +673,15 @@ impl ReconcileWalker {
                     // Neither of the two is compared until it is there.
                     pairs.remove(&name);
                     leaves_the_comparison(pairs, &device_path);
+                    // The index rows are still under the old name, and
+                    // they follow the entry when the move is made. The
+                    // old name is on neither side, and its rows are not
+                    // the rows of a name that left both.
+                    if known_at.parent() == Some(directory)
+                        && let Some(old_name) = known_at.file_name().and_then(|name| name.to_str())
+                    {
+                        listed.insert(old_name.to_string());
+                    }
                     if sync_mode == SyncMode::PushOnly {
                         self.stats.mirror_reverts += 1;
                     }
@@ -1076,7 +1086,7 @@ impl ReconcileWalker {
         let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
         let mut listed: std::collections::BTreeSet<String> = pairs.keys().cloned().collect();
         self.leave_out_what_is_owed_a_move(state_db, directory, &mut pairs, &mut listed, now)?;
-        self.settle_moves(sync_mode, state_db, directory, &mut pairs, now)?;
+        self.settle_moves(sync_mode, state_db, directory, &mut pairs, &mut listed, now)?;
         self.settle_spellings(sync_mode, state_db, directory, &mut pairs, &mut batch, now)?;
         self.forget_names_that_left_both_sides(
             state_db, directory, &listed, &hidden, &pairs, listed_at,

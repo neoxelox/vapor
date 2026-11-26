@@ -227,8 +227,7 @@ Directory *deletions* do propagate
 cloud-side move or removal leaves empty on this device in `two-way` is
 asked about like any cloud deletion: it goes when the cloud has no such
 folder any more (it was renamed or removed there), and it stays when the
-cloud still has it. An empty folder is no deletion for the deletion
-guard. A folder that holds only files which an OS writes into a folder
+cloud still has it. A folder that holds only files which an OS writes into a folder
 by itself (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.directory`; the
 list is `OS_FOLDER_FILES` in `core/shared/src/constants.rs`) is asked
 about like an empty one. When the cloud has no such folder, those
@@ -410,10 +409,16 @@ The engine stores it and compares two of them for equality; it never
 reads one. The sync index holds the id of each synced file
 (`sync_index.remote_id`) and of each synced folder (`sync_folders`).
 A file gets its id when a transfer of it ends; a folder gets it when
-a scan compares a folder that is on both sides. Before the first tick
+a scan compares a folder that is on both sides. Before the first poll
 of a profile the runtime hands every stored id back to the provider
 (`Provider::restore_remote_ids`), which is how Google Drive knows the
-old path of an entry after a restart. The `filesystem` provider has no
+old path of an entry after a restart. The ids are those of one cloud
+root. The provider gets them when that root is ready and is the folder
+that the profile adopted: while the root is missing or another folder
+is at its path, the profile waits for an answer and hands over none.
+An answer that takes another folder as the cloud root forgets every
+stored id and every move that the cloud was owed, and the Drive
+provider drops the paths it knew. The `filesystem` provider has no
 ids, so nothing is paired there and a renamed folder is worked file by
 file.
 

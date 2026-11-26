@@ -18,6 +18,14 @@ use std::path::{Path, PathBuf};
 /// file produced zero FSEvents deliveries). A real rename keeps the
 /// node's event tracking bound to the destination path.
 pub fn atomic_noclobber_rename(from: &Path, to: &Path) -> io::Result<()> {
+    // A folder cannot go into itself. Refused here, before a fallback
+    // that claims the new name could make a folder inside the old one.
+    if to != from && to.starts_with(from) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the new path is inside the old one",
+        ));
+    }
     atomic_noclobber_rename_impl(from, to)
 }
 
@@ -345,18 +353,26 @@ fn link_based_noclobber(from: &Path, to: &Path) -> io::Result<()> {
 
 /// A folder has no hard link. The name is claimed with an empty
 /// folder, which fails when the name is taken, and the rename then
-/// takes the place of that empty folder. Where a rename does not take
-/// the place of a folder (Windows), the claim is given up just before
-/// the rename, and the rename fails on whatever took the name in that
-/// instant.
-#[cfg(not(target_os = "macos"))]
+/// takes the place of that empty folder. A rename that fails gives the
+/// claim up.
+#[cfg(not(any(target_os = "macos", windows)))]
 fn folder_noclobber(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::create_dir(to)?;
-    #[cfg(windows)]
-    std::fs::remove_dir(to)?;
     std::fs::rename(from, to).inspect_err(|_| {
         let _ = std::fs::remove_dir(to);
     })
+}
+
+/// On Windows a rename does not take the place of a folder. The claim
+/// shows that the name is free and is given up just before the rename.
+/// Nothing at the name is this function's after that, so a rename that
+/// fails leaves the name as it is: what is there belongs to whoever
+/// took the name in that instant.
+#[cfg(windows)]
+fn folder_noclobber(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir(to)?;
+    std::fs::remove_dir(to)?;
+    std::fs::rename(from, to)
 }
 
 #[cfg(test)]
@@ -390,6 +406,64 @@ mod tests {
 
         let to = dir.path().join("pictures");
         atomic_noclobber_rename(&from, &to).expect("rename");
+        assert_eq!(
+            std::fs::read(to.join("2026/a.jpg")).expect("moved file"),
+            b"payload"
+        );
+        assert!(!from.exists(), "the old name is gone");
+    }
+
+    #[test]
+    fn a_folder_does_not_go_into_itself_and_no_folder_is_made_for_the_try() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let from = dir.path().join("photos");
+        std::fs::create_dir_all(&from).expect("folder");
+        std::fs::write(from.join("a.jpg"), b"payload").expect("file");
+
+        let error = atomic_noclobber_rename(&from, &from.join("inside/photos"))
+            .expect_err("a folder cannot hold itself");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read_dir(&from)
+                .expect("list")
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>(),
+            ["a.jpg"],
+            "nothing was made under the folder"
+        );
+    }
+
+    /// The path a host takes when its atomic call is not there: the
+    /// volume has no `RENAME_NOREPLACE` on Linux, and every folder on
+    /// Windows.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_fallback_for_a_folder_moves_it_whole_and_refuses_a_taken_name() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let from = dir.path().join("photos");
+        std::fs::create_dir_all(from.join("2026")).expect("folder");
+        std::fs::write(from.join("2026/a.jpg"), b"payload").expect("file");
+
+        for taken in ["a-file", "a-folder"] {
+            let to = dir.path().join(taken);
+            if taken == "a-file" {
+                std::fs::write(&to, b"mine").expect("taken by a file");
+            } else {
+                std::fs::create_dir(&to).expect("taken by a folder");
+                std::fs::write(to.join("kept.txt"), b"mine").expect("content");
+            }
+            folder_noclobber(&from, &to).expect_err("the name is taken");
+            assert!(from.join("2026/a.jpg").exists(), "the folder stays");
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("a-file")).expect("file"),
+            b"mine"
+        );
+        assert!(dir.path().join("a-folder/kept.txt").exists());
+
+        let to = dir.path().join("pictures");
+        folder_noclobber(&from, &to).expect("rename");
         assert_eq!(
             std::fs::read(to.join("2026/a.jpg")).expect("moved file"),
             b"payload"

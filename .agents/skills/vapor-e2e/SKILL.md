@@ -154,7 +154,9 @@ Things the product does on purpose that a scenario must account for:
 ## Known limits (today)
 
 - The filesystem provider plays the cloud; the Google Drive mode waits
-  on credentials and the Drive-side operations (`docs/tasks/core.md`).
+  on the Drive-side operations of the harness (`docs/tasks/core.md`).
+  A Drive change is checked in a Tier VM guest with the Internet
+  meanwhile (`vapor-vm`).
 - Windows: the harness builds and runs `S01` on its CI job; daemon
   scenarios skip until the native traits ship. Linux runs them.
 - A scenario that needs a volume that folds case skips by name on one

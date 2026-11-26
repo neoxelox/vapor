@@ -44,10 +44,14 @@ Full checklist with acceptance criteria:
   opaque text that stays with the object under a new name. An id for
   every object or for none; a backend without ids reports none. The
   engine stores the ids and hands them back through
-  `restore_remote_ids` at a start (tick thread, memory only), so the
-  feed can name the old path of an object after a stop of the daemon.
-  A path that comes back is a hint: confirm it with a request before a
-  write goes through it.
+  `restore_remote_ids` before the first poll (tick thread, memory
+  only), so the feed can name the old path of an object after a stop
+  of the daemon. A path that comes back is a hint: confirm it with a
+  request before a write goes through it. The ids are those of one
+  cloud root: when the root turns out to be another folder, drop every
+  id and path that the backend holds. A name that cannot be a segment
+  of a sync path (a `/` in it) has no path in the feed: report the
+  path it left, and never a move to it.
 - **Capabilities.** Four flags, all honest: `supports_remote_changes_feed`,
   `supports_server_side_move`, `changes_feed_is_watched` (a poll costs
   no request), and `small_transfers_share_a_commit` (one flush of a

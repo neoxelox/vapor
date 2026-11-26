@@ -828,6 +828,11 @@ fn unrecorded_commit_took_ms() -> u64 {
     u64::try_from(UNRECORDED_COMMIT_TOOK.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Whether a name in Drive can be one segment of a sync path.
+fn is_a_path_segment(name: &str) -> bool {
+    RemotePath::root().join(name).is_ok()
+}
+
 /// The time of the clock in milliseconds since the Unix epoch.
 fn epoch_millis_now() -> u64 {
     SystemTime::now()
@@ -1451,6 +1456,26 @@ impl GoogleDriveProvider {
         }))
     }
 
+    /// Drops every id and every path that this provider holds for an
+    /// object: what requests of this run found, and what the engine
+    /// handed back at the start.
+    fn forget_the_objects_it_knows(&self) {
+        for cache in [&self.id_by_path, &self.path_by_id] {
+            cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
+        self.out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.folder_confirmed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
     /// Notes content that this device put into the file `file_id`
     /// ([`Self::own_writes`]).
     fn remember_own_write(&self, file_id: &str, content_md5: &str) {
@@ -1675,14 +1700,25 @@ impl GoogleDriveProvider {
     }
 
     fn cache_mapping(&self, path: &str, id: &str) {
-        self.id_by_path
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(path.to_string(), id.to_string());
-        self.path_by_id
+        let had = self
+            .path_by_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.to_string(), path.to_string());
+        let mut id_by_path = self
+            .id_by_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // An object is at one path. The path that it had is free
+        // again: a binding left there would stand for an object that
+        // is gone from it, and a new file under that name would read
+        // as a second file of one name.
+        if let Some(old) = had.filter(|old| old != path)
+            && id_by_path.get(&old).is_some_and(|bound| bound == id)
+        {
+            id_by_path.remove(&old);
+        }
+        id_by_path.insert(path.to_string(), id.to_string());
     }
 
     /// Whether the cache binds `path` to the file `id`.
@@ -2146,6 +2182,15 @@ impl GoogleDriveProvider {
         else {
             return ChangedPath::OutOfScope;
         };
+        // A Drive name can hold a `/`, and such a name is no part of a
+        // sync path: joined into one, it would read as a file in a
+        // folder that the cloud does not have. The entry has no place
+        // under the root. A listing says so to the user; here an entry
+        // that had a path leaves it, and nothing is remembered: the
+        // next name of the object is judged again.
+        if !is_a_path_segment(&file.name) {
+            return ChangedPath::OutOfScope;
+        }
         // Walk up through parents until the root (bounded depth).
         let mut segments = vec![file.name.clone()];
         let Some(mut current_parent) = file.parents.first().cloned() else {
@@ -2194,6 +2239,11 @@ impl GoogleDriveProvider {
                     return ChangedPath::Unknown;
                 }
             };
+            if !is_a_path_segment(&parent.name) {
+                // A folder above it has such a name: nothing under
+                // that folder has a sync path.
+                return ChangedPath::OutOfScope;
+            }
             segments.push(parent.name.clone());
             let Some(next) = parent.parents.first().cloned() else {
                 // Walked up to a top-level parent that is not our root.
@@ -2358,18 +2408,29 @@ impl Provider for GoogleDriveProvider {
                 None => self.create_folder(&parent_id, segment)?,
             };
         }
-        let mut root_id = self
-            .root_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // The daemon checks its roots all day long. The line is for the
-        // first answer and for a root that is another folder now.
-        if root_id.as_deref() != Some(parent_id.as_str()) {
+        let was = {
+            let mut root_id = self
+                .root_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // The daemon checks its roots all day long. The line is
+            // for the first answer and for a root that is another
+            // folder now.
+            if root_id.as_deref() == Some(parent_id.as_str()) {
+                return Ok(());
+            }
             logging::info(
                 "Google Drive sync root is ready",
                 &[("cloud_root", cloud_root.to_string())],
             );
-            *root_id = Some(parent_id);
+            root_id.replace(parent_id)
+        };
+        if was.is_some() {
+            // Another folder is the cloud root now. Every path that
+            // this provider holds for an id is a path of the folder
+            // before it, and a feed entry for such an id is no change
+            // of this root.
+            self.forget_the_objects_it_knows();
         }
         Ok(())
     }
@@ -2971,6 +3032,18 @@ impl Provider for GoogleDriveProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get(&file.id)
                     .cloned();
+                // The path stands for this folder only while it is
+                // bound to it. Another folder can have that name now
+                // (a listing of this run found it there): the path is
+                // that folder's, and this one has no place that the
+                // provider knows.
+                let path_before = match path_before {
+                    Some(path) if !self.path_is_bound_to(&path, &file.id) => {
+                        self.forget_file(&file.id);
+                        None
+                    }
+                    known => known,
+                };
                 let Some(path_before) = path_before else {
                     // A folder this provider did not know. A new one
                     // comes with entries for its files, and costs no

@@ -69,7 +69,11 @@ found and did not build:
       file, and the folder can end under both names, each with every
       file, as before the change. A look by content at the upload gate
       (the hash of a file under the new path is the hash of an index
-      row whose path is gone) finds the pair in any folder.
+      row whose path is gone) finds the pair in any folder. The same
+      end when a scan has no feed entry for the move and compares the
+      folder of the old path before the folder that holds the entry in
+      the cloud: the old name is on neither side there, so its index
+      rows are forgotten before the id could pair the two names.
 - [ ] E-49 Carry a folder that is renamed on this device to the cloud
       as one move. It goes file by file today: each file is one
       `Provider::move_object`, the provider makes a new folder, and the
@@ -96,21 +100,27 @@ found and did not build:
       rename later than that is not recognised: each file under the
       new name then gets one remote lookup and one hash, and nothing
       is transferred. A burst that the watcher folds into a scan can
-      take longer than 30 seconds to arrive.
+      take longer than 30 seconds to arrive. Inside the 30 seconds the
+      record hides too much: a file that the user removes under the
+      old path in the moment of the rename, and a folder that the user
+      moves in at that moment, read as the echo of the rename and wait
+      for the next scan. In `pull-only` a file that the user changed
+      around the rename gets no restore until that scan.
 - [ ] E-53 Measure the start of a profile with a large index. Before
       the first tick the runtime reads the id of every synced file and
       folder and hands the list to the provider. That is one read of
       two tables on the thread that starts the profile; it was not
       measured on a tree of a hundred thousand files.
-- [ ] E-54 Record the tag of the cloud object when identical content
-      converges. An upload that finds its content already in the cloud
-      sends nothing and writes the index row with the op-id that it
-      gave out for itself, which is on no object. The row then never
-      matches the tag of the object, so the next plan for the path
-      cannot use the quick check and compares hashes: one more read of
-      the whole cloud file on the `filesystem` provider, and no cost
-      on Google Drive, whose listing carries the hash. The row can
-      take the op-id that the object carries.
+- [ ] E-55 Revert content that the cloud changed under a name that a
+      `push-only` profile moves back. When both sides gave a file
+      another name and the cloud also changed its content, the cloud
+      object is moved to the name on this device. In `two-way` the file
+      is compared at once and the new content is fetched. The upload of
+      a mirror compares nothing and always sends, so `push-only` sends
+      only a file that this device changed: content that the cloud
+      changed stays there until the next scan of everything reverts
+      it. A comparison that sends only when the cloud object differs
+      would close it with no transfer for an unchanged file.
 
 ### Found by the heavy-user session in a Mac guest (2026-11-22)
 
@@ -278,15 +288,6 @@ a task costs a user.
       feed, with the timer as a fallback at a longer interval, costs
       nothing while nothing changes. Seen with the test account,
       2026-11-24.
-- [ ] P-18 Check what the changes feed of Google Drive does with a
-      file that has a `/` in its name. The listing reports such a name
-      as one that cannot sync, and the user is asked. The feed builds
-      the path of a changed file from its name and the names of its
-      folders, so `2024/budget.txt` in the synced folder reads there
-      as a file `budget.txt` in a folder `2024`. With the test account
-      on 2026-11-24 the file never reached a device and nothing
-      failed, but what the intent of that entry did was not read.
-      Found by the review of the pull request.
 - [ ] P-19 A trash for the cloud side of the `filesystem` provider. A
       deletion that Vapor carries to a cloud folder on a mounted volume
       removes the file there for good. Google Drive moves it to its
@@ -321,7 +322,35 @@ a task costs a user.
         this device, and finds a replaced version only in the 50
         seconds before that content. In both cases a version that the
         lost write replaced unseen is only in the version history of
-        the file in Google Drive.
+        the file in Google Drive. A move of this device tags the
+        object too: when the step whose outcome was lost was a move,
+        and the content came from another writer, the check takes that
+        content for a write of this device and can keep a copy of a
+        version that nobody lost.
+      - The check finds a write of the same moment by its time. A
+        writer can set the time of its version (Drive for desktop sets
+        the time the file has on its disk): a write that lands inside
+        the round trip of an upload's commit with a time of another
+        day is not found. A replaced version that its writer dated
+        later than the upload's own (a clock that is ahead) is listed
+        after it, and the check then finds no base and ends. The check
+        also ends when the list does not hold the upload's own version
+        yet; the runs with the account never saw the list lag a write,
+        and nothing else says that it cannot. `files.version` grows by
+        2 or 3 for one overwrite and by 5 to 7 for two, so it does not
+        tell a second writer.
+      - A check that runs late reads the wrong holder of the name. The
+        check takes the content that holds the name when it runs for
+        the write that won. After a stop of the daemon and one more
+        save of the file, that content is a later one: the version
+        that won is then kept as a copy (one copy too many), and the
+        version of this device is not kept when the write that won
+        came from a program other than Vapor.
+      - A copy that is made late goes to the folder and under the name
+        that the file had at the upload. A file or a folder that moved
+        since (up to 30 days) leaves the copy at the old place, which
+        can be outside the synced folder now. A file that is in the
+        trash is not told apart either.
       - Nobody measured the commit of a write with no recorded
         outcome, so 10 seconds stand for it. A replaced version whose
         time is more than 50 seconds before the time of the write, or
@@ -492,7 +521,8 @@ the primary path is blocked by it. See `docs/tasks/README.md`.
       with an empty folder, gives the claim up, and renames: a folder
       never takes the place of a file or of a folder with content
       there, but an empty folder that appears in that instant can be
-      replaced. macOS and Linux rename in one call.
+      replaced. A rename that fails removes nothing at the name. macOS
+      and Linux rename in one call.
 - [ ] C6-11 The Windows installers, `Vapor-windows-x64` and
       `Vapor-windows-arm64`, as a `package (windows)` entry of
       `release.yml`. One installer holds the app, `vapord.exe`, and
@@ -569,6 +599,16 @@ runners. What remains before Linux ships a surface:
       Tier 1 test of the live profile set runs every provider call on
       the tick thread. Found by the review of the pull request,
       2026-11-24.
+- [ ] CT-13 Run a backend with ids through the provider contract
+      suite. The three backends of
+      `core/providers/tests/provider_contract.rs` have no ids, so the
+      suite locks only that such a backend reports none. That an id is
+      unique, stays with a moved object, and is the same in a listing,
+      a lookup, and a transfer is tested for Google Drive alone, on
+      the scripted transport. A small backend with ids in the suite
+      (or the Drive provider on that transport) would hold every later
+      backend to the same contract. Found by the review of the pull
+      request, 2026-11-26.
 - [ ] T-16 Resource-ceiling integration tests over the cross-product in
       `docs/performance/acceptance-budgets-and-benchmark-harness.md`
       (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,

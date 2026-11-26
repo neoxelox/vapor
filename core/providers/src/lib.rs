@@ -558,31 +558,32 @@ pub trait Provider: Send + Sync {
 
     /// Tells the provider about a write of this device whose outcome
     /// the engine never recorded. The object at `path` holds
-    /// `content_hash`, the content of the local file, and carries the
-    /// tag `op_id`, which this device gave out for this profile. The
-    /// sync index still records `base_hash` and another tag: the
-    /// upload landed in a daemon that stopped before it stored the
-    /// outcome. The engine moves no bytes for such a file and records
-    /// it as in sync.
+    /// `content_hash` and carries the tag `op_id`, which this device
+    /// gave out for this profile. The sync index still records
+    /// `base_hash` and another tag: the upload landed in a daemon that
+    /// stopped before it stored the outcome.
     ///
     /// The follow-up of that write was never stored
-    /// ([`Self::take_follow_up_changes`]), and the upload that runs
-    /// again sends nothing. A backend that owes work after a write
-    /// takes this call as that write: an overwrite of `base_hash` with
-    /// `content_hash`, tagged `op_id`, whose outcome nobody recorded.
+    /// ([`Self::take_follow_up_changes`]). A backend that owes work
+    /// after a write takes this call as that write: an overwrite of
+    /// `base_hash` with `content_hash`, tagged `op_id`, whose outcome
+    /// nobody recorded.
     ///
-    /// The engine makes no call for content that another device or
-    /// another program put there, and none for a path whose index row
-    /// is missing or holds no hash: with no base, nothing can have
-    /// been replaced. A second call for one write starts no second
-    /// piece of work.
+    /// The tag is what the engine goes by. The call comes when the
+    /// engine looks at the object for an upload, and when it has
+    /// applied a download of it, whatever the local file holds. It
+    /// can come again for one write until the index records the
+    /// object, so a second call starts no second piece of work. The
+    /// engine makes no call for an object with the tag of another
+    /// device or with no tag, and none for a path whose index row is
+    /// missing or holds no hash: with no base, nothing can have been
+    /// replaced.
     ///
-    /// The engine calls this on its tick thread, in the tick that
-    /// records the file as in sync. The call reads and writes memory
-    /// only: no request, no file. What needs a request waits for a
-    /// worker. A follow-up that the call starts is in the answer of
-    /// the next [`Self::take_follow_up_changes`], so the engine stores
-    /// it with the index row of that tick.
+    /// The engine calls this on its tick thread. The call reads and
+    /// writes memory only: no request, no file. What needs a request
+    /// waits for a worker. A follow-up that the call starts is in the
+    /// answer of the next [`Self::take_follow_up_changes`], so the
+    /// engine stores it in that tick.
     ///
     /// Both hashes are in [`Self::content_hash_algorithm`].
     ///
@@ -600,8 +601,13 @@ pub trait Provider: Send + Sync {
     /// Takes back the ids that the engine stored for the synced files
     /// and folders ([`RemoteEntry::id`]), each with the path it had
     /// when the engine last saw it. Called one time for a provider,
-    /// before its first transfer, on the tick thread: it reads memory
-    /// only.
+    /// before its first poll and its first transfer, on the tick
+    /// thread: it reads memory only. The ids are those of one cloud
+    /// root. The engine hands them over when that root is ready and
+    /// is the folder that it adopted, and it stores none of them past
+    /// the day another folder becomes the root. A backend that finds
+    /// its root to be another folder drops what it knows of the folder
+    /// before.
     ///
     /// A backend whose feed names a changed object by its id needs
     /// this to say which path the entry is about after a stop of the

@@ -362,6 +362,10 @@ fn contract_object_ids_are_for_every_object_or_for_none_and_stay_with_a_moved_ob
             .iter()
             .filter_map(|entry| entry.id.as_deref())
             .collect();
+        // No backend of this suite has ids today, so the branch for a
+        // backend with ids runs for none of them: what is locked here
+        // is that a backend without ids reports none anywhere. The
+        // Google Drive tests on the scripted transport lock the ids.
         let has_ids = !ids.is_empty();
         assert!(
             ids.is_empty() || ids.len() == entries.len(),

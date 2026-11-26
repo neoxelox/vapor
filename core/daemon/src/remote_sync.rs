@@ -456,6 +456,11 @@ impl RemotePoller {
                 while let Some(change) = changes.pop_front() {
                     let change = &change;
                     if let RemoteChangeKind::Moved { from, entry_kind } = &change.kind {
+                        // What this page said so far is in the queue
+                        // before a move is settled: the rename on this
+                        // device looks there for work under the old
+                        // path.
+                        enqueue_remote_changes(state_db, &mut batch, report)?;
                         // One object under another name or in another
                         // place. A move that is not settled here is
                         // worked as the changes it stands for.
@@ -676,21 +681,7 @@ impl RemotePoller {
                         }
                     }
                 }
-                for (path, kind, _) in &batch {
-                    crate::logging::debug(
-                        "Enqueuing remote change",
-                        &[
-                            ("path", path.display().to_string()),
-                            ("kind", format!("{kind:?}")),
-                        ],
-                    );
-                }
-                if !batch.is_empty() {
-                    report.enqueued_intents += state_db.enqueue_intents_coalesced(
-                        &batch,
-                        crate::safeguards::IntentSource::Fresh,
-                    )?;
-                }
+                enqueue_remote_changes(state_db, &mut batch, report)?;
                 // The intents and the cursor are written in one
                 // transaction of the tick: both are saved, or neither.
                 if self.cursor.as_deref() != Some(page.next_cursor.as_str()) {
@@ -708,6 +699,30 @@ impl RemotePoller {
 
         Ok(())
     }
+}
+
+/// Puts the changes of a page that were read so far into the queue,
+/// and empties `batch`.
+fn enqueue_remote_changes(
+    state_db: &mut DurableStateDb,
+    batch: &mut Vec<(PathBuf, PendingIntentKind, SystemTime)>,
+    report: &mut RemotePollReport,
+) -> Result<(), StateDbError> {
+    for (path, kind, _) in batch.iter() {
+        crate::logging::debug(
+            "Enqueuing remote change",
+            &[
+                ("path", path.display().to_string()),
+                ("kind", format!("{kind:?}")),
+            ],
+        );
+    }
+    if !batch.is_empty() {
+        report.enqueued_intents +=
+            state_db.enqueue_intents_coalesced(batch, crate::safeguards::IntentSource::Fresh)?;
+        batch.clear();
+    }
+    Ok(())
 }
 
 /// Applies a change that says one object went from `from` to the path
@@ -763,6 +778,14 @@ fn settle_move(
     {
         CloudMove::FileByFile("the file syncs under another name on this device".to_string())
     } else {
+        // A removal that waits under the old path of a folder can be a
+        // file that the cloud removed before it moved the folder. The
+        // rename withdraws it, so the new folder is compared after.
+        let removals_waited = is_folder
+            && state_db
+                .queued_paths_of_kind(PendingIntentKind::ApplyRemoteDelete)?
+                .iter()
+                .any(|path| path.starts_with(&from_local));
         let mut renamed = Vec::new();
         let settled = DeviceRenames {
             state_db: &mut *state_db,
@@ -775,6 +798,12 @@ fn settle_move(
         .settle(&from_local, &to_local, is_folder)?;
         for (old_path, new_path) in renamed {
             env.local_echoes.record_rename(&old_path, &new_path, now);
+        }
+        if removals_waited && settled == CloudMove::RenamedOnDevice {
+            report.enqueued_intents += state_db.enqueue_intents_coalesced(
+                &[(to_local.clone(), PendingIntentKind::ReconcileSubtree, now)],
+                crate::safeguards::IntentSource::Fresh,
+            )?;
         }
         settled
     };

@@ -465,6 +465,10 @@ pub struct DaemonRuntime {
     /// cloud-root probe yet. That answer is the start of the profile,
     /// not the end of an outage.
     first_cloud_probe_pending: bool,
+    /// The provider of this run has the ids of the synced files and
+    /// folders. It gets them when the cloud root is the folder they
+    /// were read in: ready, and held for no question.
+    remote_ids_restored: bool,
     last_cloud_root_attempt_inst: Option<Instant>,
     /// The provider refused the sign-in. Like an unavailable root it
     /// stops admission and the changes poll while ingest keeps
@@ -808,6 +812,21 @@ impl DaemonRuntime {
                 .path_filter
                 .as_ref()
                 .is_some_and(|filter| !filter.rules_ready());
+        // The provider of this run knows no id yet. It gets the ids of
+        // the synced files and folders before the first poll and the
+        // first listing, so its feed can say which path a rename or a
+        // deletion is about. They are the ids of one cloud root: while
+        // the root waits for an answer (it is missing, or another
+        // folder is at its path) the provider gets none, and an answer
+        // that takes another folder drops them.
+        if !paused && !self.remote_ids_restored {
+            crate::remote_ids::restore(
+                &self.state_db,
+                self.app.provider(),
+                self.sync_scope.local_root.as_deref(),
+            )?;
+            self.remote_ids_restored = true;
+        }
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
@@ -1740,11 +1759,6 @@ impl DaemonRuntime {
         if let Some(local_root) = sync_scope.local_root.as_deref() {
             vapor_shared::paths::note_sync_root(local_root);
         }
-        // The provider of this run knows no id yet: it gets the ids of
-        // the synced files and folders, so its feed can say which path
-        // a rename or a deletion is about.
-        crate::remote_ids::restore(&state_db, app.provider(), sync_scope.local_root.as_deref())?;
-
         // The cloud root: adopted on first contact, checked against the
         // recorded identity afterwards. A runtime on its own probes it
         // here; a profile of the daemon leaves the first probe to the
@@ -1932,6 +1946,7 @@ impl DaemonRuntime {
             cloud_full: None,
             user_paused: false,
             first_cloud_probe_pending,
+            remote_ids_restored: false,
             last_cloud_root_attempt_inst: None,
             sign_in_hold: false,
             reconcile_walker: None,
@@ -4536,6 +4551,19 @@ impl DaemonRuntime {
                     now,
                 )
                 .map_err(|error| error.to_string())?;
+                // The folder at the path of the cloud root is another
+                // one now. The ids in the index are those of the
+                // folder before it.
+                let forgotten = self
+                    .state_db
+                    .forget_what_belongs_to_the_cloud_root()
+                    .map_err(|error| error.to_string())?;
+                if forgotten > 0 {
+                    logging::info(
+                        "Forgot the ids of the cloud objects of the cloud root before this one",
+                        &[("ids", forgotten.to_string())],
+                    );
+                }
                 self.cloud_root_ready = true;
             }
         }

@@ -797,7 +797,7 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   provider, or to how the engine uses a provider's listing or feed, is
   checked with the account before it is reported as done (owner,
   2026-11-25). The sign-in of the account reaches a command on its
-  stdin and never an argument, a file of the tree, or a log.
+  stdin and never an argument, a tracked file, or a log.
 
 ### 9.9) Virtual machine verification (Tier VM)
 
@@ -953,7 +953,8 @@ for what is already granted nor acts on what is not.
   packaged app on the host (inside a Tier VM guest is that tier's job),
   run `./scripts/e2e.sh --full` on a contributor machine,
   write to `~/.vapor` or run a test or a reproduction against it, or
-  use the network in a test.
+  use the network in a test (a Drive check with the dedicated test
+  account, above, is the one exception).
 
 ## 11) Definition of done
 

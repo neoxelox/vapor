@@ -322,7 +322,7 @@ folders, and the state database, and a start gets a new provider.
 | # | Proof |
 |---|---|
 | D1 | `a_folder_renamed_in_the_cloud_is_one_rename_on_this_device`, `a_file_renamed_in_the_cloud_is_one_rename_on_this_device` (`core/daemon/src/runtime_cloud_rename_tests.rs`): no request to the cloud, an empty trash, the ignored files under the new name, the index rows moved, a scan that finds nothing. `a_file_changed_under_a_folder_right_after_its_rename_still_syncs` for the loop prevention. `a_renamed_file_that_got_a_new_time_in_the_cloud_is_still_no_change` for a backend that gives a renamed file a new modification time. In the scan: `the_walk_records_the_id_of_each_entry_that_both_sides_hold`, `the_walk_renames_an_entry_whose_id_the_index_holds_under_another_path` (`core/daemon/src/reconcile_walk.rs`). |
-| D2 | `a_rename_made_while_the_daemon_was_stopped_is_applied_at_the_next_start` (the provider gets every id back, the feed has the rename) and `a_rename_that_the_feed_no_longer_holds_is_paired_by_id_in_the_scan_of_the_start`. In the provider: `after_a_restart_a_renamed_folder_is_reported_with_its_old_and_its_new_path`, `after_a_restart_a_deletion_in_the_feed_is_applied_by_the_path_that_came_back`, `a_renamed_file_is_reported_as_one_move_with_the_state_of_the_file`, `an_entry_for_an_id_that_the_provider_does_not_know_is_no_move`, `a_path_that_came_back_is_confirmed_before_it_is_used_and_a_listing_of_this_run_stands` (`core/providers/src/gdrive/tests.rs`). The contract suite: `contract_object_ids_are_for_every_object_or_for_none_and_stay_with_a_moved_object`. The index: `the_id_of_a_synced_file_or_folder_follows_it_and_leaves_with_it`. |
+| D2 | `a_rename_made_while_the_daemon_was_stopped_is_applied_at_the_next_start` (the provider gets every id back, the feed has the rename) and `a_rename_that_the_feed_no_longer_holds_is_paired_by_id_in_the_scan_of_the_start`. In the provider: `after_a_restart_a_renamed_folder_is_reported_with_its_old_and_its_new_path`, `after_a_restart_a_deletion_in_the_feed_is_applied_by_the_path_that_came_back`, `a_renamed_file_is_reported_as_one_move_with_the_state_of_the_file`, `an_entry_for_an_id_that_the_provider_does_not_know_is_no_move`, `a_path_that_came_back_is_confirmed_before_it_is_used_and_a_listing_of_this_run_stands` (`core/providers/src/gdrive/tests.rs`). The contract suite: `contract_object_ids_are_for_every_object_or_for_none_and_stay_with_a_moved_object`, which locks that a backend without ids reports none (no backend of the suite has ids; `docs/tasks/core.md` CT-13). The index: `the_id_of_a_synced_file_or_folder_follows_it_and_leaves_with_it`. |
 | D3, D4 | `a_folder_left_with_only_the_files_an_os_wrote_is_removed_and_they_go_to_the_trash`, `a_folder_left_with_anything_else_stays_as_it_is`, `a_folder_removed_in_the_cloud_leaves_no_folder_with_a_file_of_the_os_behind`, and scenario S86 with the real binaries. |
 | D5 | `a_new_name_that_is_taken_on_this_device_is_merged_file_by_file` (the feed has the rename) and `a_new_name_that_is_taken_is_merged_file_by_file_when_the_scan_finds_the_rename`; `a_new_path_that_is_taken_is_never_replaced` (`core/daemon/src/remote_move.rs`); `a_folder_is_renamed_with_what_it_holds_and_never_onto_a_taken_name` (`core/platform/src/fs_ops.rs`). |
 | D6, D11 | `a_name_that_both_sides_changed_stays_as_the_sync_mode_says` (`core/daemon/src/remote_move.rs`), `the_walk_leaves_out_the_names_that_are_owed_a_move_in_the_cloud`, `two_way_keeps_the_name_of_this_device_when_both_sides_renamed` (one move for the folder and one for the file, no transfer), `pull_only_keeps_the_name_of_the_cloud_when_both_sides_renamed`, `push_only_keeps_the_name_of_this_device_when_both_sides_renamed`, `pull_only_renames_on_this_device_and_push_only_moves_the_cloud_object_back`, `a_rename_on_this_device_that_meets_a_rename_in_the_cloud_while_the_daemon_runs_ends_as_one_folder`. |
@@ -369,12 +369,40 @@ Not checked:
   delivers each path that left and each file that came, which is more
   than FSEvents reports. S86 and S87 use the real watcher, on the
   `filesystem` provider, where no folder is renamed in one step.
-- The Mac app. This change touches nothing under `apps/macos`. Tier VM
-  ran for the pull request, because the other changes of it touch the
-  constants of the app.
+- The look of the Mac app. Under `apps/macos` this change adds one
+  line, `.directory` in the mirror of the ignore list (D4). Tier VM
+  ran for the pull request.
 - A name that both sides changed while this device also moved the
   entry into another folder (`docs/tasks/core.md` E-48), and a move
   out of a folder on a volume whose trash takes a copy (E-50).
+
+## The review of the pull request
+
+Three reviewers read the whole pull request on 2026-11-26: the guard
+removal, this change, and the overwrite check. Each finding was
+checked against the code before it was acted on. A fixed finding has a
+test that fails without the fix, unless the row says otherwise.
+
+| Area | Finding | Verdict |
+|---|---|---|
+| Engine | A rename on the device moved the index row of a file whose removal was in work: the file was in the trash, and the cloud copy was then deleted. Narrow: a volume with no trash folder. | Fixed. No rename is made while a removal under the old path is in work (`a_removal_that_is_in_work_under_the_old_path_stops_the_rename`). |
+| Engine | A scan that found a rename on both sides forgot the index rows of the folder before they could follow it. A deletion inside the folder then came back. | Fixed (`the_scan_keeps_the_index_rows_when_it_finds_a_rename_of_both_sides`). The case where the cloud entry is in another folder is in task E-48. |
+| Engine | One page of the feed with a removal or a new file under a folder, and then the rename of that folder: the first change was dropped until the next scan. | Fixed. The page so far is in the queue before a move is settled, and a folder whose removals waited is compared after its rename (two tests, `..._before_its_folder_got_another_name_...`). |
+| Engine | The check for a lost write could start for content of another program, because an upload that sent nothing wrote its own op-id into the index row. | Fixed. The row keeps the tag of the object (`a_row_keeps_the_tag_of_its_object_when_no_bytes_are_sent`). What is left is in task P-12. |
+| Engine | Content that the cloud changed under its own name was not fetched when the name of this device stayed. | Fixed for `two-way` (`content_that_the_cloud_changed_under_its_own_name_is_fetched_...`). `push-only` is task E-55. |
+| Engine | A removal in work whose queue row was withdrawn ended with a warning, and a comment said that it stops. | Fixed with the first row: no removal in work is withdrawn. The comment is corrected. |
+| Engine | A deletion by the user inside the 30 seconds after a rename reads as its echo; a wrong sentence in a doc comment. | Task E-52; the comment is corrected. |
+| Providers | The ids of one cloud root went to the provider of another folder after the user took that folder as the root. A change of an old object was then reported at a path of the new root, and a local file could be removed. | Fixed. The provider gets the ids when the root is ready and adopted, a new root forgets them, and the Drive provider drops its paths when its root is another folder (`the_ids_of_one_cloud_root_never_reach_the_provider_of_another_folder`, `a_provider_whose_root_is_another_folder_now_forgets_...`). |
+| Providers | A Drive name with a `/` became a nested path, and now a move to it. | Fixed. Such a name has no path in the feed (`a_file_that_gets_a_name_with_a_slash_leaves_its_path_and_is_no_move`). This also closes task P-18. |
+| Providers | A move by this device through the Drive provider had no test. | Test added (`a_folder_that_this_device_moves_keeps_the_paths_of_what_it_holds`). |
+| Providers | A path that its file left stayed bound to it, so a new file of that name was dropped as a second file of one name. | Fixed (`a_path_that_its_file_left_is_free_for_a_new_file_of_that_name`). |
+| Providers | A folder was reported as moved from a path that another folder holds now. | Fixed (`a_folder_whose_old_path_another_folder_has_now_is_no_move_from_that_path`). |
+| Providers | The contract text of `note_unrecorded_write` said what the engine does not do. The id half of the contract test runs for no backend. | Text corrected. The test says what it locks, and task CT-13 has the rest. No new test. |
+| Providers | A check that runs late reads the wrong holder of the name; a late copy goes to the old folder and name. | Task P-12, two new points. |
+| Platform | On Windows a failed folder rename removed an empty folder that another program made. On Linux the fallback had no test and made a stray folder for a move into itself. | Fixed: a failed rename removes nothing on Windows, a move into itself is refused first, and the fallback has a test that the Linux and Windows jobs run. The race that is left on Windows is task C6-13. |
+| Documents | The limits of the Drive version check left the task list with task P-13. | Back, in task P-12. |
+| Documents | The debug skill named schema 9; one sentence about the guard stayed; two documents and two skills had the rule for the Drive account from before 2026-11-25; two sentences of `AGENTS.md` read as a contradiction; this spec said that nothing under `apps/macos` changed; `.gitignore` had a change with no reason. | Each corrected. No test. |
+| Tools | Scenario S86 could fail when one cloud listing lands a tick before another. | Declined. 30 of 30 runs passed. The order that would break it is the product race of task P-15, and the assertion is what shows a regression of the pairing. |
 
 ## Open points
 

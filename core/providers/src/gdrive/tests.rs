@@ -1250,6 +1250,264 @@ fn after_a_restart_a_deletion_in_the_feed_is_applied_by_the_path_that_came_back(
 }
 
 #[test]
+fn a_provider_whose_root_is_another_folder_now_forgets_the_ids_of_the_folder_before() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // Another folder is at the path of the cloud root: the folder
+    // before it was moved away, or removed and made again.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"another-root","name":"Vapor","mimeType":"application/vnd.google-apps.folder"}]}"#,
+    );
+    provider.ensure_cloud_root("/Vapor").expect("ensure");
+
+    // The objects of the folder before keep their ids in Drive. A
+    // removal of one of them is no removal under this root: the path
+    // that the id had names another object here, or none.
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f9","removed":true},{"fileId":"d1","removed":true}"#,
+            &[]
+        )
+        .is_empty(),
+        "an id of the folder before names nothing of this root"
+    );
+}
+
+#[test]
+fn a_path_that_its_file_left_is_free_for_a_new_file_of_that_name() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // While no daemon ran, the folder `Reports` got the name
+    // `Quarterly`. A listing of this run finds its file under the new
+    // name, before the feed says anything about the folder.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"d1","name":"Quarterly","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}]}"#,
+    );
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"f1","name":"q1.pdf","mimeType":"application/pdf","size":"3","md5Checksum":"h1","parents":["d1"]}]}"#,
+    );
+    let listed = provider
+        .enumerate(&RemotePath::new("Quarterly").expect("path"))
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path.as_str(), "Quarterly/q1.pdf");
+
+    // Another device makes a new folder `Reports` with a new file
+    // `q1.pdf`. The path `Reports/q1.pdf` was the path of f1, which is
+    // elsewhere now: the new file is the file of that path, and no
+    // second file of one name.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("m1", "q1.pdf", "z1", "h2"),
+            &[
+                (
+                    200,
+                    r#"{"id":"z1","name":"Reports","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}"#
+                ),
+                (200, &file_listed("m1", "q1.pdf", "z1")),
+            ]
+        ),
+        vec![(
+            "Reports/q1.pdf".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )],
+        "the new file is reported"
+    );
+}
+
+#[test]
+fn a_folder_whose_old_path_another_folder_has_now_is_no_move_from_that_path() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // While no daemon ran, the folder `Reports` (d1) went into
+    // `Archive` under another name, and a new folder took the name
+    // `Reports`. The scan of the start lists the root before the feed
+    // is read, and finds the new folder at the path.
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"z1","name":"Reports","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]},
+            {"id":"d2","name":"Archive","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}
+        ]}"#,
+    );
+    let listed = provider.enumerate(&RemotePath::root()).expect("list");
+    assert_eq!(
+        listed
+            .iter()
+            .find(|entry| entry.path.as_str() == "Reports")
+            .and_then(|entry| entry.id.as_deref()),
+        Some("z1")
+    );
+
+    // The feed entry of the folder that left. `Reports` names the new
+    // folder now: a move from that path would tell the engine to
+    // rename the wrong folder on the device.
+    let reported = poll_the_feed(
+        &provider,
+        &transport,
+        &folder_entry("d1", "Quarterly", "d2"),
+        &[],
+    );
+    assert_eq!(
+        reported,
+        vec![(
+            "Archive/Quarterly".to_string(),
+            RemoteChangeKind::FolderMoved
+        )],
+        "no move from the path of another folder: the engine compares the folder that holds it now"
+    );
+
+    // The path still stands for the new folder: a change of a file in
+    // it is at that path, with no request.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f30", "plan.txt", "z1", "h30"),
+            &[]
+        ),
+        vec![(
+            "Reports/plan.txt".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
+    );
+}
+
+#[test]
+fn a_folder_that_this_device_moves_keeps_the_paths_of_what_it_holds() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+    let folder = |id: &str, name: &str, parent: &str| {
+        format!(
+            r#"{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder","parents":["{parent}"]}}"#
+        )
+    };
+
+    // The engine carries a name of this device to the cloud: the
+    // folder `Reports` goes into `Archive` under another name.
+    let before = transport.recorded_requests().len();
+    let archive_listed = format!(
+        r#"{{"files":[{}]}}"#,
+        folder("d2", "Archive", "root-folder")
+    );
+    // The source by its id, the folder of the new path, the new name
+    // (free), the folder once more for the write, and the move.
+    transport.push_response(200, folder("d1", "Reports", "root-folder"));
+    transport.push_response(200, archive_listed.clone());
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, archive_listed);
+    transport.push_response(200, r#"{"id":"d1"}"#);
+    let moved = provider.move_object(
+        &RemotePath::new("Reports").expect("path"),
+        &RemotePath::new("Archive/Reports 2026").expect("path"),
+        "dev-op-move",
+    );
+    assert!(
+        moved.is_ok(),
+        "{moved:?} after {:?}",
+        transport.recorded_requests()[before..]
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.url))
+            .collect::<Vec<_>>()
+    );
+
+    let requests = transport.recorded_requests();
+    let work = &requests[before..];
+    let urls: Vec<&String> = work.iter().map(|request| &request.url).collect();
+    let moved = work.last().expect("the move");
+    assert_eq!(moved.method, "PATCH", "{urls:?}");
+    assert!(moved.url.contains("/files/d1?"), "{urls:?}");
+    assert!(
+        moved.url.contains("addParents=d2") && moved.url.contains("removeParents=root-folder"),
+        "the folder leaves the root and goes into `Archive`: {urls:?}"
+    );
+    let body = String::from_utf8_lossy(&moved.body);
+    assert!(
+        body.contains(r#""name":"Reports 2026""#) && body.contains("dev-op-move"),
+        "one request gives the new name and the tag: {body}"
+    );
+
+    // What the folder holds went along. The provider knows the file in
+    // it by its new path with no listing: a removal in the feed names
+    // that path.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            r#"{"fileId":"f1","removed":true}"#,
+            &[]
+        ),
+        vec![(
+            "Archive/Reports 2026/q1.pdf".to_string(),
+            RemoteChangeKind::Removed
+        )]
+    );
+}
+
+#[test]
+fn a_file_that_gets_a_name_with_a_slash_leaves_its_path_and_is_no_move() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_got_its_ids_back(&transport);
+
+    // The user gives `notes.txt` the name `10/2026 notes.txt` in
+    // Drive. No sync path can hold that name: read as a path, it is a
+    // file in a folder `10`, which the cloud does not have.
+    let before = transport.recorded_requests().len();
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f9", "10/2026 notes.txt", "root-folder", "h9"),
+            &[]
+        ),
+        vec![("notes.txt".to_string(), RemoteChangeKind::Removed)],
+        "the old path is left, and no path stands for the new name"
+    );
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        1,
+        "the feed alone"
+    );
+
+    // A new file with such a name has no path either: the feed says
+    // nothing, and a listing tells the user.
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f20", "2024/budget.txt", "root-folder", "h20"),
+            &[]
+        )
+        .is_empty()
+    );
+
+    // The name is judged again when it changes: a name that a path can
+    // hold brings the file back.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &file_entry("f9", "notes 2026.txt", "root-folder", "h9"),
+            &[(200, &file_listed("f9", "notes 2026.txt", "root-folder"))]
+        ),
+        vec![(
+            "notes 2026.txt".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
+    );
+}
+
+#[test]
 fn a_renamed_file_is_reported_as_one_move_with_the_state_of_the_file() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = provider_that_got_its_ids_back(&transport);

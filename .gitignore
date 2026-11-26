@@ -50,7 +50,7 @@ temp/
 # --- Runtime state (local only) ---
 .vapor/
 vapor-state/
-/runtime/
+runtime/
 data/runtime/
 
 # --- Generated resource mirrors (source of truth is assets/) ---

@@ -138,8 +138,9 @@ impl DeviceRenames<'_> {
 
     /// Renames the file or the folder at `here` to `to`, and moves the
     /// index rows of `rows_at` to `to`. `Ok(Err(reason))` when the
-    /// rename is not made: nothing changed then, on the device or in
-    /// the index.
+    /// rename is not made: the entry and the index are as they were
+    /// then. The folders above the new path can have been made; the
+    /// cloud has them.
     ///
     /// The new path must be free at the moment of the rename. Nothing
     /// is ever replaced.
@@ -183,13 +184,16 @@ impl DeviceRenames<'_> {
                     .to_string(),
             ));
         }
-        // A removal that a scan queued under the old path is the same
-        // move, read file by file: it is withdrawn below. Any other
-        // intent is work on a path that is about to change.
+        // A removal that a scan queued under the old path and that
+        // still waits is the same move, read file by file: it is
+        // withdrawn below. Any other intent is work on a path that is
+        // about to change, and so is a removal that is in work: its
+        // file can be in the trash already while its index row is
+        // still here, and that row must not move to the new path.
         for path in [here, rows_at] {
             if self
                 .state_db
-                .intents_at_or_under_except(path, PendingIntentKind::ApplyRemoteDelete)?
+                .intents_in_the_way_at_or_under(path, PendingIntentKind::ApplyRemoteDelete)?
                 > 0
             {
                 return Ok(Err("work is queued under the old path".to_string()));
@@ -592,6 +596,51 @@ mod tests {
             "the removal is withdrawn"
         );
         assert!(pictures.join("a.jpg").exists());
+    }
+
+    #[test]
+    fn a_removal_that_is_in_work_under_the_old_path_stops_the_rename() {
+        // A scan read the move as a removal of each file, and a worker
+        // has one of them: the file is in the trash already, and its
+        // index row is still under the old path.
+        let mut fixture = Fixture::new();
+        let file = fixture.synced("Photos/a.jpg", b"aaa");
+        fixture.synced("Photos/b.jpg", b"bbb");
+        let root = fixture.root.clone();
+        let (photos, pictures) = (root.join("Photos"), root.join("Pictures"));
+        fixture
+            .state_db
+            .enqueue_intents_coalesced(
+                &[(file.clone(), PendingIntentKind::ApplyRemoteDelete, now())],
+                crate::safeguards::IntentSource::ReconcileBacklog,
+            )
+            .expect("a removal waits");
+        fixture
+            .state_db
+            .lease_next_ready(now())
+            .expect("lease")
+            .expect("the removal is in work");
+        fs::remove_file(&file).expect("the worker took the file");
+
+        let settled = fixture
+            .renames(SyncMode::TwoWay)
+            .settle(&photos, &pictures, true)
+            .expect("settle");
+
+        assert!(matches!(settled, CloudMove::FileByFile(_)), "{settled:?}");
+        assert!(
+            photos.join("b.jpg").exists() && !pictures.exists(),
+            "nothing is renamed"
+        );
+        // A row under the new path with no file there would read as a
+        // file that this device deleted, and the cloud copy would go.
+        assert!(fixture.has_row("Photos/a.jpg"));
+        assert!(!fixture.has_row("Pictures/a.jpg"));
+        assert_eq!(
+            fixture.state_db.queue_depth().expect("depth"),
+            1,
+            "the removal in work keeps its row in the queue"
+        );
     }
 
     #[test]

@@ -270,10 +270,11 @@ its own. The missing client is the second guard. S21 and S55 use
 reaches the network.
 
 `--provider gdrive` runs the same catalog against a real Google Drive
-with real credentials. It is a release-gate leg, run by hand on the
-maintainer's machine by `./scripts/release.sh` before a version
-bump, with a dedicated test account and `VAPOR_GDRIVE_CLIENT_ID` set;
-it never runs in CI, never on an ordinary change, and never against a
+with real credentials: the dedicated test account, and
+`VAPOR_GDRIVE_CLIENT_ID` set. It is a leg of `./scripts/release.sh`
+before a version bump, and an agent runs a Drive check with that
+account for a change to the Drive provider, with no question to the
+owner (`AGENTS.md` §9.8). It never runs in CI and never against a
 personal account. Because of the secret scope, the leg has to put the
 test account's token into each sandbox (`vapor auth login --token -`
 against the sandbox's runtime directory); that step is part of the
@@ -284,7 +285,9 @@ Drive-side operations (a `CloudSide` the harness performs through the
 provider crate, a per-run `VaporE2E-<run-id>` folder created and
 deleted by the harness, longer wait budgets, and the `gdrive-provider`
 scenarios for token refresh and rate limits) are open work tracked in
-`docs/tasks/core.md`, waiting on the test account. No scenario
+`docs/tasks/core.md`. Until that work is done, a Drive change is
+checked in a Tier VM guest with the Internet, with the workloads of
+`tools/vm/workloads/`. No scenario
 contacts the network in the default mode. `./scripts/e2e.sh
 --providers` lists the providers a run can target.
 

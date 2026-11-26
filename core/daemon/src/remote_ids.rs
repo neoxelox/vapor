@@ -19,7 +19,9 @@ use vapor_providers::{Provider, RemoteEntryKind, RemoteIdentity, RemotePath};
 use crate::state_db::{DurableStateDb, StateDbError};
 
 /// Hands the stored ids to `provider`. Called one time for a provider,
-/// before its first tick. A file that syncs under another name than
+/// before its first poll and its first listing, when the cloud root is
+/// ready and held for no question: the ids are those of that one
+/// folder. A file that syncs under another name than
 /// its cloud object (a name that two cloud objects cannot both have on
 /// this device) is left out: its path here is not the path there.
 pub(crate) fn restore(

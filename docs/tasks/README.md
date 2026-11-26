@@ -86,8 +86,9 @@ decides the order; this is the order by what a user loses.
 - Speed: `core.md` E-31, E-45, P-9.
   `core.md` PT-3 measures each of them in the perf gate, so a
   slower build fails it.
-- The rest: `core.md` E-44, E-46, P-12, P-14, P-15, P-16, P-17, P-18,
-  P-19, PL-8, CT-12, `cli.md` L1-9, `macos.md` O-5, MT-7, M3-20, M3-21.
+- The rest: `core.md` E-44, E-46, P-12, P-14, P-15, P-16, P-17, P-19,
+  PL-8, CT-12, CT-13, `cli.md` L1-9, `macos.md` O-5, MT-7, M3-20,
+  M3-21.
 - A run that repeats the session: `core.md` TR-13. Real providers in a
   guest: `macos.md` MT-6.
 
@@ -104,7 +105,7 @@ and did not build, by what a user loses:
 - Renames that still cost more than one step: `core.md` E-49 (a folder
   renamed on this device), P-21 (a folder that this device made, until
   a scan), P-15 and P-16 (the file-by-file path that stays).
-- The rest: `core.md` E-50, E-51, E-52, E-53, E-54.
+- The rest: `core.md` E-50, E-51, E-52, E-53, E-55.
 
 ### Wave 9: macOS app UX
 

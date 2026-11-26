@@ -147,6 +147,43 @@ impl IdCloud {
         });
     }
 
+    /// Another device removes the file at `path`. The feed says so.
+    fn remove(&self, path: &str) {
+        std::fs::remove_file(self.root.join(path)).expect("cloud delete");
+        let mut book = self.book();
+        let id = book.id_of(path);
+        book.forget(path);
+        book.feed.push(RemoteChange {
+            path: RemotePath::new(path).expect("path"),
+            kind: RemoteChangeKind::Removed,
+            observed_at: SystemTime::UNIX_EPOCH,
+            op_id: None,
+            content_hash: None,
+            size_bytes: None,
+            modified_at: None,
+            id: Some(id),
+        });
+    }
+
+    /// Another device makes the file at `path`. The feed says so.
+    fn create(&self, path: &str, body: &[u8]) {
+        let target = self.root.join(path);
+        std::fs::write(&target, body).expect("cloud file");
+        let metadata = std::fs::metadata(&target).expect("new file");
+        let mut book = self.book();
+        let id = book.id_of(path);
+        book.feed.push(RemoteChange {
+            path: RemotePath::new(path).expect("path"),
+            kind: RemoteChangeKind::CreatedOrModified,
+            observed_at: SystemTime::UNIX_EPOCH,
+            op_id: None,
+            content_hash: None,
+            size_bytes: Some(metadata.len()),
+            modified_at: metadata.modified().ok(),
+            id: Some(id),
+        });
+    }
+
     /// The same rename, with nothing in the feed for it.
     fn rename_with_no_feed_entry(&self, from: &str, to: &str) {
         let target = self.root.join(to);
@@ -716,6 +753,80 @@ fn a_folder_moved_into_another_folder_in_the_cloud_is_one_rename_on_this_device(
 }
 
 #[test]
+fn a_file_removed_in_the_cloud_before_its_folder_got_another_name_leaves_this_device() {
+    let mut device = device_with_photos(SyncMode::TwoWay);
+    device.start();
+    device.converge();
+    let before = device.cloud.traffic();
+
+    // One page of the feed holds both: the removal names the file by
+    // the old name of its folder.
+    device.cloud.remove("Photos/2026/b.jpg");
+    device.cloud.rename("Photos", "Pictures");
+    device.converge();
+
+    assert_eq!(
+        files_under(&device.watch_root),
+        vec![
+            "Pictures/.DS_Store",
+            "Pictures/a.jpg",
+            "Pictures/node_modules/pkg/index.js",
+            "report.txt",
+        ],
+        "the folder has its new name, and the removed file is gone from it"
+    );
+    assert_eq!(
+        device.cloud.traffic(),
+        before,
+        "no request for the rename or the removal"
+    );
+    assert!(device.has_row("Pictures/a.jpg") && !device.has_row("Pictures/2026/b.jpg"));
+    assert_eq!(
+        files_under(&device.cloud.root),
+        vec!["Pictures/a.jpg", "report.txt"]
+    );
+}
+
+#[test]
+fn a_file_made_in_the_cloud_before_its_folder_got_another_name_reaches_this_device() {
+    let mut device = device_with_photos(SyncMode::TwoWay);
+    device.start();
+    device.converge();
+
+    // One page of the feed holds both: the new file is named by the
+    // old name of its folder.
+    device.cloud.create("Photos/c.jpg", b"a third photo");
+    device.cloud.rename("Photos", "Pictures");
+    device.converge();
+
+    assert_eq!(
+        std::fs::read(device.local("Pictures/c.jpg")).expect("the new file"),
+        b"a third photo"
+    );
+    assert_eq!(
+        files_under(&device.watch_root),
+        vec![
+            "Pictures/.DS_Store",
+            "Pictures/2026/b.jpg",
+            "Pictures/a.jpg",
+            "Pictures/c.jpg",
+            "Pictures/node_modules/pkg/index.js",
+            "report.txt",
+        ]
+    );
+    assert_eq!(
+        files_under(&device.cloud.root),
+        vec![
+            "Pictures/2026/b.jpg",
+            "Pictures/a.jpg",
+            "Pictures/c.jpg",
+            "report.txt"
+        ]
+    );
+    assert_eq!(device.runtime().conflict_count(), 0);
+}
+
+#[test]
 fn a_file_renamed_in_the_cloud_is_one_rename_on_this_device() {
     let mut device = Device::synced(SyncMode::TwoWay, PHOTOS);
     device.start();
@@ -803,9 +914,11 @@ fn a_rename_made_while_the_daemon_was_stopped_is_applied_at_the_next_start() {
     device.cloud.rename("Photos", "Pictures");
     device.cloud.rename("report.txt", "final.txt");
     device.start();
+    device.tick(0);
 
-    // The provider of this start got the ids of what was synced, so
-    // its feed can say which path an entry is about.
+    // The provider of this start got the ids of what was synced before
+    // its first poll, so its feed can say which path an entry is
+    // about.
     let mut restored: Vec<(String, RemoteEntryKind)> = device
         .running()
         .restored
@@ -871,6 +984,79 @@ fn a_rename_that_the_feed_no_longer_holds_is_paired_by_id_in_the_scan_of_the_sta
     assert!(device.trash_is_empty());
     assert!(device.has_row("Archive/Pictures/2026/b.jpg") && device.has_row("final.txt"));
     assert!(!device.local("Photos").exists());
+}
+
+#[test]
+fn the_ids_of_one_cloud_root_never_reach_the_provider_of_another_folder() {
+    let mut device = device_with_photos(SyncMode::TwoWay);
+    let ids_of_the_first_root: Vec<String> = device.cloud.book().ids.values().cloned().collect();
+    assert!(!ids_of_the_first_root.is_empty());
+
+    // While no daemon runs, another folder takes the place of the
+    // cloud root. The folder before it is still in the cloud, under
+    // another path, and its objects keep their ids.
+    let moved_away = device.temp.path().join("cloud-before");
+    std::fs::rename(&device.cloud.root, &moved_away).expect("the root goes");
+    std::fs::create_dir_all(&device.cloud.root).expect("another folder");
+    device.cloud.book().ids.clear();
+    device.start();
+    for _ in 0..12 {
+        device.tick(6_000);
+    }
+    let decision = device
+        .runtime()
+        .state_db()
+        .open_decision(crate::root_identity::DECISION_KIND, None)
+        .expect("query")
+        .expect("the daemon asks about the folder");
+    assert!(
+        device
+            .running()
+            .restored
+            .lock()
+            .expect("restored")
+            .is_empty(),
+        "no id goes to the provider while the root waits for an answer"
+    );
+
+    let now = timestamp_ms(device.now_ms);
+    device
+        .running()
+        .runtime
+        .state_db_mut()
+        .resolve_decision(decision.id, "reattach", now)
+        .expect("resolve");
+    device.converge();
+
+    assert!(
+        device
+            .running()
+            .restored
+            .lock()
+            .expect("restored")
+            .is_empty(),
+        "the ids of the folder before are no ids of this one"
+    );
+    let known_now: Vec<String> = device.cloud.book().ids.values().cloned().collect();
+    let stored: Vec<String> = device
+        .runtime()
+        .state_db()
+        .remote_identities()
+        .expect("read")
+        .into_iter()
+        .map(|(_, id, _)| id)
+        .collect();
+    assert!(
+        stored.iter().all(|id| known_now.contains(id)),
+        "the index holds ids of the new folder only: {stored:?}"
+    );
+    assert!(!stored.iter().any(|id| ids_of_the_first_root.contains(id)));
+    // The merge sent the files up, and removed nothing on this device.
+    assert_eq!(
+        files_under(&device.cloud.root),
+        vec!["Photos/2026/b.jpg", "Photos/a.jpg", "report.txt"]
+    );
+    assert!(device.local("Photos/a.jpg").exists() && device.trash_is_empty());
 }
 
 #[test]
@@ -1015,6 +1201,90 @@ fn two_way_keeps_the_name_of_this_device_when_both_sides_renamed() {
         files_under(&device.cloud.root),
         vec!["Pics/2026/b.jpg", "Pics/a.jpg", "mine.txt"]
     );
+}
+
+#[test]
+fn content_that_the_cloud_changed_under_its_own_name_is_fetched_when_the_name_of_this_device_stays()
+{
+    // Both sides renamed the file, and the other device also wrote new
+    // content into it. The name is this device's, the content is the
+    // cloud's: only one side changed the content.
+    let mut device = Device::synced(SyncMode::TwoWay, PHOTOS);
+    std::fs::rename(device.local("report.txt"), device.local("mine.txt")).expect("local rename");
+    device
+        .cloud
+        .rename_with_no_feed_entry("report.txt", "theirs.txt");
+    std::fs::write(
+        device.cloud.root.join("theirs.txt"),
+        b"the numbers of the next quarter, with a page more",
+    )
+    .expect("cloud edit");
+    device.cloud.announce("report.txt", "theirs.txt");
+    device.start();
+    device.converge();
+
+    assert_eq!(
+        files_under(&device.cloud.root),
+        vec!["Photos/2026/b.jpg", "Photos/a.jpg", "mine.txt"]
+    );
+    assert_eq!(
+        std::fs::read(device.local("mine.txt")).expect("the file"),
+        b"the numbers of the next quarter, with a page more",
+        "the content of the cloud reached this device with no wait for a scan"
+    );
+    assert_eq!(
+        std::fs::read(device.cloud.root.join("mine.txt")).expect("the object"),
+        b"the numbers of the next quarter, with a page more"
+    );
+    assert_eq!(device.runtime().conflict_count(), 0);
+    assert!(!device.local("theirs.txt").exists() && !device.local("report.txt").exists());
+}
+
+#[test]
+fn the_scan_keeps_the_index_rows_when_it_finds_a_rename_of_both_sides() {
+    // The feed lost its history, so the scan of the start pairs the
+    // two names by the id. Another device also removed one file of the
+    // folder. The rows of the folder are what says that this is a
+    // deletion and no new file of this device: they must follow the
+    // folder to its name.
+    let mut device = device_with_photos(SyncMode::TwoWay);
+    std::fs::rename(device.local("Photos"), device.local("Pics")).expect("local rename");
+    device.cloud.rename_with_no_feed_entry("Photos", "Pictures");
+    std::fs::remove_file(device.cloud.root.join("Pictures/2026/b.jpg")).expect("cloud delete");
+    device.cloud.book().forget("Pictures/2026/b.jpg");
+    device.cloud.lose_the_feed_history();
+    let before = device.cloud.traffic();
+    device.start();
+    device.converge();
+
+    let (uploads, downloads, deletes, moves) = device.cloud.traffic();
+    assert_eq!(
+        moves[before.3.len()..],
+        [("Pictures".to_string(), "Pics".to_string())],
+        "one move of the cloud folder to the name on this device"
+    );
+    assert_eq!(
+        (uploads, downloads, deletes),
+        (before.0, before.1, before.2),
+        "the removed file is not sent back, and nothing else moves"
+    );
+    assert_eq!(
+        files_under(&device.cloud.root),
+        vec!["Pics/a.jpg", "report.txt"]
+    );
+    assert_eq!(
+        files_under(&device.watch_root),
+        vec![
+            "Pics/.DS_Store",
+            "Pics/a.jpg",
+            "Pics/node_modules/pkg/index.js",
+            "report.txt",
+        ],
+        "the deletion of the other device reached this one"
+    );
+    assert!(device.has_row("Pics/a.jpg"));
+    assert!(!device.has_row("Photos/a.jpg") && !device.has_row("Pics/2026/b.jpg"));
+    assert_eq!(device.runtime().conflict_count(), 0);
 }
 
 #[test]

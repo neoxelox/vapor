@@ -1301,18 +1301,25 @@ impl StagedExecutor {
                         {
                             // Identical content converges silently.
                             app.release_work(permit);
-                            let remote_modified_at = probe
+                            let remote_entry = probe
                                 .stat
                                 .as_ref()
                                 .and_then(|stat| stat.as_ref().ok())
-                                .and_then(|entry| entry.as_ref())
-                                .map(|entry| entry.modified_at);
+                                .and_then(|entry| entry.as_ref());
+                            // Nothing was written, so the row takes the
+                            // tag that the object carries.
+                            let op_id = op_id_of_an_object_left_as_it_is(
+                                state_db,
+                                &plan,
+                                remote_entry.map(|entry| entry.op_id.as_deref()),
+                            );
                             record_upload_index(
                                 state_db,
                                 &plan,
                                 &remote_hash,
                                 local_size(&plan.local_path),
-                                remote_modified_at,
+                                remote_entry.map(|entry| entry.modified_at),
+                                &op_id,
                                 now,
                             );
                             self.complete(state_db, &intent, report)?;
@@ -1699,12 +1706,15 @@ impl StagedExecutor {
                         outcome.remote_modified_at,
                         now,
                     );
+                    // An upload records its own op-id: the tag that it
+                    // just put on the object.
                     record_upload_index(
                         state_db,
                         &plan,
                         &outcome.content_hash,
                         outcome.bytes_total,
                         outcome.remote_modified_at,
+                        &plan.op_id,
                         now,
                     );
                     record_remote_id(state_db, &plan.local_path, outcome.remote_id.as_deref());
@@ -2364,12 +2374,16 @@ impl StagedExecutor {
                 .ok()
                 .flatten()
                 .and_then(|index| index.remote_modified_at);
+            // The object was not looked at here: the row keeps the
+            // tag it has.
+            let op_id = op_id_of_an_object_left_as_it_is(state_db, &plan, None);
             record_upload_index(
                 state_db,
                 &plan,
                 &hash,
                 local_size(&plan.local_path),
                 remote_modified_at,
+                &op_id,
                 now,
             );
             crate::logging::debug(
@@ -3000,15 +3014,21 @@ fn finish_respelling(
         // The two sides are under one name again. What changed inside
         // while the names differed is found by a comparison now, and
         // not at the next scan of everything: the folder is walked,
-        // and a file that this device changed is sent.
+        // and a file gets the comparison of an upload. In `two-way`
+        // that comparison sends what this device changed, fetches what
+        // the cloud changed, and moves no bytes for a file that both
+        // sides left as it was. The upload of a mirror compares
+        // nothing and always sends, so it runs only for a file that
+        // this device changed.
         let follow_up = match fs::symlink_metadata(&respelling.new) {
             Ok(metadata) if metadata.is_dir() => Some(PendingIntentKind::ReconcileSubtree),
             Ok(metadata)
                 if metadata.is_file()
                     && env.sync_mode.allows_local_to_remote()
-                    && state_db.sync_index(&respelling.new)?.is_none_or(|row| {
-                        !row.matches_local(metadata.len(), metadata.modified().ok())
-                    }) =>
+                    && (env.sync_mode == vapor_shared::SyncMode::TwoWay
+                        || state_db.sync_index(&respelling.new)?.is_none_or(|row| {
+                            !row.matches_local(metadata.len(), metadata.modified().ok())
+                        })) =>
             {
                 Some(PendingIntentKind::Upload)
             }
@@ -4867,9 +4887,12 @@ fn displaced_file_check(
 /// (`Provider::note_unrecorded_write`).
 ///
 /// The tag alone decides, so the call comes whatever the local file
-/// holds now, and never for bytes that another device or another
-/// program put in the cloud (the same checkout on two devices leaves
-/// the tag of the device that uploaded first).
+/// holds now. Bytes that another device put in the cloud carry the
+/// tag of that device, and bytes from a program that sets no tag carry
+/// none: no call (the same checkout on two devices is such a case). A
+/// row whose object was left as it was holds the tag of that object,
+/// so a later write of a program that keeps the tag gives no call
+/// either.
 ///
 /// With no row, or a row with no hash, there is no base that a write
 /// could have replaced: no call. Until the row records the object, a
@@ -4917,6 +4940,7 @@ fn record_upload_index(
     content_hash: &str,
     size_bytes: u64,
     remote_modified_at: Option<SystemTime>,
+    last_op_id: &str,
     now: SystemTime,
 ) {
     // The recorded content_hash is the bytes we hashed. If the local file
@@ -4946,10 +4970,31 @@ fn record_upload_index(
         size_bytes,
         local_modified_at,
         remote_modified_at,
-        // An upload records our own op-id (the tag we just wrote remotely).
-        &plan.op_id,
+        last_op_id,
         now,
     );
+}
+
+/// The op-id for the index row of a file whose cloud object this
+/// intent did not write: the content was there already. `seen` is the
+/// tag that a lookup of this intent found on the object (`Some(None)`
+/// for an object with no tag). With no lookup the row keeps the tag it
+/// has. The op-id of the intent itself is on no object, and a row that
+/// held it would never match the object again.
+fn op_id_of_an_object_left_as_it_is(
+    state_db: &DurableStateDb,
+    plan: &TransferPlan,
+    seen: Option<Option<&str>>,
+) -> String {
+    match seen {
+        Some(tag) => tag.unwrap_or("").to_string(),
+        None => state_db
+            .sync_index(&plan.local_path)
+            .ok()
+            .flatten()
+            .map(|row| row.last_op_id)
+            .unwrap_or_default(),
+    }
 }
 
 fn record_download_index(
@@ -8745,6 +8790,15 @@ mod tests {
             .content_hash
     }
 
+    fn indexed_op_id(fixture: &Fixture, path: &Path) -> String {
+        fixture
+            .state_db
+            .sync_index(path)
+            .expect("index")
+            .expect("an index row")
+            .last_op_id
+    }
+
     /// The one call that a test of a lost write expects.
     fn the_lost_write() -> Vec<[String; 4]> {
         vec![[
@@ -8776,12 +8830,52 @@ mod tests {
             "the file is recorded as in sync"
         );
         assert!(fixture.conflict_copies_of("doc").is_empty());
+        assert_eq!(
+            indexed_op_id(&fixture, &local),
+            lost_op_id(),
+            "the row takes the tag that the object carries"
+        );
 
-        // The index knows the content now: one more upload intent for
+        // The index knows the write now: one more upload intent for
         // the same file tells the provider nothing.
         run_intent(&mut fixture, &local, PendingIntentKind::Upload);
         assert_eq!(noted.writes().len(), 1);
         assert_eq!(noted.uploads(), 0);
+    }
+
+    #[test]
+    fn a_row_keeps_the_tag_of_its_object_when_no_bytes_are_sent() {
+        // The outcome of the upload with this tag was recorded.
+        let (mut fixture, noted, local) =
+            fixture_with_the_same_content_on_both_sides(Some(&lost_op_id()));
+        fixture
+            .state_db
+            .set_sync_index(
+                &local,
+                &hash_hex_of_bytes(b"our edit"),
+                8,
+                None,
+                None,
+                &lost_op_id(),
+                timestamp_ms(0),
+            )
+            .expect("seed index");
+
+        // The file is saved again with the same bytes: nothing is
+        // sent, and the row must not take the op-id of an upload that
+        // never ran.
+        run_intent(&mut fixture, &local, PendingIntentKind::Upload);
+        assert_eq!(noted.uploads(), 0);
+        assert_eq!(indexed_op_id(&fixture, &local), lost_op_id());
+
+        // A program that keeps the tag writes other content, and this
+        // device takes it. With a row that held another op-id, this
+        // would read as a write of this device with no recorded
+        // outcome.
+        std::fs::write(fixture.cloud_root.join("doc.txt"), b"their edit").expect("remote");
+        run_intent(&mut fixture, &local, PendingIntentKind::Download);
+        assert!(noted.writes().is_empty(), "{:?}", noted.writes());
+        assert_eq!(std::fs::read(&local).expect("applied"), b"their edit");
     }
 
     #[test]
