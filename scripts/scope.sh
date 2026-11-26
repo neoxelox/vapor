@@ -20,15 +20,23 @@ set -euo pipefail
 #
 # Each changed file is of one class, and the classes decide:
 #
-#   docs  Markdown, `docs/`, the agent files, `LICENSE`. No test and no
-#         build reads them. The text checks do.
-#   mac   `apps/macos/`, `assets/`, `tools/vm/driver/`: the Mac app,
-#         what it bundles, and the Swift driver of Tier VM. Only the
-#         macOS jobs build them. Everything in the targets of the app
-#         is of this class, Markdown too: the build reads its
-#         resources.
-#   core  everything else: the Rust workspace, the scripts, the
-#         workflows, and any path this file does not name.
+#   docs     Markdown, `docs/`, the agent files, `LICENSE`. No test
+#            and no build reads them. The text checks do.
+#   macos    `apps/macos/`, `assets/macos/`, `tools/vm/driver/`: the
+#            Mac app, what it bundles, and the Swift driver of Tier VM.
+#            Everything in the targets of the app is of this class,
+#            Markdown too: the build reads its resources.
+#   windows  `apps/windows/`, `assets/windows/`.
+#   linux    `apps/linux/`, `assets/linux/`.
+#   apps     every other asset (`assets/locales/` and the rest): what
+#            the apps share. It counts for each system that has an app
+#            under `apps/`.
+#   core     everything else: the Rust workspace, the scripts, the
+#            workflows, and any path this file does not name.
+#
+# The app of one system is built by the jobs of that system only, so
+# a change to it runs those jobs and no others. The core runs on every
+# system, so a change to it runs everything.
 #
 # A Markdown file that a build or a test starts to read is no longer
 # docs: name it here in the same change.
@@ -69,12 +77,22 @@ class_of() {
     # that test, so they check a change of the content. They do not
     # check a change of the name: macOS folds case and Linux does not,
     # so a new spelling passes there and breaks here.
-    apps/macos/Sources/VaporCore/AccessibilityID.swift | assets/locales/en.json)
-      if [[ "$status" == M ]]; then echo mac; else echo core; fi
+    apps/macos/Sources/VaporCore/AccessibilityID.swift)
+      if [[ "$status" == M ]]; then echo macos; else echo core; fi
       ;;
-    apps/macos/Sources/* | apps/macos/Tests/*) echo mac ;;
+    assets/locales/en.json)
+      if [[ "$status" == M ]]; then echo apps; else echo core; fi
+      ;;
+    apps/macos/Sources/* | apps/macos/Tests/*) echo macos ;;
+    # The layout of these two apps is not known yet, so everything in
+    # them is the app, Markdown too.
+    apps/windows/*) echo windows ;;
+    apps/linux/*) echo linux ;;
     *.md | docs/* | .agents/* | .claude/* | LICENSE) echo docs ;;
-    apps/macos/* | assets/* | tools/vm/driver/*) echo mac ;;
+    apps/macos/* | assets/macos/* | tools/vm/driver/*) echo macos ;;
+    assets/windows/*) echo windows ;;
+    assets/linux/*) echo linux ;;
+    assets/*) echo apps ;;
     *) echo core ;;
   esac
 }
@@ -112,8 +130,24 @@ changed_files() {
   esac
 }
 
+# The systems that have an app: the folders under `apps/`. What the
+# apps share counts for each of them.
+app_systems() {
+  # The tests of this script give the list.
+  if [[ -n "${VAPOR_SCOPE_APPS+set}" ]]; then
+    echo "$VAPOR_SCOPE_APPS"
+    return 0
+  fi
+  local system found=""
+  for system in macos windows linux; do
+    [[ -d "$ROOT_DIR/apps/$system" ]] && found="$found $system"
+  done
+  echo "$found"
+}
+
 decide() {
-  local files core=0 mac=0 docs=0 line status file tab=$'\t'
+  local files core=0 docs=0 shared=0 line status file tab=$'\t' system
+  local need_macos=0 need_windows=0 need_linux=0
   if ! files="$(changed_files)"; then
     echo "[scope] the changed files are not known: full" >&2
     echo full
@@ -130,15 +164,39 @@ decide() {
     fi
     case "$(class_of "$file" "$status")" in
       core) core=$((core + 1)) ;;
-      mac) mac=$((mac + 1)) ;;
       docs) docs=$((docs + 1)) ;;
+      apps) shared=$((shared + 1)) ;;
+      macos) need_macos=$((need_macos + 1)) ;;
+      windows) need_windows=$((need_windows + 1)) ;;
+      linux) need_linux=$((need_linux + 1)) ;;
     esac
   done <<<"$files"
-  echo "[scope] changed files: $core core, $mac mac, $docs docs" >&2
 
-  if [[ $((core + mac + docs)) -eq 0 || $core -gt 0 ]]; then
+  if [[ $shared -gt 0 ]]; then
+    local systems
+    systems="$(app_systems)"
+    # With no app to build them, nothing says who reads these files.
+    [[ -n "${systems// /}" ]] || core=$((core + shared))
+    for system in $systems; do
+      case "$system" in
+        macos) need_macos=$((need_macos + shared)) ;;
+        windows) need_windows=$((need_windows + shared)) ;;
+        linux) need_linux=$((need_linux + shared)) ;;
+      esac
+    done
+  fi
+  echo "[scope] changed files: $core core, $docs docs, $shared shared by the apps;" \
+    "for macos $need_macos, windows $need_windows, linux $need_linux" >&2
+
+  local need_here
+  case "$OS" in
+    macos) need_here=$need_macos ;;
+    windows) need_here=$need_windows ;;
+    linux) need_here=$need_linux ;;
+  esac
+  if [[ $((core + docs + need_macos + need_windows + need_linux)) -eq 0 || $core -gt 0 ]]; then
     echo full
-  elif [[ $mac -gt 0 && "$OS" == macos ]]; then
+  elif [[ $need_here -gt 0 ]]; then
     echo full
   elif [[ "$WORKFLOW" == lint && "$OS" == linux ]]; then
     # One job runs the text checks for every change that no full lint

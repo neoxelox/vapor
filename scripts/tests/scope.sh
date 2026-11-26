@@ -71,6 +71,44 @@ expect_all "$mac_only"$'\n'"$docs_only" \
   full skip skip \
   full skip skip
 
+# The app of one system runs the jobs of that system, and no others.
+windows_only=$'apps/windows/App.xaml\napps/windows/README.md\nassets/windows/vapor.ico'
+expect_all "$windows_only" \
+  skip docs full \
+  skip skip full \
+  skip skip full
+
+linux_only=$'apps/linux/src/main.c\nassets/linux/vapor.svg'
+expect_all "$linux_only" \
+  skip full skip \
+  skip full skip \
+  skip full skip
+
+expect_all "$windows_only"$'\n'"$mac_only" \
+  full docs full \
+  full skip full \
+  full skip full
+
+# What the apps share counts for each system that has an app.
+shared_assets=$'assets/locales/es.json\nassets/marks/mark.svg'
+VAPOR_SCOPE_APPS="macos" expect_all "$shared_assets" \
+  full docs skip \
+  full skip skip \
+  full skip skip
+VAPOR_SCOPE_APPS="macos windows linux" expect_all "$shared_assets" \
+  full full full \
+  full full full \
+  full full full
+VAPOR_SCOPE_APPS="macos windows" expect_all "$shared_assets" \
+  full docs full \
+  full skip full \
+  full skip full
+# With no app at all, nothing says who reads them: everything runs.
+VAPOR_SCOPE_APPS="" expect_all "$shared_assets" \
+  full full full \
+  full full full \
+  full full full
+
 # One file of the core runs everything, whatever comes with it.
 for core_file in \
   core/daemon/src/executor.rs \
@@ -82,6 +120,8 @@ for core_file in \
   VERSION \
   .env.example \
   .gitignore \
+  apps/README.txt \
+  core/platform/src/fs_watch/windows.rs \
   a-new-file-at-the-root; do
   expect_all "$core_file"$'\n'"$mac_only"$'\n'"$docs_only" \
     full full full \

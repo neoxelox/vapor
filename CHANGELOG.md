@@ -90,7 +90,7 @@ in its pull request and in the documents under `docs/`.
 - Tier VM (`./scripts/vm.sh`) installs the packaged app in a macOS virtual machine and acts on it as a user does, with screenshots of each scenario. The controls in the windows of the Mac app have accessibility identifiers, which the tier finds them by.
 - A manual Tier VM guest can run next to the app scenarios (`--guest --second`) and can have the Internet to test a real cloud provider (`--guest --internet`). `tools/vm/workloads/` holds the workloads of a heavy-user session.
 - An agent can run a project as one coordinator thread with one worker thread for each stage (the `vapor-coordinate` skill, in T3 Code). The adversarial review of a pull request runs on a model family other than the one that wrote the change.
-- CI runs only what a change touches: a change to documents runs the text checks, a change to the Mac app runs the macOS jobs, and any other change runs everything. `./scripts/lint.sh docs` runs the text checks alone.
+- CI runs only what a change touches: a change to documents runs the text checks, a change to the app of one system runs the jobs of that system, and a change to the core runs everything. `./scripts/lint.sh docs` runs the text checks alone.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

@@ -46,7 +46,8 @@ reads the changed files and prints one mode for the job:
 | Changed files | Mode of each job |
 |---|---|
 | Any file of the core: `core/`, `tools/`, `scripts/`, `.github/`, the Cargo and toolchain files, and every path that the script does not name | `full` in all nine jobs |
-| The Mac app only: `apps/macos/`, `assets/`, `tools/vm/driver/`. Everything in the targets of the app counts, Markdown too: the build reads its resources. | `full` in the three macOS jobs; `docs` in `lint (ubuntu-latest)`; `skip` in the other five |
+| The app of one system only. macOS: `apps/macos/`, `assets/macos/`, `tools/vm/driver/` (everything in the targets of the app counts, Markdown too: the build reads its resources). Windows: `apps/windows/`, `assets/windows/`. Linux: `apps/linux/`, `assets/linux/`. | `full` in the three jobs of that system; `docs` in `lint (ubuntu-latest)` when it does not run in full; `skip` in the others |
+| What the apps share: every other file under `assets/`, the locale catalogs among them | `full` in the jobs of each system that has an app under `apps/`, which is macOS today |
 | Documents only: Markdown outside those targets, `docs/`, `.agents/`, `.claude/`, `LICENSE` | `docs` in `lint (ubuntu-latest)`; `skip` in the other eight |
 
 - `full` runs every step. `docs` runs the text checks of lint
@@ -74,6 +75,10 @@ reads the changed files and prints one mode for the job:
   the old name is gone.
 - A Markdown file that a build or a test starts to read is no longer
   a document. Name it in `scripts/scope.sh` in the same change.
+- The app of one system is built by the jobs of that system only, and
+  the core runs on every system. So the daemon, the CLI, the platform
+  layer, and anything else that the systems share always run
+  everything.
 - A new top-level path is `core` until `scripts/scope.sh` names it.
   `scripts/tests/scope.sh` holds the cases, and Tier 1 runs it.
 

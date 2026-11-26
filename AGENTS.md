@@ -758,10 +758,11 @@ If a test's failure mode is "I typo'd a default value", skip it.
   guest. Contract in §9.9; procedure in the `vapor-vm` skill.
 
 A CI job runs only what a change touches (owner, 2026-11-26). A change
-to documents runs the text checks of lint, a change to the Mac app
-runs the macOS jobs, and any other change runs everything. A release
-runs everything. Each required check still reports on every PR
-(`scripts/scope.sh`, `docs/ci/overview.md`).
+to documents runs the text checks of lint. A change to the app of one
+system runs the jobs of that system: macOS, Windows, or Linux. A
+change to the core, the CLI, or anything that the systems share runs
+everything, and so does a release. Each required check still reports
+on every PR (`scripts/scope.sh`, `docs/ci/overview.md`).
 
 ### 9.6) Flaky-test policy
 
