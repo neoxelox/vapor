@@ -1,6 +1,6 @@
 ---
 name: vapor-pr
-description: Takes the current branch to a merge-ready Vapor pull request (one squashed commit, a rebase on the latest main with an overlap analysis, the validation ladder, the push, the PR description template and label, then the CI watch and one adversarial review by the agent's own subagents at the same time, triage of every finding, and the readiness report). Use when the owner asks to open, update, or rebase a pull request, to check its CI or conflicts, to answer a review comment, or to judge whether a branch is ready to merge.
+description: Takes the current branch to a merge-ready Vapor pull request (one squashed commit, a rebase on the latest main with an overlap analysis, the validation ladder, the push, the PR description template and label, then the CI watch and one adversarial review by reviewers on another model family at the same time, triage of every finding, and the readiness report). Use when the owner asks to open, update, or rebase a pull request, to check its CI or conflicts, to answer a review comment, or to judge whether a branch is ready to merge.
 license: GPL-3.0-only
 ---
 
@@ -17,7 +17,9 @@ on main", "is it ready"), after confirming the earlier ones still hold.
 
 - Open a PR only when the owner asks. The request covers this branch's
   pushes (the first push, the fix commits, a rebase onto a moved
-  `main`), nothing else, and never `main` (`AGENTS.md` §10).
+  `main`), nothing else, and never `main` (`AGENTS.md` §10). For a
+  worker of a coordinator, the request is the owner's approval of the
+  coordinator's plan (`vapor-coordinate`).
 - Never commit, rebase, or push on `main`. Never `git switch main`:
   another worktree has it checked out. Use `git fetch origin main` and
   compare against `origin/main`.
@@ -216,7 +218,30 @@ merges through the admin bypass (`docs/ci/required-checks.md`).
 
 ## 5. Adversarial review
 
-One pass per PR, by your own subagents, read only, while CI runs.
+One pass per PR, by reviewers that you start and brief, read only,
+while CI runs.
+
+**Model.** A reviewer comes from the model family that did not write
+the change, so that the review is not biased towards its implementer
+(`AGENTS.md` §8.12): the latest Gemini Neon when you run on Claude,
+the latest Claude Fable or Claude Opus when you run on Gemini.
+
+- In T3 Code, start each reviewer with `delegate_task`: `role:
+  "review"`, the brief as `task`, and `target: {providerInstanceId,
+  model, options}`. `orchestrator_capabilities` lists the instances,
+  the model ids, and the thinking levels of each model. Use only an
+  instance whose display name starts with `Personal`. With the default
+  `shared` isolation the reviewer reads this worktree. Its result
+  returns to your thread.
+- Give the reviewer the thinking level `xhigh`, or the highest level
+  that its model lists when the model has no `xhigh`. With no
+  `options` it runs at the default level of its model, which is lower.
+- Where no such tool exists, or the other family cannot run (no usage
+  left, a provider error), your own subagents review. In T3 Code,
+  check first that your own thread runs on a `Personal` instance
+  (`t3_thread_configure({})`). If it does not, start no reviewer and
+  tell the owner.
+- The report names the model that reviewed.
 
 **Reviewers.** One per coherent area of the diff, three at most,
 because large parallel agent runs reach usage limits. A small diff
@@ -266,10 +291,11 @@ Verify each fix yourself with `vapor-validate`.
 
 **Other comments.** No external AI reviewer runs on this repository,
 and none is to be added (owner, 2026-11-14): it sees the diff without
-the task or the decisions. Never ask one for a review. If a bot or an
-AI comments anyway, ignore it (no answer, no fix, no resolved thread)
-and name it in the report. Answer every human comment in its thread,
-and leave the thread for the human to resolve.
+the task or the decisions. A reviewer that you start with the brief
+above is your own, on any model. Never ask an external one for a
+review. If a bot or an AI comments anyway, ignore it (no answer, no
+fix, no resolved thread) and name it in the report. Answer every human
+comment in its thread, and leave the thread for the human to resolve.
 
 ## 6. Fix, push, repeat
 
@@ -296,9 +322,9 @@ answered. In Simplified Technical English (`AGENTS.md` §8.11):
 - the main commits integrated and how each conflict was resolved, or
   "no overlap";
 - each check and its result;
-- the reviewers and their areas, and each finding with its verdict
-  (fixed, declined, out of scope) and where the fix or the evidence
-  is;
+- the reviewers, their model, and their areas, and each finding with
+  its verdict (fixed, declined, out of scope) and where the fix or the
+  evidence is;
 - each human comment and its answer;
 - for UI changes, the Tier VM verdicts, the screenshots, and the list
   of what the owner judges;

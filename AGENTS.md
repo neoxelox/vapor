@@ -585,6 +585,41 @@ Commit messages, code comments, `CHANGELOG.md`, the documents under
 `docs/`, this file, and the skills follow `unslop` and stay short and
 plain. Per-document rules: the `vapor-docs` skill.
 
+## 8.12) Agent providers and models
+
+Vapor is a personal project of its owner. A coordinator uses the
+owner's personal provider accounts only, for itself and for everything
+that it starts (owner, 2026-11-26). Every other agent follows the same
+rule when it chooses a provider or a model for a delegated task or a
+reviewer.
+
+- In T3 Code, use only a provider instance whose display name starts
+  with `Personal`. Never start work on another instance, whatever
+  model it offers. When no personal instance can run the work, say so
+  and stop.
+- Implementation runs on the latest Claude Fable or Claude Opus model.
+  When a model has no usage left, the work moves to the first of
+  these that can run: the same Claude model on another personal
+  instance that lists it, the other one of the two Claude models, the
+  latest Gemini Neon model (owner, 2026-11-26).
+- The adversarial review of a pull request (§10) runs on the latest
+  Gemini Neon model for now. Claude writes the changes, and a review
+  by the same model family shares its blind spots. A change that
+  Gemini wrote gets its review from Claude. Where an agent cannot
+  start a reviewer of the other family, its own subagents review, and
+  the report names the model that reviewed (owner, 2026-11-26).
+- A worker thread or a reviewer that an agent starts gets its thinking
+  level in the call: `xhigh`, or the highest level that its model
+  lists when the model has no `xhigh` (owner, 2026-11-26). With no
+  level in the call, it starts at the default of the model, which is
+  lower.
+- "Latest" is the highest version of the family that the provider
+  lists at that time. Model ids change, so an agent reads them from
+  that list and never from memory.
+
+How a coordinator applies this to its workers: the `vapor-coordinate`
+skill. How a pull request gets its reviewers: the `vapor-pr` skill.
+
 ## 9) Required test matrix
 
 Testing is a non-negotiable part of every change. Vapor is coded
@@ -875,7 +910,10 @@ The invariants behind them:
   first push, the fix commits, a rebase onto a moved `main`) and
   nothing else. An explicit release request counts as asking for the
   one push the release flow requires; it does not authorize any other
-  push.
+  push. The owner's approval of a coordinator's plan
+  (`vapor-coordinate`) asks for one PR for each stage of that project,
+  the stages that the coordinator adds later included, and for
+  nothing else (owner, 2026-11-26).
 - Never commit, rebase, or push on `main` outside the release flow.
   The release flow puts one commit there, the release-prep commit,
   with its tag. A fix that the release gate finds goes through a pull
@@ -892,14 +930,19 @@ The invariants behind them:
   and a video when the change moves on the screen, so the reviewer
   sees what changed. Both are optional, and a picture shows a guest
   only, never a contributor's machine (owner, 2026-11-21).
-- Every PR gets one adversarial review by the agent's own subagents
-  (owner, 2026-11-14). It starts the moment the PR opens and runs
-  while CI runs, so it adds no time to the wait. One pass; the agent
-  verifies the fixes itself.
+- Every PR gets one adversarial review by reviewers that the agent
+  starts and briefs (owner, 2026-11-14). It starts the moment the PR
+  opens and runs while CI runs, so it adds no time to the wait. One
+  pass; the agent verifies the fixes itself. For now the reviewers
+  run on the latest Gemini Neon model, so that a review is not always
+  biased towards Claude, which implements (owner, 2026-11-26). The
+  other cases are in §8.12.
 - No external AI reviewer runs on this repository, and none is to be
   added (owner, 2026-11-14). Such a reviewer sees the diff without the
-  task or the decisions. If one comments on a PR anyway, it gets no
-  answer and no fix. Human comments get an answer.
+  task or the decisions. A reviewer that the agent starts with a brief
+  is the agent's own, on any model. If an external one comments on a
+  PR anyway, it gets no answer and no fix. Human comments get an
+  answer.
 - Non-trivial feature/logic changes update the required documentation
   in the same change set, and add to `CHANGELOG.md` `Unreleased` before
   the commit: one line for each pull request, in words a user can
@@ -941,10 +984,16 @@ for what is already granted nor acts on what is not.
   diagnose a failure the owner reported (`vapor-debug`); and, on a PR
   the owner asked for, push to its branch (the fix commits, a rebase
   onto a moved `main`), answer human comments, and run the adversarial
-  review.
+  review. A coordinator that the owner started (`vapor-coordinate`)
+  also starts, steers, and stops the worker threads of its plan, after
+  the owner approved the plan. A worker of that plan pushes the branch
+  of its stage and opens its PR, also for a stage that the coordinator
+  added later (owner, 2026-11-26). The coordinator keeps its files
+  under `~/.coordinator/`.
 - Only when the owner asks for that specific action: push a branch,
-  open a PR, cut or rehearse a release, use a cloud account other
-  than the dedicated test account,
+  open a PR (the approval of a coordinator's plan asks for those of
+  its stages, §10), cut or rehearse a release, use a cloud account
+  other than the dedicated test account,
   install or remove Tart (a removal with `HOMEBREW_NO_AUTOREMOVE=1`,
   so Homebrew removes nothing else), pull the guest image
   (`./scripts/vm.sh --setup`), change repository settings, release
@@ -952,9 +1001,11 @@ for what is already granted nor acts on what is not.
 - Never: merge a PR, push to `main` outside the release flow, launch a
   packaged app on the host (inside a Tier VM guest is that tier's job),
   run `./scripts/e2e.sh --full` on a contributor machine,
-  write to `~/.vapor` or run a test or a reproduction against it, or
+  write to `~/.vapor` or run a test or a reproduction against it,
   use the network in a test (a Drive check with the dedicated test
-  account, above, is the one exception).
+  account, above, is the one exception), or run agent work on a
+  provider account that is not one of the owner's personal ones
+  (§8.12).
 
 ## 11) Definition of done
 
@@ -1014,4 +1065,5 @@ carries its own trigger conditions in its description.
 | `vapor-docs` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
 | `vapor-commit` | Creating commits. |
 | `vapor-pr` | Opening, updating, or rebasing a pull request; watching its CI and conflicts; the adversarial review; answering a review comment; judging merge readiness. |
+| `vapor-coordinate` | The owner asks to coordinate a project, to act as a coordinator, or to run work as parallel threads or stages in T3 Code. |
 | `vapor-release` | The owner asks to cut or rehearse a release, or `release.yml` changes. |

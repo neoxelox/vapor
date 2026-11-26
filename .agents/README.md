@@ -28,6 +28,7 @@ expects as a symlink, so there is one source of truth.
 | `vapor-docs` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
 | `vapor-commit` | Creating commits. |
 | `vapor-pr` | Opening, updating, or rebasing a pull request; watching its CI and conflicts; the adversarial review; answering a review comment; judging merge readiness. |
+| `vapor-coordinate` | The owner asks to coordinate a project, to act as a coordinator, or to run work as parallel threads or stages in T3 Code. |
 | `vapor-release` | The owner asks to cut or rehearse a release, or `release.yml` changes. |
 
 ## Adding a skill
